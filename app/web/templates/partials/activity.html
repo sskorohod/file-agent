@@ -1,0 +1,28 @@
+{# Activity feed — glassmorphism style #}
+{% if activity %}
+{% for a in activity %}
+<div class="flex items-center justify-between group cursor-pointer {% if loop.last %}opacity-50{% endif %}">
+  <div class="flex items-center gap-3">
+    {% if a.type == 'upload' %}
+    <div class="p-2 bg-green-500/10 rounded-lg text-green-400">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+    </div>
+    {% elif a.source == 'telegram' %}
+    <div class="p-2 bg-blue-500/10 rounded-lg text-blue-400">
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.14.14 0 00-.07-.2c-.08-.06-.19-.04-.27-.02-.12.03-1.99 1.27-5.62 3.72-.53.36-1.01.54-1.44.53-.47-.01-1.38-.27-2.06-.49-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.74 4-1.73 6.67-2.88 8.02-3.45 3.81-1.6 4.6-1.88 5.12-1.89.11 0 .37.03.54.17.14.12.18.28.2.47-.01.06.01.24 0 .37z"/></svg>
+    </div>
+    {% else %}
+    <div class="p-2 bg-blue-500/10 rounded-lg text-blue-400">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    {% endif %}
+    <span class="text-sm text-gray-300 group-hover:text-white transition-colors truncate max-w-[200px]">{{ a.text }}</span>
+  </div>
+  <span class="text-xs text-gray-600 shrink-0 ml-2">{{ a.time[11:16] if a.time|length > 16 else '' }}</span>
+</div>
+{% endfor %}
+{% else %}
+<div class="text-center py-8">
+  <p class="text-xs text-gray-500">No activity yet</p>
+</div>
+{% endif %}

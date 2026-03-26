@@ -1,0 +1,197 @@
+{% extends "layout.html" %}
+{% block title %}Files — FileAgent{% endblock %}
+{% block content %}
+
+{# ── Header ── #}
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-lg sm:text-xl font-bold text-txt">Files</h1>
+    <p class="text-xs sm:text-sm text-txt-3 mt-0.5">{{ total }} file{{ 's' if total != 1 }}</p>
+  </div>
+  <form method="POST" action="/files/reclassify-uncategorized">
+    <button type="submit" class="btn-primary btn-sm touch-target"
+            onclick="return confirm('Reclassify all uncategorized files?')">
+      <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115.36-6.36L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15.36 6.36L3 16"/></svg>
+      <span class="hidden sm:inline">Reclassify</span>
+    </button>
+  </form>
+</div>
+
+{# ── Filters ── #}
+<div class="card mb-4 !p-3">
+  <div class="flex gap-2">
+    <div class="relative flex-1">
+      <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-txt-3 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      <input type="text" class="input !py-2.5 pl-9" placeholder="Search..." value="{{ q }}" name="q"
+             hx-get="/files" hx-trigger="keyup changed delay:300ms" hx-target="body" hx-push-url="true">
+    </div>
+    <select name="category" class="input !w-auto !min-w-[120px] sm:!min-w-[160px]"
+            hx-get="/files" hx-trigger="change" hx-target="body" hx-push-url="true">
+      <option value="">All</option>
+      {% for cat in categories %}
+      <option value="{{ cat }}" {% if category == cat %}selected{% endif %}>{{ cat }}</option>
+      {% endfor %}
+    </select>
+  </div>
+</div>
+
+{% if files %}
+
+{# ── Mobile: Card List (visible < lg) ── #}
+<div class="lg:hidden space-y-2">
+  {% for f in files %}
+  {% set ext = f.original_name.rsplit('.', 1)[-1].lower() if '.' in f.original_name else '' %}
+  <a href="/files/{{ f.id }}" class="card !p-3 flex items-start gap-3 no-underline active:scale-[.99] transition-transform">
+    {# File icon #}
+    <div class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5
+      {% if ext == 'pdf' %}bg-err-bg
+      {% elif ext in ('jpg','jpeg','png','gif','webp','svg','heic') %}bg-ok-bg
+      {% elif ext in ('doc','docx') %}bg-info-bg
+      {% elif ext in ('xls','xlsx','csv') %}bg-warn-bg
+      {% else %}bg-surface-3{% endif %}">
+      {% if ext == 'pdf' %}
+      <span class="text-[10px] font-bold text-err-text">PDF</span>
+      {% elif ext in ('jpg','jpeg','png','gif','webp','svg','heic') %}
+      <svg class="w-4.5 h-4.5 text-ok-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+      {% elif ext in ('doc','docx') %}
+      <span class="text-[10px] font-bold text-info-text">DOC</span>
+      {% else %}
+      <svg class="w-4.5 h-4.5 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/></svg>
+      {% endif %}
+    </div>
+    {# Content #}
+    <div class="flex-1 min-w-0">
+      <div class="flex items-start justify-between gap-2">
+        <p class="text-sm font-medium text-txt truncate">{{ f.original_name }}</p>
+        <span class="text-[10px] text-txt-3 shrink-0 tabular-nums">{{ f.created_at[:10] }}</span>
+      </div>
+      {% if f.summary %}
+      <p class="text-[11px] text-txt-3 line-clamp-2 mt-0.5">{{ f.summary }}</p>
+      {% endif %}
+      <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+        <span class="badge badge-accent">{{ f.category or 'uncategorized' }}</span>
+        {% if f.document_type %}
+        <span class="text-[10px] text-txt-3">{{ f.document_type|replace('_', ' ') }}</span>
+        {% endif %}
+        <span class="text-[10px] text-txt-3 ml-auto font-mono">
+          {% if f.size_bytes >= 1048576 %}{{ "%.1f"|format(f.size_bytes / 1048576) }}MB{% else %}{{ "%.0f"|format(f.size_bytes / 1024) }}KB{% endif %}
+        </span>
+      </div>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+
+{# ── Desktop: Table (visible >= lg) ── #}
+<div class="hidden lg:block card p-0">
+  <div class="overflow-x-auto">
+    <table class="w-full">
+      <thead>
+        <tr class="border-b border-border">
+          <th class="table-header">File</th>
+          <th class="table-header">Category</th>
+          <th class="table-header">Size</th>
+          <th class="table-header">Date</th>
+          <th class="table-header text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in files %}
+        {% set ext = f.original_name.rsplit('.', 1)[-1].lower() if '.' in f.original_name else '' %}
+        <tr class="table-row">
+          <td class="table-cell">
+            <div class="flex items-center gap-3">
+              <div class="w-8 h-8 rounded-lg flex items-center justify-center shrink-0
+                {% if ext == 'pdf' %}bg-err-bg text-err-text
+                {% elif ext in ('jpg','jpeg','png','gif','webp','svg','heic') %}bg-ok-bg text-ok-text
+                {% elif ext in ('doc','docx') %}bg-info-bg text-info-text
+                {% elif ext in ('xls','xlsx','csv') %}bg-warn-bg text-warn-text
+                {% else %}bg-surface-3 text-txt-3{% endif %}">
+                {% if ext == 'pdf' %}
+                <span class="text-[9px] font-bold">PDF</span>
+                {% elif ext in ('jpg','jpeg','png','gif','webp','svg','heic') %}
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                {% elif ext in ('doc','docx') %}
+                <span class="text-[9px] font-bold">DOC</span>
+                {% else %}
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/></svg>
+                {% endif %}
+              </div>
+              <div class="min-w-0">
+                <a href="/files/{{ f.id }}" class="text-sm font-medium text-txt hover:text-accent-2 transition-colors truncate block max-w-[350px]">{{ f.original_name }}</a>
+                {% if f.summary %}
+                <p class="text-[11px] text-txt-3 truncate max-w-[350px] mt-0.5">{{ f.summary }}</p>
+                {% endif %}
+              </div>
+            </div>
+          </td>
+          <td class="table-cell">
+            <span class="badge badge-accent">{{ f.category or 'uncategorized' }}</span>
+            {% if f.document_type %}
+            <div class="text-[10px] text-txt-3 mt-1">{{ f.document_type|replace('_', ' ') }}</div>
+            {% endif %}
+          </td>
+          <td class="table-cell font-mono text-xs">
+            {% if f.size_bytes >= 1048576 %}{{ "%.1f"|format(f.size_bytes / 1048576) }} MB{% else %}{{ "%.0f"|format(f.size_bytes / 1024) }} KB{% endif %}
+          </td>
+          <td class="table-cell text-xs whitespace-nowrap">{{ f.created_at[:10] }}</td>
+          <td class="table-cell text-right">
+            <div class="flex items-center justify-end gap-1">
+              <a href="/files/{{ f.id }}/download" class="btn-ghost btn-sm" title="Download">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              </a>
+              <button class="btn-ghost btn-sm text-err-text hover:bg-err-bg" title="Delete"
+                      hx-post="/files/{{ f.id }}/delete"
+                      hx-confirm="Delete this file?"
+                      hx-on::after-request="if(event.detail.successful) window.location.reload()">
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+              </button>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{# ── Pagination ── #}
+{% if total_pages > 1 %}
+<div class="flex items-center justify-between mt-3 px-1">
+  <span class="text-xs text-txt-3">
+    {{ (current_page - 1) * limit + 1 }}–{{ [current_page * limit, total]|min }} of {{ total }}
+  </span>
+  <div class="flex items-center gap-1">
+    {% if current_page > 1 %}
+    <a href="/files?page={{ current_page - 1 }}{% if category %}&category={{ category }}{% endif %}{% if q %}&q={{ q }}{% endif %}"
+       class="btn-ghost btn-sm touch-target">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+    </a>
+    {% endif %}
+    <span class="text-xs text-txt-3 px-2 tabular-nums">{{ current_page }}/{{ total_pages }}</span>
+    {% if current_page < total_pages %}
+    <a href="/files?page={{ current_page + 1 }}{% if category %}&category={{ category }}{% endif %}{% if q %}&q={{ q }}{% endif %}"
+       class="btn-ghost btn-sm touch-target">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+    </a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% else %}
+{# ── Empty state ── #}
+<div class="card">
+  <div class="flex flex-col items-center justify-center py-12 px-4">
+    <div class="w-14 h-14 rounded-2xl bg-surface-3 flex items-center justify-center mb-4">
+      <svg class="w-7 h-7 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+    </div>
+    <p class="text-sm font-medium text-txt mb-1">No files found</p>
+    <p class="text-xs text-txt-3 text-center max-w-[240px]">
+      {% if q %}No results for "{{ q }}"{% elif category %}No files in "{{ category }}"{% else %}Upload files via Telegram or API to get started{% endif %}
+    </p>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

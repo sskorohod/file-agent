@@ -1,0 +1,61 @@
+{# LLM usage — glassmorphism style with gradient bars #}
+
+{# Session stats row #}
+<div class="grid grid-cols-3 gap-3 mb-6 sm:mb-8">
+  <div class="bg-white/5 p-3 rounded-xl border border-white/5">
+    <p class="text-[10px] uppercase text-gray-500 mb-1">Session</p>
+    <div class="flex items-baseline gap-1">
+      {% if is_oauth %}
+      <span class="text-xl font-bold">{{ llm_session.get('total_calls', 0) }}</span>
+      <span class="text-[10px] text-gray-600">calls</span>
+      {% else %}
+      <span class="text-xl font-bold">${{ "%.4f"|format(llm_session.get('total_cost_usd', 0)) }}</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="bg-white/5 p-3 rounded-xl border border-white/5">
+    <p class="text-[10px] uppercase text-gray-500 mb-1">All Time</p>
+    <div class="flex items-baseline gap-1">
+      {% if is_oauth %}
+      <span class="text-xl font-bold">{{ llm_all.get('total_calls', 0) }}</span>
+      <span class="text-[10px] text-gray-600">calls</span>
+      {% else %}
+      <span class="text-xl font-bold">${{ "%.4f"|format(llm_all.get('total_cost_usd', 0)) }}</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="bg-white/5 p-3 rounded-xl border border-white/5">
+    <p class="text-[10px] uppercase text-gray-500 mb-1">Today</p>
+    <div class="flex items-baseline gap-1">
+      {% if is_oauth %}
+      <span class="text-xl font-bold">{{ llm_today.get('total_calls', 0) }}</span>
+      <span class="text-[10px] text-gray-600">calls</span>
+      {% else %}
+      <span class="text-xl font-bold">${{ "%.4f"|format(llm_today.get('total_cost_usd', 0)) }}</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{# Models breakdown with gradient bars #}
+{% set roles = llm_all.get('by_role', []) %}
+{% if roles %}
+{% set max_val = roles|map(attribute='calls')|max if roles else 1 %}
+<div class="space-y-4">
+  {% set role_gradients = {'classification': 'progress-purple', 'extraction': 'progress-blue', 'search': 'progress-green', 'whisper': 'progress-orange', 'analysis': 'progress-purple'} %}
+  {% for r in roles %}
+  <div class="space-y-1">
+    <div class="flex justify-between text-xs">
+      <span class="font-medium text-gray-300">{{ r.role }}</span>
+      <span class="text-gray-500">{{ r.calls }} calls{% if not is_oauth and r.cost_usd > 0.0001 %} · ${{ "%.4f"|format(r.cost_usd) }}{% endif %}</span>
+    </div>
+    <div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+      <div class="{{ role_gradients.get(r.role, 'progress-purple') }} h-full rounded-full transition-all duration-500" style="width:{{ (r.calls / max_val * 100)|int }}%"></div>
+    </div>
+    <p class="text-[10px] text-gray-600">{{ r.model.split('/')[-1][:30] }}</p>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="text-xs text-gray-500 text-center py-4">No usage data</p>
+{% endif %}

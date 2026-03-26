@@ -1,0 +1,62 @@
+{% extends "layout.html" %}
+{% block title %}Skills — FileAgent{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <h1 class="text-xl font-bold text-txt">Skills</h1>
+    <p class="text-sm text-txt-3 mt-0.5">Classification and routing rules</p>
+  </div>
+  <a href="/skills/TEMPLATE" class="btn-primary">
+    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    New Skill
+  </a>
+</div>
+
+{% if skills %}
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+  {% for s in skills %}
+  <a href="/skills/{{ s.name }}" class="card group hover:border-accent/40 transition-all duration-150 block no-underline">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-sm font-semibold text-txt truncate">{{ s.effective_display_name or s.display_name or s.name }}</h3>
+      {% if s.enabled %}
+      <span class="badge badge-ok flex items-center gap-1.5">
+        <span class="w-1.5 h-1.5 rounded-full bg-ok"></span>ON
+      </span>
+      {% else %}
+      <span class="badge badge-err flex items-center gap-1.5">
+        <span class="w-1.5 h-1.5 rounded-full bg-err"></span>OFF
+      </span>
+      {% endif %}
+    </div>
+
+    <p class="text-xs text-txt-3 leading-relaxed mb-3 line-clamp-2">
+      {{ s.description[:100] }}{% if s.description|length > 100 %}...{% endif %}
+    </p>
+
+    <div class="flex items-center gap-2 flex-wrap">
+      <span class="badge badge-accent">{{ s.category }}</span>
+      {% if s.tags %}
+        {% for tag in s.tags[:3] %}
+        <span class="badge badge-info">{{ tag }}</span>
+        {% endfor %}
+        {% if s.tags|length > 3 %}
+        <span class="text-[10px] text-txt-3">+{{ s.tags|length - 3 }}</span>
+        {% endif %}
+      {% endif %}
+    </div>
+
+    <div class="mt-3 pt-3 border-t border-border flex items-center justify-between">
+      <span class="text-[11px] text-txt-3">{{ s.name }}</span>
+      <svg class="w-4 h-4 text-txt-3 opacity-0 group-hover:opacity-100 transition-opacity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card flex flex-col items-center justify-center py-16 text-center">
+  <svg class="w-12 h-12 text-txt-3 mb-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+  <p class="text-sm text-txt-3 mb-1">No skills found</p>
+  <p class="text-xs text-txt-3">Create a YAML file in the skills/ directory or click "New Skill"</p>
+</div>
+{% endif %}
+{% endblock %}

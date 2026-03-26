@@ -1,0 +1,83 @@
+storage:
+  base_path: ~/ai-agent-files
+  max_file_size_mb: 50
+  allowed_extensions:
+  - .pdf
+  - .png
+  - .jpg
+  - .jpeg
+  - .heic
+  - .docx
+  - .txt
+  - .csv
+  - .xlsx
+telegram:
+  polling_timeout: 30
+  max_file_size_mb: 20
+llm:
+  default_provider: openai
+  models:
+    classification:
+      model: openai/gpt-5.4-mini
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
+      max_tokens: 1024
+      temperature: 0.1
+    extraction:
+      model: openai/gpt-5.4-mini
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
+      max_tokens: 4096
+      temperature: 0.2
+    search:
+      model: openai/gpt-5.1
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
+      max_tokens: 4096
+      temperature: 0.3
+    analysis:
+      model: openai/gpt-5.1
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
+      max_tokens: 4096
+      temperature: 0.1
+  retry:
+    max_attempts: 3
+    backoff_base: 2
+  search_prompt: "You are a document search assistant for a personal archive.\r\n\r\
+    \nRules:\r\n- Find the ONE most relevant document that answers the question\r\n\
+    - Give a FULL, detailed answer about that document\r\n- Include specific details:\
+    \ dates, names, numbers, amounts\r\n- If the document has action items or deadlines\
+    \ — mention them\r\n- Respond in the same language as the question\r\n- Do NOT\
+    \ mention multiple documents — pick the best one"
+  classification_prompt: "You are a document classification system.\r\n\r\nRules:\r\
+    \n- summary: два коротких предложения на русском языке. Только ключевые факты.\r\
+    \n- tags: 2-4 relevant tags, lowercase\r\n- document_type: specific type (e.g.\
+    \ lab_result, invoice, passport)"
+qdrant:
+  host: localhost
+  port: 6333
+  grpc_port: 6334
+  collection_name: file_agent_v2
+  vector_size: 768
+  distance: Cosine
+embedding:
+  provider: gemini
+  model: gemini-embedding-2-preview
+  local_fallback_model: all-MiniLM-L6-v2
+  vector_size: 768
+  chunk_size_words: 400
+  chunk_overlap_words: 50
+  batch_size: 32
+skills:
+  directory: skills/
+  auto_reload: true
+  reload_interval_seconds: 30
+web:
+  host: 0.0.0.0
+  port: 8000
+database:
+  path: data/agent.db
+logging:
+  level: INFO
+  format: '%(asctime)s [%(levelname)s] %(name)s: %(message)s'

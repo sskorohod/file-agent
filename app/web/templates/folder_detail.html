@@ -1,0 +1,102 @@
+{% extends "layout.html" %}
+{% block title %}{{ folder.name if folder else 'Folder' }} — FileAgent{% endblock %}
+{% block content %}
+{% if folder %}
+<div class="mb-6">
+  <a href="/folders" class="inline-flex items-center gap-1.5 text-sm text-txt-3 hover:text-accent-2 transition-colors mb-3">
+    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+    Back to Folders
+  </a>
+  <div class="flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-lg bg-accent-bg flex items-center justify-center shrink-0">
+        <svg class="w-5 h-5 text-accent-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+      </div>
+      <div>
+        <h1 class="text-xl font-bold text-txt">{{ folder.name }}</h1>
+        {% if folder.description %}
+        <p class="text-sm text-txt-3 mt-0.5">{{ folder.description }}</p>
+        {% endif %}
+      </div>
+    </div>
+    <form method="POST" action="/folders/{{ folder.id }}/delete">
+      <button type="submit" class="btn-danger btn-sm" onclick="return confirm('Delete this folder?')">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+        Delete
+      </button>
+    </form>
+  </div>
+</div>
+
+{# Add file form #}
+{% if all_files %}
+<div class="card mb-4">
+  <div class="card-header">Add File</div>
+  <form method="POST" action="/folders/{{ folder.id }}/add-file" class="flex items-end gap-3">
+    <div class="flex-1">
+      <select name="file_id" class="input">
+        {% for f in all_files %}
+        <option value="{{ f.id }}">{{ f.original_name }} ({{ f.category }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button type="submit" class="btn-primary btn-sm shrink-0">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Add
+    </button>
+  </form>
+</div>
+{% endif %}
+
+{# Files table #}
+{% if files %}
+<div class="card overflow-hidden">
+  <div class="card-header">Files in Folder</div>
+  <div class="overflow-x-auto -mx-5 -mb-5">
+    <table class="w-full">
+      <thead>
+        <tr class="border-b border-border">
+          <th class="table-header">File</th>
+          <th class="table-header">Category</th>
+          <th class="table-header">Size</th>
+          <th class="table-header w-16"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in files %}
+        <tr class="table-row">
+          <td class="table-cell">
+            <a href="/files/{{ f.id }}" class="text-sm font-medium text-txt hover:text-accent-2 transition-colors">{{ f.original_name }}</a>
+          </td>
+          <td class="table-cell">
+            <span class="badge badge-accent">{{ f.category }}</span>
+          </td>
+          <td class="table-cell font-mono text-xs text-txt-3">{{ "%.1f"|format(f.size_bytes / 1024) }} KB</td>
+          <td class="table-cell">
+            <form method="POST" action="/folders/{{ folder.id }}/remove-file/{{ f.id }}">
+              <button type="submit" class="btn-ghost btn-sm text-txt-3 hover:text-err" title="Remove from folder">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="card flex flex-col items-center justify-center py-12 text-center">
+  <svg class="w-10 h-10 text-txt-3 mb-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+  <p class="text-sm text-txt-3 mb-1">Folder is empty</p>
+  <p class="text-xs text-txt-3">Use the form above to add files</p>
+</div>
+{% endif %}
+
+{% else %}
+<div class="card flex flex-col items-center justify-center py-16 text-center">
+  <p class="text-sm text-txt-3">Folder not found</p>
+  <a href="/folders" class="text-sm text-accent-2 hover:text-accent mt-2">Back to Folders</a>
+</div>
+{% endif %}
+{% endblock %}

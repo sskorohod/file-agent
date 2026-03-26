@@ -1,0 +1,107 @@
+{% extends "layout.html" %}
+{% block title %}Duplicates — FileAgent{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <h1 class="text-xl font-bold text-txt">Duplicates</h1>
+    <p class="text-sm text-txt-3 mt-0.5">Scan files for semantic similarity</p>
+  </div>
+  <form method="POST" action="/duplicates/scan">
+    <button type="submit" class="btn-primary">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      Scan for Duplicates
+    </button>
+  </form>
+</div>
+
+{% if scanned and not groups %}
+<div class="card flex flex-col items-center justify-center py-12 text-center">
+  <div class="w-12 h-12 rounded-full bg-ok-bg flex items-center justify-center mb-4">
+    <svg class="w-6 h-6 text-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+  </div>
+  <p class="text-sm text-txt-3 mb-1">No duplicates found</p>
+  <p class="text-xs text-txt-3">All files appear to be unique</p>
+</div>
+{% elif groups %}
+<p class="text-sm text-txt-3 mb-4">Found {{ groups|length }} group{{ 's' if groups|length != 1 else '' }} of similar files</p>
+
+{% for group in groups %}
+<div class="card mb-4">
+  <div class="flex items-center justify-between mb-4">
+    <div class="flex items-center gap-3">
+      <h3 class="text-sm font-semibold text-txt">Group {{ loop.index }}</h3>
+      <span class="badge {% if group.score >= 0.98 %}badge-err{% elif group.score >= 0.95 %}badge-warn{% else %}badge-info{% endif %}">
+        {{ "%.0f"|format(group.score * 100) }}% match
+      </span>
+    </div>
+    <span class="text-xs text-txt-3">{{ group.files|length }} files</span>
+  </div>
+
+  <form method="POST" action="/duplicates/resolve">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+      {% for file in group.files %}
+      <label class="relative block rounded-lg border-2 border-border bg-surface-2 p-4 cursor-pointer transition-all hover:border-accent/40 has-[:checked]:border-accent has-[:checked]:bg-accent-bg">
+        <input type="radio" name="keep_id" value="{{ file.id }}" {% if loop.first %}checked{% endif %} class="sr-only">
+        <input type="hidden" name="delete_ids" value="{{ file.id }}">
+
+        {# File preview #}
+        {% set mime = file.mime_type or '' %}
+        {% if mime.startswith('image/') %}
+        <div class="bg-bg rounded-lg p-2 mb-3 flex items-center justify-center" style="height: 120px;">
+          <img src="/files/{{ file.id }}/download" alt="{{ file.original_name }}" class="max-w-full max-h-full rounded object-contain">
+        </div>
+        {% elif mime == 'application/pdf' %}
+        <div class="bg-bg rounded-lg p-2 mb-3 flex items-center justify-center" style="height: 120px;">
+          <svg class="w-10 h-10 text-err/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+        </div>
+        {% else %}
+        <div class="bg-bg rounded-lg p-2 mb-3 flex items-center justify-center" style="height: 120px;">
+          <svg class="w-10 h-10 text-txt-3/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+        </div>
+        {% endif %}
+
+        <div class="text-sm font-medium text-txt truncate mb-1" title="{{ file.original_name }}">{{ file.original_name }}</div>
+        <div class="text-xs text-txt-3 mb-1">{{ file.created_at[:16] }}</div>
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-mono text-txt-3">{{ "%.1f"|format(file.size_bytes / 1024) }} KB</span>
+          <span class="badge badge-accent">{{ file.category }}</span>
+        </div>
+
+        {# Selected indicator #}
+        <div class="absolute top-2 right-2 w-5 h-5 rounded-full border-2 border-border bg-surface flex items-center justify-center transition-colors">
+          <svg class="w-3 h-3 text-accent hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+
+        {% if loop.first %}
+        <div class="absolute top-2 left-2">
+          <span class="badge badge-ok text-[10px]">Newest</span>
+        </div>
+        {% endif %}
+      </label>
+      {% endfor %}
+    </div>
+
+    <div class="flex items-center gap-3 pt-3 border-t border-border">
+      <button type="submit" class="btn-danger btn-sm" onclick="return confirm('Delete all files except the selected one?')">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+        Delete Others
+      </button>
+      <span class="text-xs text-txt-3">Keep the selected file, remove the rest</span>
+    </div>
+  </form>
+</div>
+{% endfor %}
+
+{% else %}
+<div class="card flex flex-col items-center justify-center py-16 text-center">
+  <svg class="w-12 h-12 text-txt-3 mb-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="6" width="14" height="14" rx="2"/><rect x="8" y="2" width="14" height="14" rx="2"/></svg>
+  <p class="text-sm text-txt-3 mb-1">Duplicate scanner</p>
+  <p class="text-xs text-txt-3">Click "Scan for Duplicates" to find semantically similar files</p>
+</div>
+{% endif %}
+
+<style>
+  label:has(input[type="radio"]:checked) .hidden { display: block; }
+  label:has(input[type="radio"]:checked) > .absolute:first-of-type { border-color: rgb(124, 58, 237); background: rgb(124, 58, 237); }
+</style>
+{% endblock %}

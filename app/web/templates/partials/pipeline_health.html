@@ -1,0 +1,16 @@
+{# Pipeline steps — compact dot list #}
+{% if pipeline_health %}
+<div class="space-y-2">
+  {% for p in pipeline_health %}
+  <div class="flex justify-between items-center text-[11px]">
+    <div class="flex items-center gap-2">
+      <span class="w-1.5 h-1.5 rounded-full shrink-0 {% if p.get('status') == 'success' %}bg-green-500/60{% elif p.get('status') == 'error' %}bg-red-500{% else %}bg-gray-600{% endif %}"></span>
+      <span class="text-gray-400">{{ p.get('step', '?') }}</span>
+    </div>
+    <span class="font-mono text-gray-600">{{ p.get('duration_ms', '') }}ms</span>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="text-[11px] text-gray-600 text-center py-2">No pipeline activity</p>
+{% endif %}

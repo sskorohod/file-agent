@@ -1,0 +1,39 @@
+# AI File Agent — Skill Template
+# Copy this file and rename to <your_skill>.yaml
+# Place in the skills/ directory — it will be auto-loaded
+
+name: my_skill                    # unique identifier (a-z, 0-9, underscore)
+display_name: "My Skill"          # human-readable name
+description: "What this skill handles"
+category: my_category             # storage folder name
+priority: 5                       # higher = checked first (0-100)
+enabled: true
+tags:
+  - tag1
+  - tag2
+
+routing_rules:
+  keywords:                       # words that indicate this doc type
+    - keyword1
+    - keyword2
+  patterns:                       # regex patterns
+    - '\bPATTERN\d+\b'
+  mime_types:                     # restrict to specific file types
+    - application/pdf
+    - image/jpeg
+  min_confidence: 0.3             # minimum match score (0.0-1.0)
+
+naming_template: "{date}_{document_type}"
+# Available variables: {date}, {document_type}, {source}, plus any extraction field names
+
+extraction:
+  fields:
+    - name: document_type
+      description: "Type of document"
+      required: true
+    - name: key_field
+      description: "Description of what to extract"
+      required: false
+  custom_prompt: >
+    Additional instructions for the LLM when extracting from this doc type.
+    Be specific about what fields matter and any special handling.

@@ -1,0 +1,187 @@
+{% extends "layout.html" %}
+{% block title %}Analytics — AI File Agent{% endblock %}
+{% block content %}
+
+{# ── Page header ── #}
+<div class="mb-6">
+  <h1 class="text-2xl font-bold text-txt mb-1">Analytics</h1>
+  <p class="text-sm text-txt-3">Analyze trends and extract insights from your documents</p>
+</div>
+
+{# ── Search form ── #}
+<div class="card mb-6">
+  <form action="/analytics" method="get" class="flex gap-3 items-center">
+    <div class="flex-1 relative">
+      <div class="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+        <svg class="w-4 h-4 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/>
+        </svg>
+      </div>
+      <input
+        type="text"
+        name="q"
+        value="{{ q or '' }}"
+        placeholder="e.g. Analyze hemoglobin levels over the past year..."
+        autofocus
+        class="input pl-10"
+      >
+    </div>
+    <button type="submit" class="btn-primary shrink-0">
+      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+      Analyze
+    </button>
+  </form>
+</div>
+
+{% if result %}
+
+  {# ── Text summary ── #}
+  <div class="card mb-6">
+    <div class="card-header">Analysis Summary</div>
+    <div class="text-sm text-txt leading-relaxed whitespace-pre-wrap">{{ result.text_summary }}</div>
+  </div>
+
+  {# ── Chart ── #}
+  {% if chart_b64 %}
+  <div class="card mb-6">
+    <div class="card-header">Chart</div>
+    <div class="flex justify-center p-2">
+      <img
+        src="data:image/png;base64,{{ chart_b64 }}"
+        alt="Analytics chart"
+        class="max-w-full lg:max-w-3xl rounded-lg border border-border"
+      >
+    </div>
+  </div>
+  {% endif %}
+
+  {# ── Data points — grouped by metric ── #}
+  {% if result.data_points %}
+  <div class="card mb-6">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="card-header mb-0">Данные из документов</h3>
+      <button onclick="document.getElementById('raw-data').classList.toggle('hidden')" class="btn-ghost btn-sm text-[10px]">
+        Таблица ({{ result.data_points|length }})
+      </button>
+    </div>
+
+    {# Grouped metric cards #}
+    {% set ns = namespace(metrics={}) %}
+    {% for dp in result.data_points %}
+      {% if dp.metric not in ns.metrics %}
+        {% set _ = ns.metrics.update({dp.metric: []}) %}
+      {% endif %}
+      {% set _ = ns.metrics[dp.metric].append(dp) %}
+    {% endfor %}
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+      {% for metric, points in ns.metrics.items() %}
+      {% set last = points[-1] %}
+      {% set is_bad = (last.reference_min is not none and last.value < last.reference_min) or (last.reference_max is not none and last.value > last.reference_max) %}
+      <div class="bg-bg-2 rounded-lg p-4 border border-white/5">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-semibold text-gray-300">{{ metric }}</span>
+          <span class="text-[10px] text-gray-500">{{ points|length }} измер.</span>
+        </div>
+        <div class="flex items-baseline gap-2">
+          <span class="text-xl font-bold {% if is_bad %}text-err-text{% else %}text-ok-text{% endif %}">
+            {{ "%.1f"|format(last.value) }}
+          </span>
+          <span class="text-xs text-gray-500">{{ last.unit }}</span>
+        </div>
+        {% if last.reference_min is not none or last.reference_max is not none %}
+        <div class="text-[10px] text-gray-500 mt-1">
+          Норма:
+          {% if last.reference_min is not none and last.reference_max is not none %}{{ last.reference_min }}–{{ last.reference_max }}
+          {% elif last.reference_min is not none %}>{{ last.reference_min }}
+          {% elif last.reference_max is not none %}<{{ last.reference_max }}{% endif %}
+          {{ last.unit }}
+        </div>
+        {% endif %}
+        {% if points|length > 1 %}
+        <div class="text-[10px] mt-1 {% if points[-1].value > points[0].value %}text-warn-text{% else %}text-info{% endif %}">
+          {{ points[0].date }} → {{ points[-1].date }}:
+          {{ "%.1f"|format(points[0].value) }} → {{ "%.1f"|format(points[-1].value) }}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+
+    {# Collapsible raw table #}
+    <div id="raw-data" class="hidden">
+      <div class="overflow-x-auto rounded-lg border border-border">
+        <table class="w-full">
+          <thead class="bg-surface-2">
+            <tr><th class="table-header">Дата</th><th class="table-header">Показатель</th><th class="table-header">Значение</th><th class="table-header">Норма</th><th class="table-header">Документ</th></tr>
+          </thead>
+          <tbody>
+            {% for dp in result.data_points %}
+            <tr class="table-row">
+              <td class="table-cell font-mono text-xs">{{ dp.date }}</td>
+              <td class="table-cell text-xs">{{ dp.metric }}</td>
+              <td class="table-cell font-mono font-semibold text-xs
+                {%- if dp.reference_min is not none and dp.value < dp.reference_min %} text-err-text
+                {%- elif dp.reference_max is not none and dp.value > dp.reference_max %} text-err-text
+                {%- else %} text-ok-text{% endif %}">
+                {{ "%.1f"|format(dp.value) }} {{ dp.unit }}
+              </td>
+              <td class="table-cell text-xs text-gray-500">
+                {% if dp.reference_min is not none and dp.reference_max is not none %}{{ dp.reference_min }}–{{ dp.reference_max }}{% else %}—{% endif %}
+              </td>
+              <td class="table-cell"><a href="/files/{{ dp.file_id }}" class="text-accent-2 text-xs truncate inline-block max-w-[140px]">{{ dp.source_filename }}</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {# ── Source documents ── #}
+  {% if result.file_ids %}
+  <div class="card">
+    <div class="card-header">Source Documents ({{ result.file_ids|length }})</div>
+    <div class="divide-y divide-border">
+      {% for fid, fname in result.file_ids.items() %}
+      <div class="flex items-center justify-between py-3 gap-3">
+        <a href="/files/{{ fid }}" class="text-sm text-txt hover:text-accent-2 transition-colors truncate min-w-0">
+          <span class="inline-flex items-center gap-2">
+            <svg class="w-4 h-4 text-txt-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+            {{ fname }}
+          </span>
+        </a>
+        <a href="/files/{{ fid }}/download" class="btn-secondary btn-sm shrink-0">Download</a>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+{% elif q %}
+  {# ── Error/empty state for failed query ── #}
+  <div class="card flex flex-col items-center justify-center py-12 text-center">
+    <div class="w-12 h-12 rounded-xl bg-surface-3 flex items-center justify-center mb-4">
+      <svg class="w-6 h-6 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><circle cx="12" cy="16" r="0.5" fill="currentColor"/>
+      </svg>
+    </div>
+    <p class="text-sm font-medium text-txt mb-1">Analysis could not be completed</p>
+    <p class="text-xs text-txt-3">No results for "{{ q }}" — try a different question.</p>
+  </div>
+
+{% else %}
+  {# ── Empty state: no query ── #}
+  <div class="flex flex-col items-center justify-center py-20 text-center">
+    <div class="w-16 h-16 rounded-2xl bg-accent-bg flex items-center justify-center mb-5">
+      <svg class="w-8 h-8 text-accent-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/>
+      </svg>
+    </div>
+    <p class="text-lg font-semibold text-txt mb-1">Ask analytics questions about your documents</p>
+    <p class="text-sm text-txt-3 max-w-md">Enter a query above to extract trends, compare metrics, and generate charts from your document collection.</p>
+  </div>
+{% endif %}
+
+{% endblock %}

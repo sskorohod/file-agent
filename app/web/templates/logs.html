@@ -1,0 +1,60 @@
+{% extends "layout.html" %}
+{% block title %}Logs — FileAgent{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <h1 class="text-xl font-bold text-txt">Processing Logs</h1>
+    <p class="text-sm text-txt-3 mt-0.5">Pipeline execution history</p>
+  </div>
+</div>
+
+{# Filter tabs #}
+<div class="flex items-center gap-1 mb-4">
+  <a href="/logs" class="btn-sm {% if not status_filter %}btn-primary{% else %}btn-ghost{% endif %} rounded-lg px-3 py-1.5 text-xs">All</a>
+  <a href="/logs?status=success" class="btn-sm {% if status_filter == 'success' %}btn-primary{% else %}btn-ghost{% endif %} rounded-lg px-3 py-1.5 text-xs">Success</a>
+  <a href="/logs?status=error" class="btn-sm {% if status_filter == 'error' %}btn-primary{% else %}btn-ghost{% endif %} rounded-lg px-3 py-1.5 text-xs">Errors</a>
+</div>
+
+<div class="card p-0 overflow-hidden">
+  {% if logs %}
+  <div class="overflow-x-auto">
+    <table class="w-full">
+      <thead class="bg-surface-2">
+        <tr>
+          <th class="table-header">File</th>
+          <th class="table-header">Step</th>
+          <th class="table-header">Status</th>
+          <th class="table-header">Duration</th>
+          <th class="table-header">Time</th>
+          <th class="table-header">Error</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for l in logs %}
+      <tr class="table-row">
+        <td class="table-cell"><a href="/files/{{ l.file_id }}" class="font-mono text-xs text-accent-2 hover:underline">{{ l.file_id[:8] }}...</a></td>
+        <td class="table-cell font-mono text-xs">{{ l.step }}</td>
+        <td class="table-cell">
+          {% if l.status == 'success' %}<span class="badge badge-ok">OK</span>
+          {% elif l.status == 'error' %}<span class="badge badge-err">ERR</span>
+          {% elif l.status == 'started' %}<span class="badge badge-warn">RUN</span>
+          {% else %}<span class="badge bg-surface-3 text-txt-3">{{ l.status }}</span>{% endif %}
+        </td>
+        <td class="table-cell font-mono text-xs text-txt-3">{{ l.duration_ms if l.duration_ms else '—' }}ms</td>
+        <td class="table-cell text-xs text-txt-3">{{ l.started_at[:16] if l.started_at else '' }}</td>
+        <td class="table-cell text-xs text-err max-w-[200px] truncate">{{ l.error or '' }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="flex flex-col items-center justify-center py-16 text-center">
+    <div class="w-12 h-12 bg-surface-3 rounded-xl flex items-center justify-center mb-3">
+      <svg class="w-6 h-6 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+    </div>
+    <p class="text-sm text-txt-3">No logs yet</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,55 @@
+{# 5 glass KPI cards with left accent border #}
+{% set size_mb = stats.get('total_size_bytes', 0) / (1024 * 1024) %}
+
+<div class="glass-card p-4 sm:p-5 border-l-4 border-purple-500">
+  <p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Files</p>
+  <div class="flex items-baseline gap-2">
+    <span class="text-2xl sm:text-3xl font-bold text-purple-400">{{ stats.get('total_files', 0) }}</span>
+    <span class="text-xs text-gray-500">{{ size_mb|round(1) }} MB</span>
+  </div>
+</div>
+
+<div class="glass-card p-4 sm:p-5 border-l-4 border-blue-500">
+  <p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Vectors</p>
+  <div class="flex items-baseline gap-2">
+    <span class="text-2xl sm:text-3xl font-bold text-blue-400">{{ qdrant_points }}</span>
+    <span class="text-xs text-gray-500">points</span>
+  </div>
+</div>
+
+<div class="glass-card p-4 sm:p-5 border-l-4 border-green-500">
+  <p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Queries</p>
+  <div class="flex items-baseline gap-2">
+    <span class="text-2xl sm:text-3xl font-bold text-green-400">{{ today_queries }}</span>
+    <span class="text-xs text-gray-500">today · {{ total_queries }} total</span>
+  </div>
+</div>
+
+<div class="glass-card p-4 sm:p-5 border-l-4 border-yellow-500">
+  <p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">{% if is_oauth %}LLM Calls{% else %}LLM Cost{% endif %}</p>
+  <div class="flex items-baseline gap-2">
+    {% if is_oauth %}
+    <span class="text-2xl sm:text-3xl font-bold text-yellow-500">{{ llm_all.get('total_calls', 0) }}</span>
+    <span class="text-xs text-gray-500">{{ llm_today.get('total_calls', 0) }} today</span>
+    {% else %}
+    <span class="text-2xl sm:text-3xl font-bold text-yellow-500">${{ "%.4f"|format(llm_all.get('total_cost_usd', 0)) }}</span>
+    <span class="text-xs text-gray-500">${{ "%.4f"|format(llm_today.get('total_cost_usd', 0)) }} today</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="glass-card p-4 sm:p-5 border-l-4 border-orange-500">
+  <p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Reminders</p>
+  <div class="flex items-baseline gap-2">
+    <span class="text-2xl sm:text-3xl font-bold {% if pending_count > 0 %}text-orange-500{% else %}text-green-500{% endif %}">{{ pending_count }}</span>
+    <span class="text-xs text-gray-500">pending</span>
+  </div>
+</div>
+
+<div class="glass-card p-4 sm:p-5 border-l-4 border-red-500">
+  <p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Errors</p>
+  <div class="flex items-baseline gap-2">
+    <span class="text-2xl sm:text-3xl font-bold {% if errors %}text-red-500{% else %}text-green-500{% endif %}">{{ errors }}</span>
+    <span class="text-xs text-gray-500">pipeline</span>
+  </div>
+</div>

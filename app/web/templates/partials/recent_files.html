@@ -1,0 +1,39 @@
+{% if recent_files %}
+<div class="space-y-0.5">
+  {% for f in recent_files %}
+  <a href="/files/{{ f.id }}" class="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-surface-2 transition-colors no-underline group">
+    {% set ext = f.original_name.rsplit('.', 1)[-1]|lower if '.' in f.original_name else '' %}
+    {% if ext == 'pdf' %}
+    <div class="w-8 h-8 rounded-lg bg-err-bg flex items-center justify-center shrink-0">
+      <span class="text-[10px] font-bold text-err uppercase">PDF</span>
+    </div>
+    {% elif ext in ('jpg', 'jpeg', 'png', 'heic') %}
+    <div class="w-8 h-8 rounded-lg bg-ok-bg flex items-center justify-center shrink-0">
+      <svg class="w-4 h-4 text-ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+    </div>
+    {% elif ext == 'docx' %}
+    <div class="w-8 h-8 rounded-lg bg-info-bg flex items-center justify-center shrink-0">
+      <span class="text-[10px] font-bold text-info uppercase">DOC</span>
+    </div>
+    {% else %}
+    <div class="w-8 h-8 rounded-lg bg-surface-3 flex items-center justify-center shrink-0">
+      <svg class="w-4 h-4 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/></svg>
+    </div>
+    {% endif %}
+    <div class="flex-1 min-w-0">
+      <p class="text-sm text-txt truncate group-hover:text-accent-2 transition-colors">{{ f.original_name }}</p>
+      <p class="text-[11px] text-txt-3">{{ f.category }} &middot; {{ (f.size_bytes / 1024)|round(0)|int }}KB</p>
+    </div>
+    <span class="text-[10px] text-txt-3 shrink-0">{{ f.created_at[:10] }}</span>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="flex flex-col items-center justify-center py-8 text-center">
+  <div class="w-10 h-10 bg-surface-3 rounded-xl flex items-center justify-center mb-3">
+    <svg class="w-5 h-5 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/></svg>
+  </div>
+  <p class="text-sm text-txt-3">No files yet</p>
+  <p class="text-xs text-txt-3 mt-1">Upload via Telegram or API</p>
+</div>
+{% endif %}

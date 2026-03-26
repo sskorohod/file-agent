@@ -1,0 +1,73 @@
+{% extends "layout.html" %}
+{% block title %}Reminders — FileAgent{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <h1 class="text-xl font-bold text-txt">Reminders</h1>
+    <p class="text-sm text-txt-3 mt-0.5">Automatic document expiry reminders</p>
+  </div>
+  {% if reminders %}
+  <span class="text-xs text-txt-3 bg-surface-2 px-2.5 py-1 rounded-full">{{ reminders|length }} total</span>
+  {% endif %}
+</div>
+
+{% if reminders %}
+<div class="card overflow-hidden">
+  <div class="overflow-x-auto -mx-5 -mb-5 -mt-5">
+    <table class="w-full">
+      <thead>
+        <tr class="border-b border-border">
+          <th class="table-header">Document</th>
+          <th class="table-header">Category</th>
+          <th class="table-header">Message</th>
+          <th class="table-header">Date</th>
+          <th class="table-header">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in reminders %}
+        {% set now = None %}
+        <tr class="table-row">
+          <td class="table-cell">
+            <a href="/files/{{ r.file_id }}" class="text-sm font-medium text-txt hover:text-accent-2 transition-colors">
+              {{ r.original_name or r.file_id[:12] }}
+            </a>
+            {% if r.summary %}
+            <p class="text-[11px] text-txt-3 truncate max-w-[300px] mt-0.5">{{ r.summary }}</p>
+            {% endif %}
+          </td>
+          <td class="table-cell">
+            <span class="badge badge-accent">{{ r.category or '?' }}</span>
+            {% if r.document_type %}
+            <div class="text-[10px] text-txt-3 mt-1">{{ r.document_type|replace('_', ' ') }}</div>
+            {% endif %}
+          </td>
+          <td class="table-cell text-sm text-txt-2 max-w-xs truncate">{{ r.message }}</td>
+          <td class="table-cell whitespace-nowrap">
+            <span class="text-sm font-mono text-txt-2">{{ r.remind_at[:16] }}</span>
+          </td>
+          <td class="table-cell">
+            {% if r.sent %}
+            <span class="badge badge-ok flex items-center gap-1.5 w-fit">
+              <span class="w-1.5 h-1.5 rounded-full bg-ok"></span>Sent
+            </span>
+            {% else %}
+            <span class="badge badge-warn flex items-center gap-1.5 w-fit">
+              <span class="w-1.5 h-1.5 rounded-full bg-warn animate-pulse-soft"></span>Pending
+            </span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="card flex flex-col items-center justify-center py-16 text-center">
+  <svg class="w-12 h-12 text-txt-3 mb-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/></svg>
+  <p class="text-sm text-txt-3 mb-1">No upcoming reminders</p>
+  <p class="text-xs text-txt-3">Reminders are created automatically when a document contains an expiry date</p>
+</div>
+{% endif %}
+{% endblock %}

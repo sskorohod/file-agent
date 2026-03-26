@@ -1,0 +1,284 @@
+{% extends "layout.html" %}
+{% block title %}Settings — FileAgent{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-xl font-bold text-txt">Settings</h1>
+  <p class="text-sm text-txt-3 mt-0.5">System configuration</p>
+</div>
+
+{# ── API Keys ── #}
+<div class="card mb-4 border-l-2 border-l-accent">
+  <h3 class="card-header">API Keys & MCP</h3>
+
+  {% if new_key %}
+  <div class="mb-4 px-4 py-3 rounded-lg bg-ok-bg border border-ok/20 text-ok text-sm break-all">
+    Key created (copy now — shown only once):<br>
+    <code class="font-mono text-sm select-all font-bold mt-1 block">{{ new_key }}</code>
+  </div>
+  {% endif %}
+
+  <form method="POST" action="/settings/api-keys/create" class="flex items-center gap-3 flex-wrap mb-4">
+    <input type="text" name="name" placeholder="Key name" value="default" class="input-sm w-40">
+    <label class="flex items-center gap-1.5 text-xs text-txt-2 cursor-pointer bg-surface-2 px-3 py-2 rounded-lg border border-border">
+      <input type="radio" name="mode" value="lite" checked class="accent-accent"> Lite
+    </label>
+    <label class="flex items-center gap-1.5 text-xs text-txt-2 cursor-pointer bg-surface-2 px-3 py-2 rounded-lg border border-border">
+      <input type="radio" name="mode" value="full" class="accent-accent"> Full
+    </label>
+    <button type="submit" class="btn-primary btn-sm">+ Create Key</button>
+  </form>
+
+  {% if api_keys %}
+  <div class="overflow-x-auto rounded-lg border border-border">
+    <table class="w-full">
+      <thead class="bg-surface-2"><tr>
+        <th class="table-header">Key</th><th class="table-header">Name</th><th class="table-header">Mode</th><th class="table-header">Created</th><th class="table-header">Last used</th><th class="table-header w-10"></th>
+      </tr></thead>
+      <tbody>
+      {% for k in api_keys %}
+      <tr class="table-row">
+        <td class="table-cell font-mono text-xs">{{ k.key[:12] }}...{{ k.key[-4:] }}</td>
+        <td class="table-cell">{{ k.name }}</td>
+        <td class="table-cell">{% if k.mode == 'full' %}<span class="badge badge-accent">Full</span>{% else %}<span class="badge badge-info">Lite</span>{% endif %}</td>
+        <td class="table-cell text-txt-3 text-xs">{{ k.created_at[:16] }}</td>
+        <td class="table-cell text-txt-3 text-xs">{{ k.last_used_at[:16] if k.last_used_at else '—' }}</td>
+        <td class="table-cell">
+          <form method="POST" action="/settings/api-keys/{{ k.key }}/delete">
+            <button type="submit" class="btn-danger btn-sm text-xs px-2 py-1" onclick="return confirm('Delete key?')">
+              <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            </button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-sm text-txt-3">No API keys created yet</p>
+  {% endif %}
+
+  <div class="mt-4 bg-bg-2 rounded-lg p-4">
+    <p class="text-xs text-txt-3 mb-2">MCP Connection (Claude Code / Claude Desktop):</p>
+    <pre class="font-mono text-[11px] text-txt-2 whitespace-pre-wrap">{
+  "mcpServers": {
+    "file-agent": {
+      "url": "http://localhost:8000/mcp/sse",
+      "headers": {"Authorization": "Bearer YOUR_KEY"}
+    }
+  }
+}</pre>
+    <p class="text-[11px] text-txt-3 mt-2">REST API: <code class="font-mono bg-surface-3 px-1.5 py-0.5 rounded">curl -H "Authorization: Bearer KEY" http://localhost:8000/api/v1/stats</code></p>
+  </div>
+</div>
+
+{# ── Providers + Qdrant ── #}
+{# ── Provider Keys ── #}
+<div class="card mb-4 border-l-2 border-l-warn">
+  <h3 class="card-header">Provider API Keys</h3>
+  <p class="text-xs text-txt-3 mb-4">Keys are encrypted and stored securely. Leave empty to keep current value.</p>
+  <form method="POST" action="/settings/keys/save" class="space-y-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div>
+        <label class="flex items-center gap-2 text-xs font-medium text-txt-2 mb-1.5">
+          Anthropic
+          {% if provider_keys.anthropic != '***' %}<span class="badge badge-ok text-[9px]">{{ provider_keys.anthropic }}</span>{% else %}<span class="badge badge-err text-[9px]">Not set</span>{% endif %}
+        </label>
+        <input type="password" name="anthropic_key" placeholder="sk-ant-..." class="input-sm" autocomplete="off">
+      </div>
+      <div>
+        <label class="flex items-center gap-2 text-xs font-medium text-txt-2 mb-1.5">
+          OpenAI
+          {% if provider_keys.openai != '***' %}<span class="badge badge-ok text-[9px]">{{ provider_keys.openai }}</span>{% else %}<span class="badge badge-err text-[9px]">Not set</span>{% endif %}
+        </label>
+        <input type="password" name="openai_key" placeholder="sk-..." class="input-sm" autocomplete="off">
+      </div>
+      <div>
+        <label class="flex items-center gap-2 text-xs font-medium text-txt-2 mb-1.5">
+          Google (Gemini)
+          {% if provider_keys.google != '***' %}<span class="badge badge-ok text-[9px]">{{ provider_keys.google }}</span>{% else %}<span class="badge badge-err text-[9px]">Not set</span>{% endif %}
+        </label>
+        <input type="password" name="google_key" placeholder="AIza..." class="input-sm" autocomplete="off">
+      </div>
+      <div>
+        <label class="flex items-center gap-2 text-xs font-medium text-txt-2 mb-1.5">
+          Qdrant
+          {% if provider_keys.qdrant != '***' %}<span class="badge badge-ok text-[9px]">{{ provider_keys.qdrant }}</span>{% else %}<span class="badge badge-err text-[9px]">Not set</span>{% endif %}
+        </label>
+        <input type="password" name="qdrant_key" placeholder="API key..." class="input-sm" autocomplete="off">
+      </div>
+    </div>
+    <div class="flex items-center gap-3">
+      <button type="submit" class="btn-primary btn-sm">
+        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Save Keys
+      </button>
+      <span class="text-[10px] text-txt-3">Encrypted with Fernet (AES-128)</span>
+    </div>
+  </form>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+  <div class="card">
+    <h3 class="card-header">Provider Status</h3>
+    <div class="space-y-3 text-sm">
+      <div class="flex items-center justify-between">
+        <span class="text-txt-3">Anthropic</span>
+        {% if settings.anthropic_api_key %}<span class="badge badge-ok">Connected</span>{% else %}<span class="badge badge-err">Not set</span>{% endif %}
+      </div>
+      <div class="flex items-center justify-between">
+        <span class="text-txt-3">OpenAI</span>
+        {% if settings.openai_api_key %}<span class="badge badge-ok">Connected</span>{% else %}<span class="badge badge-err">Not set</span>{% endif %}
+      </div>
+      <div class="flex items-center justify-between">
+        <span class="text-txt-3">Google</span>
+        {% if settings.google_api_key %}<span class="badge badge-ok">Connected</span>{% else %}<span class="badge badge-err">Not set</span>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 class="card-header">Qdrant Vector Store</h3>
+    <div class="grid grid-cols-[100px_1fr] gap-2 text-sm">
+      <span class="text-txt-3">Status</span>
+      <span>{% if qdrant_health.get('status') == 'healthy' %}<span class="badge badge-ok">Healthy</span>{% else %}<span class="badge badge-err">{{ qdrant_health.get('status', 'unknown') }}</span>{% endif %}</span>
+      <span class="text-txt-3">Host</span>
+      <span class="font-mono text-xs text-txt-2">{{ settings.qdrant.host }}:{{ settings.qdrant.port }}</span>
+      <span class="text-txt-3">Collection</span>
+      <span class="font-mono text-xs text-txt-2">{{ settings.qdrant.collection_name }}</span>
+      <span class="text-txt-3">Points</span>
+      <span class="text-txt-2">{{ qdrant_health.get('points_count', '—') }}</span>
+    </div>
+  </div>
+</div>
+
+{# ── System Prompts ── #}
+<div class="card mb-4 border-l-2 border-l-info">
+  <h3 class="card-header">System Prompts</h3>
+  <form method="POST" action="/settings/prompts/save" class="space-y-4">
+    <div>
+      <label class="block text-xs font-medium text-txt-2 mb-1.5">Search Prompt</label>
+      <textarea name="search_prompt" rows="5" class="input font-mono text-xs">{{ settings.llm.search_prompt }}</textarea>
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-txt-2 mb-1.5">Classification Prompt</label>
+      <textarea name="classification_prompt" rows="4" class="input font-mono text-xs">{{ settings.llm.classification_prompt }}</textarea>
+    </div>
+    <div class="flex items-center gap-3">
+      <button type="submit" class="btn-primary btn-sm">Save Prompts</button>
+      {% if prompt_saved %}<span class="badge badge-ok">Saved</span>{% endif %}
+    </div>
+  </form>
+</div>
+
+{# ── LLM Model Config ── #}
+<div class="card mb-4 border-l-2 border-l-ok">
+  <h3 class="card-header">LLM Models</h3>
+  {% if llm_saved %}<div class="mb-4 px-4 py-3 rounded-lg bg-ok-bg border border-ok/20 text-ok text-sm">Settings saved. Restart server to apply.</div>{% endif %}
+
+  <form method="POST" action="/settings/llm/save">
+    <div class="flex items-center gap-4 mb-4">
+      <span class="text-xs text-txt-3">Mode:</span>
+      {% set search_cfg = settings.llm.models.get('search') %}
+      {% set is_oauth = search_cfg is not none and search_cfg.api_base %}
+      <label class="flex items-center gap-2 text-xs text-txt-2 bg-surface-2 px-3 py-2 rounded-lg border border-border cursor-pointer">
+        <input type="radio" name="provider_mode" value="oauth" {% if is_oauth %}checked{% endif %} class="accent-accent"
+               onchange="document.getElementById('oauth-cfg').style.display='block';document.getElementById('api-cfg').style.display='none'">
+        OAuth Proxy
+      </label>
+      <label class="flex items-center gap-2 text-xs text-txt-2 bg-surface-2 px-3 py-2 rounded-lg border border-border cursor-pointer">
+        <input type="radio" name="provider_mode" value="api" {% if not is_oauth %}checked{% endif %} class="accent-accent"
+               onchange="document.getElementById('api-cfg').style.display='block';document.getElementById('oauth-cfg').style.display='none'">
+        API Key
+      </label>
+    </div>
+
+    <div id="oauth-cfg" class="{% if not is_oauth %}hidden{% endif %} mb-4 bg-bg-2 rounded-lg p-4">
+      <label class="block text-xs text-txt-3 mb-1">Proxy URL</label>
+      <input type="text" name="oauth_base" value="{{ settings.llm.models.get('search', {}).api_base or 'http://127.0.0.1:10531/v1' }}" class="input-sm">
+    </div>
+
+    <div id="api-cfg" class="{% if is_oauth %}hidden{% endif %} mb-4 bg-bg-2 rounded-lg p-4">
+      <label class="block text-xs text-txt-3 mb-1">API Provider</label>
+      <select name="api_provider" class="input-sm w-48">
+        <option value="anthropic" {% if 'anthropic' in settings.llm.default_provider %}selected{% endif %}>Anthropic (Claude)</option>
+        <option value="openai" {% if settings.llm.default_provider == 'openai' %}selected{% endif %}>OpenAI</option>
+        <option value="gemini" {% if 'gemini' in settings.llm.default_provider %}selected{% endif %}>Google Gemini</option>
+      </select>
+    </div>
+
+    {% set role_meta = {
+      'classification': {'icon': '<path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/>', 'color': 'accent', 'desc': 'Document categorization & tagging'},
+      'extraction': {'icon': '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>', 'color': 'info', 'desc': 'Structured field extraction from text'},
+      'search': {'icon': '<circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>', 'color': 'ok', 'desc': 'RAG search answer synthesis'},
+      'analysis': {'icon': '<path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/>', 'color': 'warn', 'desc': 'Multi-document trend analysis'}
+    } %}
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+      {% for role in ['classification', 'extraction', 'search', 'analysis'] %}
+      {% set cfg = settings.llm.models.get(role, {}) %}
+      {% set model_name = cfg.model|default('') %}
+      {% if '/' in model_name %}{% set model_name = model_name.split('/')[-1] %}{% endif %}
+      {% set meta = role_meta[role] %}
+
+      <div class="bg-bg-2 rounded-xl border border-border p-4 space-y-3">
+        {# Role header #}
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-lg bg-{{ meta.color }}-bg flex items-center justify-center shrink-0">
+            <svg class="w-4.5 h-4.5 text-{{ meta.color }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">{{ meta.icon }}</svg>
+          </div>
+          <div class="min-w-0">
+            <div class="text-sm font-semibold text-txt capitalize">{{ role }}</div>
+            <div class="text-[11px] text-txt-3 truncate">{{ meta.desc }}</div>
+          </div>
+        </div>
+
+        {# Model select #}
+        <div>
+          <label class="block text-[10px] font-medium text-txt-3 uppercase tracking-wider mb-1">Model</label>
+          <select name="model_{{ role }}" class="model-select input-sm w-full" data-current="{{ model_name }}">
+            <option value="{{ model_name }}">{{ model_name }}</option>
+          </select>
+        </div>
+
+        {# Params row #}
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="block text-[10px] font-medium text-txt-3 uppercase tracking-wider mb-1">Max tokens</label>
+            <input type="number" name="max_tokens_{{ role }}" value="{{ cfg.max_tokens|default(1024) }}" class="input-sm w-full">
+          </div>
+          <div>
+            <label class="block text-[10px] font-medium text-txt-3 uppercase tracking-wider mb-1">Temperature</label>
+            <input type="text" name="temperature_{{ role }}" value="{{ cfg.temperature|default(0.1) }}" class="input-sm w-full">
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <button type="submit" class="btn-primary btn-sm">Save LLM Settings</button>
+  </form>
+
+  <script>
+  fetch('/settings/llm/models').then(r=>r.json()).then(data=>{
+    document.querySelectorAll('.model-select').forEach(sel=>{
+      const cur=sel.dataset.current; sel.innerHTML='';
+      data.models.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=m;if(m===cur)o.selected=true;sel.appendChild(o)});
+      if(cur&&!data.models.includes(cur)){const o=document.createElement('option');o.value=cur;o.textContent=cur+' (current)';o.selected=true;sel.prepend(o)}
+    })
+  }).catch(()=>{});
+  </script>
+</div>
+
+{# ── Storage ── #}
+<div class="card">
+  <h3 class="card-header">Storage & Embedding</h3>
+  <div class="grid grid-cols-[120px_1fr] gap-2 text-sm">
+    <span class="text-txt-3">Files path</span><span class="font-mono text-xs text-txt-2">{{ settings.storage.base_path }}</span>
+    <span class="text-txt-3">DB path</span><span class="font-mono text-xs text-txt-2">{{ settings.database.path }}</span>
+    <span class="text-txt-3">Embedding</span><span class="font-mono text-xs text-txt-2">{{ settings.embedding.model }}</span>
+    <span class="text-txt-3">Chunk size</span><span class="text-txt-2">{{ settings.embedding.chunk_size_words }} words, overlap {{ settings.embedding.chunk_overlap_words }}</span>
+    <span class="text-txt-3">Max file</span><span class="text-txt-2">{{ settings.storage.max_file_size_mb }} MB</span>
+  </div>
+</div>
+{% endblock %}

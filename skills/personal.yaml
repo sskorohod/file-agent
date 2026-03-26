@@ -1,0 +1,134 @@
+name: personal
+display_name: "Личные / Personal"
+description: "IDs, passports, certificates, diplomas, personal documents"
+category: personal
+priority: 5
+enabled: true
+tags:
+  - personal
+  - identity
+  - documents
+
+routing_rules:
+  keywords:
+    - passport
+    - driver license
+    - social security
+    - birth certificate
+    - marriage
+    - diploma
+    - certificate
+    - id card
+    - visa
+    - green card
+    - паспорт
+    - водительское
+    - свидетельство
+    - диплом
+    - сертификат
+    - удостоверение
+    - виза
+  patterns:
+    - '\b\d{3}-\d{2}-\d{4}\b'
+    - '\b[A-Z]\d{8}\b'
+    - '\b\d{2}\s\d{2}\s\d{6}\b'
+  mime_types:
+    - application/pdf
+    - image/jpeg
+    - image/png
+  min_confidence: 0.3
+
+response_template: |
+  🆔 {document_type}
+  👤 {full_name}
+  📅 Выдан: {issue_date} · Истекает: {expiry_date}
+  🏛 {issuing_authority}
+  {priority_badge} {priority}
+
+  📝 {summary}
+
+  ⚠️ {importance}
+
+  ✅ {action_required}
+
+  📎 Связанные: {related_documents}
+
+  💾 {storage_advice}
+
+extraction:
+  fields:
+    - name: full_name
+      description: "ФИО владельца документа"
+      required: false
+    - name: document_number
+      description: "Номер документа (только последние 4 цифры для безопасности)"
+      required: false
+    - name: issue_date
+      description: "Дата выдачи в формате YYYY-MM-DD"
+      required: false
+    - name: expiry_date
+      description: "Дата окончания срока действия в формате YYYY-MM-DD"
+      required: false
+    - name: document_type
+      description: "Тип документа на русском: загранпаспорт, водительские права, виза, Green Card, EAD, SSN карта, диплом, свидетельство о рождении и т.д."
+      required: true
+    - name: issuing_authority
+      description: "Кем и где выдан документ (организация, город, страна)"
+      required: false
+    - name: priority
+      description: "high / medium / low. Одно слово."
+      required: true
+    - name: summary
+      description: >
+        Подробное описание документа на русском (4-6 предложений):
+        1) Что это за документ и для чего он нужен
+        2) Кем, когда и где выдан
+        3) Какие права или возможности даёт владельцу
+        4) Срок действия и условия продления
+        5) Особенности и ограничения
+      required: true
+    - name: importance
+      description: >
+        Почему этот документ важен (2-3 предложения):
+        Что произойдёт если документ потерять, повредить или не продлить вовремя.
+        Какие последствия: штрафы, невозможность работать, путешествовать, водить и т.д.
+      required: true
+    - name: action_required
+      description: >
+        Конкретные рекомендации (что делать с документом):
+        - Нужно ли продлить и за сколько месяцев до истечения
+        - Куда обращаться (адрес, сайт, телефон если известно)
+        - Какие документы нужны для продления
+        - Стоимость продления если известна
+        - Сроки рассмотрения
+      required: true
+    - name: related_documents
+      description: "Какие связанные документы нужны вместе с этим. Например: паспорт + виза + I-94, или SSN + EAD + паспорт. Перечисли через запятую."
+      required: false
+    - name: storage_advice
+      description: "Рекомендации по хранению: нужен ли оригинал при себе, стоит ли сделать копии/сканы, нужно ли нотариальное заверение копий, где лучше хранить оригинал."
+      required: false
+  custom_prompt: >
+    Ты эксперт по документам. Извлеки данные из документа. Отвечай на русском, подробно и профессионально.
+    НЕ показывай полные номера документов — только последние 4 цифры.
+
+    ВАЖНО: Сначала определи ЧТО это за документ на самом деле.
+    Если это НЕ удостоверение личности (не паспорт, не права, не виза),
+    а например справочник, гайд, письмо — опиши его как есть.
+    Оставь нерелевантные поля (full_name, issue_date и т.д.) пустыми.
+
+    summary — развёрнутое описание (4-6 предложений): что это за документ, кем и когда выдан,
+    для чего нужен, какие права даёт, срок действия, особенности.
+
+    importance — почему важно хранить этот документ, что будет если потерять или просрочить.
+    Конкретные последствия: штрафы, ограничения, невозможность работать/путешествовать.
+
+    action_required — конкретный план действий: когда продлевать, куда обращаться,
+    какие документы собрать, ориентировочные сроки и стоимость.
+
+    related_documents — какие другие документы связаны и могут понадобиться вместе.
+
+    storage_advice — как правильно хранить: оригинал/копия, сканы, нотариальное заверение.
+
+    priority — HIGH: документ скоро истекает (< 6 месяцев), требует немедленных действий.
+    MEDIUM: есть сроки, нужно следить. LOW: бессрочный или информационный.

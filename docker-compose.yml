@@ -1,0 +1,50 @@
+version: "3.8"
+
+services:
+  # Vector database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: fileagent-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/6333"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FileAgent application
+  app:
+    build: .
+    container_name: fileagent-app
+    ports:
+      - "8000:8000"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # Override Qdrant host to Docker service name
+      QDRANT__HOST: qdrant
+      QDRANT__PORT: "6333"
+      # Storage paths inside container
+      STORAGE__BASE_PATH: /app/files
+      DATABASE__PATH: /app/data/agent.db
+    volumes:
+      - app_data:/app/data
+      - app_files:/app/files
+      - ./skills:/app/skills
+      - ./config.yaml:/app/config.yaml
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+    driver: local
+  app_data:
+    driver: local
+  app_files:
+    driver: local

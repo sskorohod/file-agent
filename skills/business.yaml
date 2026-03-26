@@ -1,0 +1,141 @@
+name: business
+display_name: "Бизнес / Business"
+description: "Invoices, contracts, receipts, tax documents, business correspondence"
+category: business
+priority: 10
+enabled: true
+tags:
+  - business
+  - finance
+  - tax
+
+routing_rules:
+  keywords:
+    - invoice
+    - contract
+    - receipt
+    - payment
+    - amount due
+    - total
+    - tax
+    - w-2
+    - "1099"
+    - estimate
+    - proposal
+    - agreement
+    - счёт
+    - контракт
+    - оплата
+    - квитанция
+    - налог
+    - итого
+    - договор
+    - акт
+    - накладная
+  patterns:
+    - '\$\d+[\.,]\d{2}'
+    - '\b(INV|PO|SO)-?\d+'
+    - '\b(EIN|SSN|TIN)\b'
+    - '\b\d{1,3}(,\d{3})*\.\d{2}\b'
+  mime_types:
+    - application/pdf
+    - image/jpeg
+    - image/png
+  min_confidence: 0.3
+
+response_template: |
+  📄 {document_type}
+  💰 {amount}
+  🏢 {vendor}
+  📅 {date} · Срок: {expiry_date}
+  {priority_badge} {priority}
+
+  📝 {summary}
+
+  ⚠️ {importance}
+
+  ✅ {action_required}
+
+  📎 Связанные: {related_documents}
+
+  💾 {storage_advice}
+
+extraction:
+  fields:
+    - name: vendor
+      description: "Компания или организация, выдавшая документ (полное название)"
+      required: false
+    - name: amount
+      description: "Итоговая сумма с валютой (например $1,250.00)"
+      required: false
+    - name: date
+      description: "Дата документа в формате YYYY-MM-DD"
+      required: false
+    - name: document_type
+      description: "Тип на русском: счёт, контракт, лицензия, налоговая форма, разрешение, квитанция, payslip и т.д."
+      required: true
+    - name: reference_number
+      description: "Номер документа, контракта, инвойса, лицензии"
+      required: false
+    - name: expiry_date
+      description: "Срок действия лицензии, контракта или разрешения в формате YYYY-MM-DD"
+      required: false
+    - name: priority
+      description: "high / medium / low. Одно слово."
+      required: true
+    - name: summary
+      description: >
+        Подробное описание документа на русском (4-6 предложений):
+        1) Что это за документ и от какой организации
+        2) Какую цель он преследует (оплата, разрешение, договор)
+        3) Какие обязательства или условия содержит
+        4) Ключевые суммы, сроки, условия
+        5) Связь с другими документами или процессами
+      required: true
+    - name: importance
+      description: >
+        Почему этот документ важен (2-3 предложения):
+        Что будет если не оплатить/не продлить/не подписать вовремя.
+        Юридические и финансовые последствия: штрафы, пени, отзыв лицензии, судебные иски.
+      required: true
+    - name: action_required
+      description: >
+        Конкретные действия:
+        - Оплатить до [дата], сумма, куда платить
+        - Продлить за [N] дней, куда обращаться
+        - Подписать и вернуть, кому отправить
+        - Сохранить для налоговой декларации
+        - Передать бухгалтеру/юристу
+      required: true
+    - name: related_documents
+      description: "Какие связанные документы: W-2 + 1099 + tax return, или контракт + акт + счёт-фактура. Через запятую."
+      required: false
+    - name: storage_advice
+      description: "Сколько лет хранить (налоговые — 7 лет, контракты — срок действия + 3 года), нужны ли оригиналы, кому отправить копию."
+      required: false
+  custom_prompt: >
+    Ты эксперт по документам. Извлеки данные из документа. Отвечай на русском, подробно и профессионально.
+
+    ВАЖНО: Сначала определи ЧТО это за документ на самом деле. Не пытайся впихнуть
+    документ в шаблон если он не подходит.
+
+    Если это счёт/контракт/квитанция — заполни vendor, amount, date.
+    Если это гайд/презентация/отчёт/справочник — оставь vendor/amount/date пустыми,
+    но заполни summary максимально подробно: о чём документ, какие ключевые идеи,
+    для кого полезен, основные выводы и цифры.
+
+    summary — развёрнутое описание (4-6 предложений): что это за документ,
+    какое содержание, ключевые факты и цифры из текста, для кого и зачем.
+
+    importance — почему стоит сохранить этот документ, чем он полезен.
+
+    action_required — что конкретно делать: оплатить/продлить/изучить/применить.
+    Для гайдов и справочников: какие шаги предпринять на основе содержания.
+
+    related_documents — какие другие документы связаны.
+
+    storage_advice — как и сколько хранить.
+
+    priority — HIGH: дедлайн, штраф, срочное действие.
+    MEDIUM: счёт к оплате, полезная информация для применения.
+    LOW: информационный, справочный материал без срочности.

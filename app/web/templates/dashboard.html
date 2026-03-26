@@ -1,0 +1,163 @@
+{% extends "layout.html" %}
+{% block title %}Dashboard — FileAgent{% endblock %}
+{% block content %}
+{% set size_mb = stats.get('total_size_bytes', 0) / (1024 * 1024) %}
+
+{# ── Header ── #}
+<header class="flex justify-between items-center mb-6 sm:mb-8">
+  <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">Dashboard</h1>
+  <div class="flex items-center gap-2 px-3 py-1 {% if qdrant.get('status') == 'healthy' %}bg-green-900/20 border border-green-500/30{% else %}bg-red-900/20 border border-red-500/30{% endif %} rounded-full">
+    <span class="w-2 h-2 {% if qdrant.get('status') == 'healthy' %}bg-green-500 animate-pulse{% else %}bg-red-500{% endif %} rounded-full"></span>
+    <span class="text-xs font-semibold {% if qdrant.get('status') == 'healthy' %}text-green-400{% else %}text-red-400{% endif %} uppercase">{% if qdrant.get('status') == 'healthy' %}Online{% else %}Offline{% endif %}</span>
+  </div>
+</header>
+
+{# ── KPI Cards ── #}
+<section class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4 mb-6 sm:mb-8"
+         hx-get="/partials/stats" hx-trigger="every 30s" hx-swap="innerHTML">
+  {% include "partials/stats_cards.html" %}
+</section>
+
+{# ── Main 3-Column Grid ── #}
+<main class="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6">
+
+  {# Activity Log (4/12) #}
+  <section class="lg:col-span-4 glass-card p-4 sm:p-6">
+    <div class="flex justify-between items-center mb-4 sm:mb-6">
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400">Activity</h2>
+      <span class="px-2 py-0.5 text-[10px] bg-gray-800 rounded uppercase font-bold text-gray-400">live</span>
+    </div>
+    <div class="space-y-3 sm:space-y-4 max-h-[500px] overflow-y-auto pr-1" hx-get="/partials/activity" hx-trigger="every 15s" hx-swap="innerHTML">
+      {% include "partials/activity.html" %}
+    </div>
+  </section>
+
+  {# Categories + Sources (4/12) #}
+  <section class="lg:col-span-4 glass-card p-4 sm:p-6">
+    <h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-4 sm:mb-6">Categories</h2>
+    {% set cats = stats.get('categories', {}) %}
+    {% set max_cat = cats.values()|max if cats else 1 %}
+    <div class="space-y-5">
+      {% for cat, cnt in cats.items() %}
+      <div class="space-y-2">
+        <div class="flex justify-between text-xs font-medium">
+          <span class="text-gray-300">{{ cat }}</span>
+          <span class="text-gray-500">{{ cnt }}</span>
+        </div>
+        <div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+          <div class="progress-purple h-full rounded-full transition-all duration-500" style="width:{{ (cnt / max_cat * 100)|int }}%"></div>
+        </div>
+      </div>
+      {% endfor %}
+      {% if not cats %}
+      <p class="text-xs text-gray-500">No data</p>
+      {% endif %}
+    </div>
+
+    {% if source_dist %}
+    <div class="mt-6 sm:mt-8 pt-6 sm:pt-8 border-t border-white/5">
+      <div class="flex flex-wrap gap-2">
+        {% set src_icons = {'telegram': '<svg class="w-4 h-4 text-blue-400" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.14.14 0 00-.07-.2c-.08-.06-.19-.04-.27-.02-.12.03-1.99 1.27-5.62 3.72-.53.36-1.01.54-1.44.53-.47-.01-1.38-.27-2.06-.49-.83-.27-1.49-.42-1.43-.88.03-.24.37-.49 1.02-.74 4-1.73 6.67-2.88 8.02-3.45 3.81-1.6 4.6-1.88 5.12-1.89.11 0 .37.03.54.17.14.12.18.28.2.47-.01.06.01.24 0 .37z"/></svg>', 'web': '<svg class="w-4 h-4 text-accent-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>', 'api': '<svg class="w-4 h-4 text-ok-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>', 'mcp': '<svg class="w-4 h-4 text-warn-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>'} %}
+        {% for src, cnt in source_dist.items() %}
+        <div class="flex items-center gap-2 bg-gray-800/50 hover:bg-gray-800 transition-colors px-3 py-2 rounded-lg cursor-default">
+          {{ src_icons.get(src, '')|safe }}
+          <span class="text-xs font-bold text-gray-200">{{ cnt }}</span>
+          <span class="text-[10px] text-gray-500 uppercase tracking-tight">{{ src }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </section>
+
+  {# AI Usage (4/12) #}
+  <section class="lg:col-span-4 glass-card p-4 sm:p-6">
+    <h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-4 sm:mb-6">{% if is_oauth %}AI Usage{% else %}AI Costs{% endif %}</h2>
+    <div hx-get="/partials/llm-stats" hx-trigger="every 30s" hx-swap="innerHTML">
+      {% include "partials/llm_stats.html" %}
+    </div>
+  </section>
+</main>
+
+{# ── Bottom Grid: Reminders + System ── #}
+<section class="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 mt-4 sm:mt-6">
+
+  {# Upcoming Reminders (7/12) #}
+  <div class="lg:col-span-7 glass-card p-4 sm:p-6">
+    <div class="flex justify-between items-center mb-4 sm:mb-6">
+      <h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400">Upcoming Reminders</h2>
+      {% if pending_count > 0 %}
+      <span class="w-6 h-6 flex items-center justify-center bg-orange-500/20 text-orange-500 rounded text-[10px] font-bold">{{ pending_count }}</span>
+      {% endif %}
+    </div>
+    {% if pending_reminders %}
+    <div class="space-y-4 sm:space-y-6">
+      {% for r in pending_reminders %}
+      <a href="/files/{{ r.file_id }}" class="flex items-start justify-between no-underline group {% if not loop.last %}border-b border-white/5 pb-4{% endif %}">
+        <div class="flex gap-3 sm:gap-4 min-w-0">
+          <div class="mt-1 w-2 h-2 rounded-full shrink-0 {% if r.remind_at[:4] == '2026' %}bg-red-500 glow-red{% else %}bg-gray-600{% endif %}"></div>
+          <div class="min-w-0">
+            <p class="text-sm font-medium text-gray-200 group-hover:text-white transition-colors truncate">{{ r.original_name or 'Document' }}</p>
+            {% if r.summary %}
+            <p class="text-[11px] text-gray-400 truncate mt-0.5">{{ r.summary }}</p>
+            {% endif %}
+            <p class="text-[10px] text-gray-500 truncate mt-0.5">{{ r.document_type|default('')|replace('_', ' ') }}{% if r.document_type and r.message %} · {% endif %}{{ r.message }}</p>
+          </div>
+        </div>
+        <div class="text-right shrink-0 ml-3">
+          <p class="text-sm font-bold text-gray-300">{{ r.remind_at[:10] }}</p>
+          <span class="text-[10px] px-2 py-0.5 bg-accent-bg text-accent-2 rounded">{{ r.category or '' }}</span>
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+    {% if pending_count > 5 %}
+    <a href="/reminders" class="block text-center text-xs text-blue-400 hover:underline mt-4">View all {{ pending_count }} reminders →</a>
+    {% endif %}
+    {% else %}
+    <div class="flex items-center gap-2 py-6 justify-center">
+      <svg class="w-4 h-4 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+      <span class="text-xs text-gray-500">No upcoming reminders</span>
+    </div>
+    {% endif %}
+  </div>
+
+  {# System Status (5/12) #}
+  <div class="lg:col-span-5 glass-card p-4 sm:p-6">
+    <h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-4 sm:mb-6">System</h2>
+    <div class="space-y-4">
+      <div class="flex justify-between items-center text-xs">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 {% if qdrant.get('status') == 'healthy' %}bg-green-500{% else %}bg-red-500{% endif %} rounded-full"></span>
+          <span class="text-gray-300">Qdrant</span>
+        </div>
+        <span class="text-gray-500 font-mono text-[11px]">{{ qdrant.get('collection', '?') }} · {{ qdrant.get('points_count', 0) }} pts · {{ qdrant.get('vector_size', '?') }}d</span>
+      </div>
+      <div class="flex justify-between items-center text-xs">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 bg-purple-500 rounded-full"></span>
+          <span class="text-gray-300">Storage</span>
+        </div>
+        <span class="text-gray-500 font-mono text-[11px]">{{ stats.get('total_files', 0) }} files · {{ size_mb|round(1) }} MB</span>
+      </div>
+      <div class="flex justify-between items-center text-xs">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 bg-blue-500 rounded-full"></span>
+          <span class="text-gray-300">Embedding</span>
+        </div>
+        <span class="text-gray-500 font-mono text-[11px] truncate max-w-[200px]">{{ qdrant.get('embedding_model', '?') }}</span>
+      </div>
+    </div>
+
+    <div class="mt-6 sm:mt-8">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Pipeline</h3>
+        <a href="/logs" class="text-[10px] text-blue-400 hover:underline">logs →</a>
+      </div>
+      <div hx-get="/partials/pipeline-health" hx-trigger="every 30s" hx-swap="innerHTML">
+        {% include "partials/pipeline_health.html" %}
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
