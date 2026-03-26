@@ -1,152 +1,327 @@
-# AI File Intelligence Agent
+<div align="center">
 
-Personal AI agent for document processing, classification, and knowledge base management. Send files via Telegram → get them parsed, classified, stored, and searchable.
+# 📁 FileAgent
 
-## Architecture
+### AI File Intelligence Agent
+
+**Personal AI-powered document management system**
+
+Send documents via Telegram → get instant AI analysis, recommendations, and reminders.
+Ask questions → get precise answers from your knowledge base.
+
+[![Python](https://img.shields.io/badge/Python-3.12+-blue?logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.135-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://docker.com)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+</div>
+
+---
+
+## What is FileAgent?
+
+FileAgent is a personal AI agent that turns your documents into a searchable, intelligent knowledge base. Upload a passport photo — get expiry reminders. Send a blood test — get health recommendations. Drop an invoice — track deadlines automatically.
+
+**Key idea:** Upload → Analyze → Act. Every document gets AI-powered classification, field extraction, recommendations, and automatic reminders.
+
+### How it works
 
 ```
-Telegram Bot ──→ Pipeline (9 steps) ──→ File Storage (~/ai-agent-files/)
-     │                │                       │
-     │          Parse → Classify → Route      │
-     │                │                       │
-     ▼                ▼                       ▼
-  Commands       LLM Router              SQLite (metadata)
-  /search        (litellm)               Qdrant (vectors)
-  /recent        Anthropic/OpenAI/Gemini
-  /stats
-     │
-     ▼
-  Web Dashboard (localhost:8000)
+📱 Telegram / 🌐 Web / 🔌 API / 🤖 MCP
+              ↓
+    ┌─────────────────────────┐
+    │   13-Step AI Pipeline   │
+    │                         │
+    │ 1. Receive & validate   │
+    │ 2. Auto-crop (OpenCV)   │
+    │ 3. Dedup (SHA-256)      │
+    │ 4. Parse (OCR/PDF/DOCX) │
+    │ 5. Classify (LLM)       │
+    │ 6. Route to skill       │
+    │ 7. Extract fields (LLM) │
+    │ 8. Auto-reminder        │
+    │ 9. Store on disk        │
+    │ 10. Embed (Gemini 768d) │
+    │ 11. Save metadata       │
+    │ 12. Refresh insights    │
+    │ 13. Done ✓              │
+    └─────────────────────────┘
+              ↓
+    📊 SQLite + 🔍 Qdrant + 💾 Disk
 ```
 
-## Quick Start
+---
 
-### 1. Prerequisites
+## ✨ Features
 
-- Python 3.11+
-- Docker (on ugreen server for Qdrant)
-- Telegram Bot Token (via @BotFather)
-- At least one LLM API key (Anthropic, OpenAI, or Google)
+### 📄 Smart Document Processing
+- **Auto-classification** — AI identifies document type (passport, lab result, invoice, contract) and category
+- **Field extraction** — Pulls out names, dates, amounts, diagnoses, document numbers
+- **Detailed analysis** — Explains what the document is, why it matters, what to do next
+- **Priority assessment** — High/medium/low with reasoning
+- **Storage recommendations** — How to store, whether you need originals, related documents
 
-### 2. Setup Qdrant on ugreen
+### 📸 Multi-page Scanning
+- **`/scan` command** — Send photos one by one, assemble into PDF
+- **Media groups** — Send multiple photos at once → auto-assembled PDF
+- **Auto-crop** — OpenCV detects document on desk/background, trims borders
+- **Preview** — Thumbnail strip for page order verification before assembly
+
+### 🔍 Semantic Search (RAG)
+- **Multimodal embeddings** — Gemini Embedding 2 processes both text AND images
+- **Vector search** — Qdrant kNN across all documents
+- **LLM synthesis** — AI composes detailed answers from found documents
+- **Chat context** — Remembers conversation history for follow-up questions
+
+### 📊 Analytics
+- **Trend analysis** — "Analyze hemoglobin over the past year" → chart + summary
+- **Data extraction** — Pulls numerical metrics from documents with reference ranges
+- **Chart generation** — Auto-generated PNG charts for visual analysis
+
+### 💡 AI Insights
+- **Category overview** — AI analyzes all documents per category, highlights issues
+- **Motivational recommendations** — Not just "renew passport" but WHY and HOW it improves your life
+- **Web research** — Optionally enriches recommendations with current info (via Tavily)
+- **Daily advice** — Telegram messages at 9:00 AM and 8:00 PM with actionable tips
+
+### ⏰ Auto-reminders
+- **Expiry detection** — Extracts expiration dates from documents automatically
+- **Smart intervals** — Passport: 6 months, driver license: 60 days, others: 2 weeks
+- **Telegram notifications** — With "Done" and "Snooze" buttons
+- **Dashboard widget** — Upcoming reminders with urgency color-coding
+
+### 🎙 Voice Messages
+- **Whisper transcription** — OpenAI Whisper speech-to-text
+- **Action choice** — Search documents or save as Obsidian note
+- **Smart notes** — LLM extracts title, tags, action items from voice
+
+### 🖥 Web Dashboard
+- **Glassmorphism dark UI** — Professional SaaS design, Tailwind CSS + HTMX
+- **Real-time dashboard** — KPI cards, activity feed, pipeline health
+- **Mobile-first** — Bottom navigation, touch-friendly, responsive
+- **File preview** — Inline PDF viewer with zoom, image viewer
+- **Settings** — API keys management, LLM model configuration, encrypted storage
+
+### 🧩 Skills System
+- **YAML-configurable** — Each document type defined in a simple YAML file
+- **Custom extraction** — Define what fields to pull for each category
+- **Response templates** — Format Telegram responses per document type
+- **Hot reload** — Changes picked up every 30 seconds, no restart needed
+
+---
+
+## 🚀 Quick Start
+
+### Option 1: Docker Compose (recommended)
+
+Works on **macOS, Linux, and Windows**.
 
 ```bash
-scp infra/docker-compose.qdrant.yml ugreen:~/qdrant/docker-compose.yml
-scp infra/qdrant_config.yaml ugreen:~/qdrant/qdrant_config.yaml
-ssh ugreen "cd ~/qdrant && docker compose up -d"
-```
+# Clone
+git clone https://github.com/sskorohod/file-agent.git
+cd file-agent
 
-See `infra/README-qdrant.md` for details.
-
-### 3. Install & Configure
-
-```bash
-git clone <repo> && cd ai-file-agent
+# Configure
 cp .env.example .env
-# Edit .env with your keys:
-#   TELEGRAM_BOT_TOKEN=...
-#   ANTHROPIC_API_KEY=...
-#   QDRANT_HOST=<ugreen-ip>
+# Edit .env with your API keys (see Configuration below)
 
-make install
+# Run
+docker compose up -d
 ```
 
-### 4. Run
+Open **http://localhost:8000** — done!
+
+### Option 2: Install Script (macOS/Linux)
 
 ```bash
+curl -sSL https://raw.githubusercontent.com/sskorohod/file-agent/main/install.sh | bash
+```
+
+Interactive installer will guide you through API key setup.
+
+### Option 3: Manual Installation
+
+```bash
+# Prerequisites: Python 3.12+, Docker (for Qdrant)
+git clone https://github.com/sskorohod/file-agent.git
+cd file-agent
+
+# Start Qdrant
+docker run -d --name qdrant -p 6333:6333 qdrant/qdrant:latest
+
+# Setup Python
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Configure
+cp .env.example .env
+# Edit .env — add Telegram token, API keys
+
+# Run
 make dev
-# Opens: http://localhost:8000 (dashboard)
-# Telegram bot starts automatically
 ```
 
-## Configuration
+---
 
-All settings in `config.yaml`, overridable by environment variables:
+## ⚙️ Configuration
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `llm.models.classification.model` | `anthropic/claude-3-haiku` | Cheap model for classification |
-| `llm.models.extraction.model` | `anthropic/claude-sonnet-4` | Full model for extraction/search |
-| `qdrant.host` | `localhost` | Qdrant server address |
-| `embedding.model` | `all-MiniLM-L6-v2` | Local embedding model |
-| `embedding.chunk_size_words` | `400` | Chunk size for vectorization |
+### Required API Keys
 
-## Skills
+| Key | Purpose | Get it from |
+|-----|---------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot | [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM__OWNER_ID` | Your Telegram user ID | [@userinfobot](https://t.me/userinfobot) |
+| `GOOGLE_API_KEY` | Gemini Embedding (free) | [Google AI Studio](https://aistudio.google.com/apikey) |
 
-Skills are YAML files in `skills/` that define document classification rules:
+### LLM Provider (one of)
 
-```yaml
-name: health
-category: health
-routing_rules:
-  keywords: [diagnosis, patient, blood test]
-  patterns: ['\b(WBC|RBC)\b']
-naming_template: "{date}_{document_type}"
-extraction:
-  fields:
-    - name: document_type
-      required: true
+| Key | Models | Pricing |
+|-----|--------|---------|
+| `ANTHROPIC_API_KEY` | Claude Sonnet/Haiku | Pay per token |
+| `OPENAI_API_KEY` | GPT-4o/4o-mini | Pay per token |
+| OAuth Proxy | ChatGPT subscription models | Subscription |
+
+Configure in **Settings → LLM Models** in the web dashboard.
+
+### Dashboard Auth
+
+```bash
+# Generate password hash
+python -c "import bcrypt; print(bcrypt.hashpw(b'YOUR_PASSWORD', bcrypt.gensalt()).decode())"
 ```
 
-Create new skills by copying `skills/TEMPLATE.yaml`. Skills hot-reload — no restart needed.
+```env
+WEB__SESSION_SECRET=your-random-32-char-string
+WEB__LOGIN=your@email.com
+WEB__PASSWORD_HASH=$2b$12$...
+```
 
-## Telegram Commands
+### Full .env Example
+
+```env
+TELEGRAM_BOT_TOKEN=123456:ABC...
+TELEGRAM__OWNER_ID=169108358
+GOOGLE_API_KEY=AIzaSy...
+ANTHROPIC_API_KEY=sk-ant-...
+WEB__SESSION_SECRET=change-me-random-string
+WEB__LOGIN=admin@example.com
+WEB__PASSWORD_HASH=$2b$12$...
+```
+
+---
+
+## 📱 Telegram Commands
 
 | Command | Description |
 |---------|-------------|
 | `/search <query>` | Semantic search across all documents |
-| `/recent [N]` | Last N processed files |
+| `/analytics <question>` | Data analytics with chart generation |
+| `/insights` | AI overview and recommendations per category |
+| `/scan [name]` | Start multi-page document scan |
+| `/done` | Finish scan with page preview |
+| `/cancel` | Cancel active scan session |
+| `/files [category]` | Browse files with pagination |
+| `/recent [N]` | Last N uploaded files |
 | `/stats` | Database statistics |
-| `/skills` | List active skills |
-| Send file | Process, classify, store |
-| Send text | Q&A over knowledge base |
+| `/notes` | View saved notes |
 
-## Web Dashboard
+**Upload:** Just send any file (PDF, photo, DOCX) — processing is automatic.
 
-Available at `http://localhost:8000`:
+**Voice:** Send voice message → choose "Search" or "Save as note".
 
-- **Dashboard** — stats, recent files, LLM costs
-- **Files** — browse, filter, search, view details
-- **Search** — semantic search with AI answers
-- **Skills** — manage classification skills
-- **Settings** — API keys status, Qdrant health
-- **Logs** — processing pipeline logs
+**Multi-photo:** Select multiple photos and send at once → auto-assembled PDF.
 
-## Project Structure
+---
+
+## 🏗 Architecture
 
 ```
-ai-file-agent/
-├── app/
-│   ├── main.py          # FastAPI entry + lifespan
-│   ├── config.py         # Pydantic settings
-│   ├── pipeline.py       # 9-step processing pipeline
-│   ├── bot/handlers.py   # Telegram bot
-│   ├── parser/           # PDF, Image, DOCX, Text parsers
-│   ├── llm/              # Router, Classifier, RAG Search
-│   ├── skills/engine.py  # YAML skill engine
-│   ├── storage/          # Files, SQLite DB, Qdrant vectors
-│   └── web/              # Dashboard routes + templates
-├── skills/               # YAML skill definitions
-├── infra/                # Qdrant Docker setup
-├── tests/                # pytest suite
-├── config.yaml           # Default configuration
-└── Makefile              # Dev commands
+app/
+├── main.py              # FastAPI app, lifespan, background tasks
+├── config.py            # Pydantic Settings (YAML + env)
+├── pipeline.py          # 13-step document processor
+├── bot/handlers.py      # Telegram commands & file handlers
+├── llm/
+│   ├── router.py        # litellm multi-provider wrapper
+│   ├── classifier.py    # Document classification
+│   ├── search.py        # RAG search + answer synthesis
+│   ├── analytics.py     # Trend analysis + chart generation
+│   └── insights.py      # Category AI analysis + daily advice
+├── parser/
+│   ├── pdf.py           # PyMuPDF + Tesseract OCR
+│   └── image.py         # Vision API + OCR fallback
+├── storage/
+│   ├── db.py            # SQLite (12 tables, FTS5)
+│   ├── files.py         # Categorized file storage
+│   └── vectors.py       # Qdrant + Gemini Embedder
+├── web/
+│   ├── routes.py        # 25+ web endpoints
+│   ├── auth.py          # Session-based auth middleware
+│   └── templates/       # Jinja2 + Tailwind CSS + HTMX
+├── api/routes.py        # REST API v1 (Bearer token)
+├── mcp_server.py        # MCP tools for Claude Code/Desktop
+└── utils/
+    ├── pdf.py           # Auto-crop + PDF assembly (OpenCV)
+    └── crypto.py        # Fernet encryption for secrets
+
+skills/                  # YAML skill definitions
+config.yaml              # Runtime configuration
+docker-compose.yml       # App + Qdrant containers
 ```
 
-## Testing
+---
+
+## 🔌 Integrations
+
+### REST API
 
 ```bash
-make test          # Run all tests
-make lint          # Check code style
+# Create API key in Settings, then:
+curl -H "Authorization: Bearer YOUR_KEY" http://localhost:8000/api/v1/search?q=passport
 ```
 
-## Tech Stack
+### MCP (Claude Code / Claude Desktop)
 
-- **Backend**: Python 3.11, FastAPI, asyncio
-- **Telegram**: python-telegram-bot (async)
-- **LLM**: litellm (Anthropic + OpenAI + Gemini)
-- **Parsing**: PyMuPDF, Tesseract OCR, python-docx
-- **Vectors**: Qdrant (remote), sentence-transformers
-- **Database**: SQLite + aiosqlite
-- **Web UI**: Jinja2 + HTMX
-- **Embedding**: all-MiniLM-L6-v2 (local)
+```json
+{
+  "mcpServers": {
+    "file-agent": {
+      "url": "http://localhost:8000/mcp/sse",
+      "headers": {"Authorization": "Bearer YOUR_KEY"}
+    }
+  }
+}
+```
+
+---
+
+## 📖 Documentation
+
+- [**PROJECT.md**](.docs/PROJECT.md) — Full project description and capabilities
+- [**USER_GUIDE.md**](.docs/USER_GUIDE.md) — How to use (Telegram, Web, API)
+- [**TECHNICAL.md**](.docs/TECHNICAL.md) — Architecture, database schema, configuration
+
+---
+
+## 🛠 Development
+
+```bash
+make dev       # Start with auto-reload
+make test      # Run tests
+make lint      # Ruff check
+make format    # Ruff format
+```
+
+---
+
+## License
+
+MIT
+
+---
+
+<div align="center">
+<sub>Built with ❤️ using Claude, FastAPI, and Gemini</sub>
+</div>
