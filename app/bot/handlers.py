@@ -30,7 +30,7 @@ def owner_only(func):
     async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner_id = get_settings().telegram.owner_id
         user_id = update.effective_user.id if update.effective_user else 0
-        if owner_id and user_id != owner_id:
+        if not owner_id or user_id != owner_id:
             if update.callback_query:
                 await update.callback_query.answer("Бот приватный.", show_alert=True)
             elif update.message:

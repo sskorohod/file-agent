@@ -21,8 +21,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY . .
 
-# Create data directories
-RUN mkdir -p data /app/files
+# Create non-root user
+RUN useradd -m -s /bin/bash appuser
+
+# Create data directories with proper ownership
+RUN mkdir -p data /app/files && chown -R appuser:appuser /app
+
+USER appuser
 
 # Expose port
 EXPOSE 8000

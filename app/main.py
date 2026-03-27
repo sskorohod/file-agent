@@ -59,7 +59,10 @@ async def lifespan(app: FastAPI):
     logger.info(f"Database ready: {settings.database.path}")
 
     # Load encrypted secrets from DB → environment (supplement .env)
-    await _load_secrets_to_env(db, settings.web.session_secret or "default-secret")
+    if settings.web.session_secret:
+        await _load_secrets_to_env(db, settings.web.session_secret)
+    else:
+        logger.warning("WEB__SESSION_SECRET not set — encrypted secrets will NOT be loaded from DB")
 
     from app.storage.files import FileStorage
     file_storage = FileStorage(
@@ -341,6 +344,34 @@ from app.web.auth import AuthMiddleware
 
 _settings = get_settings()
 
+
+# Security headers middleware
+class SecurityHeadersMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = dict(message.get("headers", []))
+                extra = [
+                    (b"x-frame-options", b"DENY"),
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"referrer-policy", b"strict-origin-when-cross-origin"),
+                    (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+                ]
+                message["headers"] = list(message.get("headers", [])) + extra
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+
 # Auth middleware (checks session cookie)
 app.add_middleware(AuthMiddleware)
 
@@ -376,6 +407,15 @@ app.include_router(api_router)
 from app.mcp_server import mcp
 app.mount("/mcp/sse", mcp.sse_app())                # Legacy SSE transport
 app.mount("/mcp", mcp.streamable_http_app())         # Streamable HTTP (Codex, Claude Code)
+
+
+# Global exception handler — prevent stack trace leaks
+from fastapi.responses import JSONResponse as _JSONResp
+
+@app.exception_handler(Exception)
+async def _global_error_handler(request, exc):
+    logger.error(f"Unhandled error: {exc}", exc_info=True)
+    return _JSONResp(status_code=500, content={"detail": "Internal server error"})
 
 
 @app.get("/health")

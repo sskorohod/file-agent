@@ -7,10 +7,14 @@ import hashlib
 
 from cryptography.fernet import Fernet, InvalidToken
 
+_SALT = b'fileagent-secrets-v1'
+_ITERATIONS = 600_000
+
 
 def get_fernet(secret_key: str) -> Fernet:
-    """Create Fernet instance from a session secret string."""
-    key = base64.urlsafe_b64encode(hashlib.sha256(secret_key.encode()).digest())
+    """Create Fernet instance using PBKDF2 key derivation."""
+    dk = hashlib.pbkdf2_hmac('sha256', secret_key.encode(), _SALT, _ITERATIONS)
+    key = base64.urlsafe_b64encode(dk)
     return Fernet(key)
 
 

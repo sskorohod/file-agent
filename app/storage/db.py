@@ -229,9 +229,18 @@ class Database:
         await self.db.commit()
         return id
 
+    _ALLOWED_UPDATE_COLUMNS = frozenset({
+        "original_name", "category", "tags", "summary", "extracted_text",
+        "metadata_json", "priority", "source", "updated_at",
+    })
+
     async def update_file(self, id: str, **fields) -> bool:
         if not fields:
             return False
+        # Validate column names against allowlist
+        for k in fields:
+            if k not in self._ALLOWED_UPDATE_COLUMNS and k != "updated_at":
+                raise ValueError(f"Invalid column name: {k}")
         # Serialize lists/dicts
         for k, v in fields.items():
             if isinstance(v, (list, dict)):
