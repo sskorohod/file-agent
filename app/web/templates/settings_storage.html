@@ -1,0 +1,112 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+
+<div class="card">
+  <h3 class="card-header">Storage Backend</h3>
+  <p class="text-xs text-txt-3 mb-4">Choose where uploaded files are stored. Existing files stay on their current backend.</p>
+
+  <form method="POST" action="/settings/storage/save" class="space-y-5">
+    {# ── Backend Selection ── #}
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      {% for val, icon, label, desc in [
+        ("local", "M3 3h18v18H3z", "Local Disk", "Files stored on this server"),
+        ("s3", "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5", "S3 / MinIO", "AWS S3 or compatible"),
+        ("gdrive", "M12 2L2 19.8h20L12 2zm0 4l7 13.8H5L12 6z", "Google Drive", "Service account access"),
+      ] %}
+      <label class="block bg-surface-2 rounded-xl p-4 border-2 cursor-pointer transition-all
+                     {% if settings.storage.backend == val %}border-accent bg-accent/5{% else %}border-border hover:border-border-2{% endif %}">
+        <input type="radio" name="backend" value="{{ val }}" class="sr-only"
+               {% if settings.storage.backend == val %}checked{% endif %}>
+        <div class="flex items-center gap-2.5 mb-1.5">
+          <svg class="w-5 h-5 {% if settings.storage.backend == val %}text-accent{% else %}text-txt-3{% endif %}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="{{ icon }}"/></svg>
+          <span class="text-sm font-semibold text-txt">{{ label }}</span>
+        </div>
+        <p class="text-xs text-txt-3">{{ desc }}</p>
+      </label>
+      {% endfor %}
+    </div>
+
+    {# ── Local Config ── #}
+    <div id="cfg-local" class="{% if settings.storage.backend != 'local' %}hidden{% endif %}">
+      <div class="bg-surface-2 rounded-lg p-4 border border-border">
+        <div class="grid grid-cols-[100px_1fr] gap-2 text-sm">
+          <span class="text-txt-3">Path</span>
+          <span class="font-mono text-xs text-txt-2">{{ settings.storage.base_path }}</span>
+          <span class="text-txt-3">Max file</span>
+          <span class="text-txt-2">{{ settings.storage.max_file_size_mb }} MB</span>
+        </div>
+      </div>
+    </div>
+
+    {# ── S3 Config ── #}
+    <div id="cfg-s3" class="{% if settings.storage.backend != 's3' %}hidden{% endif %}">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Bucket</label>
+          <input type="text" name="s3_bucket" class="input" value="{{ settings.storage.s3.bucket }}" placeholder="my-fileagent-bucket">
+        </div>
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Region</label>
+          <input type="text" name="s3_region" class="input" value="{{ settings.storage.s3.region }}" placeholder="us-east-1">
+        </div>
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Key Prefix</label>
+          <input type="text" name="s3_prefix" class="input" value="{{ settings.storage.s3.prefix }}" placeholder="fileagent">
+          <p class="text-xs text-txt-3 mt-0.5">Folder inside the bucket</p>
+        </div>
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Endpoint URL</label>
+          <input type="text" name="s3_endpoint" class="input" value="{{ settings.storage.s3.endpoint_url }}" placeholder="Leave empty for AWS">
+          <p class="text-xs text-txt-3 mt-0.5">For MinIO, Wasabi, Backblaze</p>
+        </div>
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Access Key ID</label>
+          <input type="password" name="s3_access_key" class="input" value="{{ settings.storage.s3.access_key_id }}" autocomplete="off">
+        </div>
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Secret Access Key</label>
+          <input type="password" name="s3_secret_key" class="input" value="{{ settings.storage.s3.secret_access_key }}" autocomplete="off">
+        </div>
+      </div>
+    </div>
+
+    {# ── GDrive Config ── #}
+    <div id="cfg-gdrive" class="{% if settings.storage.backend != 'gdrive' %}hidden{% endif %}">
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Service Account JSON</label>
+          <input type="text" name="gdrive_credentials" class="input" value="{{ settings.storage.gdrive.credentials_json }}" placeholder="/path/to/service-account.json">
+          <p class="text-xs text-txt-3 mt-0.5">Path to Google Cloud service account credentials file</p>
+        </div>
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Root Folder ID</label>
+          <input type="text" name="gdrive_folder_id" class="input font-mono" value="{{ settings.storage.gdrive.folder_id }}" placeholder="1a2b3c4d5e...">
+          <p class="text-xs text-txt-3 mt-0.5">ID from the Google Drive folder URL</p>
+        </div>
+      </div>
+    </div>
+
+    {# ── Actions ── #}
+    <div class="flex items-center gap-3 pt-2">
+      <button type="submit" class="btn-primary btn-sm">Save</button>
+      <button type="button" class="btn-secondary btn-sm"
+              hx-post="/settings/storage/test" hx-target="#storage-test-result" hx-swap="innerHTML"
+              hx-include="closest form">
+        Test Connection
+      </button>
+      <span id="storage-test-result" class="text-xs"></span>
+    </div>
+  </form>
+</div>
+
+<script>
+document.querySelectorAll('input[name="backend"]').forEach(r => {
+  r.addEventListener('change', () => {
+    document.querySelectorAll('[id^="cfg-"]').forEach(d => d.classList.add('hidden'));
+    const target = document.getElementById('cfg-' + r.value);
+    if (target) target.classList.remove('hidden');
+  });
+});
+</script>
+
+{% endblock %}

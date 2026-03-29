@@ -1,7 +1,8 @@
-"""Tests for file storage."""
+"""Tests for file storage (dispatcher + local backend)."""
+
+from pathlib import Path
 
 import pytest
-from pathlib import Path
 
 
 class TestFileStorage:
@@ -12,11 +13,11 @@ class TestFileStorage:
             original_name="test.txt",
             category="personal",
         )
-        assert record.stored_path.exists()
+        assert Path(record.stored_path).exists()
         assert record.size_bytes == 11
         assert record.sha256
         assert record.category == "personal"
-        assert record.stored_path.read_bytes() == b"hello world"
+        assert Path(record.stored_path).read_bytes() == b"hello world"
 
     @pytest.mark.asyncio
     async def test_save_from_path(self, file_storage, sample_text_file):
@@ -24,7 +25,7 @@ class TestFileStorage:
             source=sample_text_file,
             category="health",
         )
-        assert record.stored_path.exists()
+        assert Path(record.stored_path).exists()
         assert record.original_name == "test.txt"
 
     @pytest.mark.asyncio
@@ -32,8 +33,7 @@ class TestFileStorage:
         record = await file_storage.save_from_bytes(
             data=b"data", original_name="doc.pdf", category="business",
         )
-        # Should be in base/business/YYYY-MM/
-        parts = record.stored_path.parts
+        parts = Path(record.stored_path).parts
         assert "business" in parts
 
     def test_check_extension(self, file_storage):
@@ -47,10 +47,10 @@ class TestFileStorage:
         record = await file_storage.save_from_bytes(
             data=b"delete me", original_name="del.txt", category="tmp",
         )
-        assert record.stored_path.exists()
+        assert await file_storage.exists(record.stored_path)
         result = await file_storage.delete(record.stored_path)
         assert result is True
-        assert not record.stored_path.exists()
+        assert not await file_storage.exists(record.stored_path)
 
     @pytest.mark.asyncio
     async def test_hash_consistency(self, file_storage):
@@ -58,3 +58,12 @@ class TestFileStorage:
         r1 = await file_storage.save_from_bytes(data=data, original_name="a.txt", category="x")
         r2 = await file_storage.save_from_bytes(data=data, original_name="b.txt", category="x")
         assert r1.sha256 == r2.sha256
+
+    @pytest.mark.asyncio
+    async def test_read_file(self, file_storage):
+        data = b"read me back"
+        record = await file_storage.save_from_bytes(
+            data=data, original_name="read.txt", category="test",
+        )
+        result = await file_storage.read_file(record.stored_path)
+        assert result == data

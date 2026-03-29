@@ -1,0 +1,134 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+
+{# ── Provider Mode ── #}
+<div class="card mb-6">
+  <h3 class="card-header">Provider Mode</h3>
+  <p class="text-xs text-txt-3 mb-3">How the system connects to AI models.</p>
+  <form method="POST" action="/settings/llm/save">
+    <div class="flex gap-3 mb-3">
+      <label class="flex items-center gap-2 bg-surface-2 px-4 py-2.5 rounded-lg border cursor-pointer text-sm
+                     {% if provider_mode == 'oauth' %}border-accent bg-accent/10{% else %}border-border{% endif %}">
+        <input type="radio" name="provider_mode" value="oauth" class="accent-accent"
+               {% if provider_mode == 'oauth' %}checked{% endif %}> OAuth Proxy
+      </label>
+      <label class="flex items-center gap-2 bg-surface-2 px-4 py-2.5 rounded-lg border cursor-pointer text-sm
+                     {% if provider_mode != 'oauth' %}border-accent bg-accent/10{% else %}border-border{% endif %}">
+        <input type="radio" name="provider_mode" value="api" class="accent-accent"
+               {% if provider_mode != 'oauth' %}checked{% endif %}> Direct API
+      </label>
+    </div>
+    {% if provider_mode == 'oauth' %}
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+      <div>
+        <label class="text-xs text-txt-3 block mb-1">Proxy URL</label>
+        <input type="text" name="oauth_base" class="input text-xs" value="{{ oauth_base }}" placeholder="http://127.0.0.1:10531/v1">
+        <p class="text-xs text-txt-3 mt-1">OpenAI-compatible endpoint.</p>
+      </div>
+      <div>
+        <label class="text-xs text-txt-3 block mb-1">OAuth Client ID</label>
+        <input type="text" name="oauth_client_id" class="input text-xs" value="{{ settings.llm.oauth_client_id }}" placeholder="Optional" autocomplete="off">
+        <p class="text-xs text-txt-3 mt-1">For proxy authentication.</p>
+      </div>
+      <div>
+        <label class="text-xs text-txt-3 block mb-1">OAuth Client Secret</label>
+        <input type="password" name="oauth_client_secret" class="input text-xs" placeholder="Leave empty to keep current" autocomplete="off">
+        <p class="text-xs text-txt-3 mt-1">Encrypted in database.</p>
+      </div>
+    </div>
+    {% endif %}
+</div>
+
+{# ── Model Roles ── #}
+<div class="card mb-6">
+  <h3 class="card-header">Model Roles</h3>
+  <p class="text-xs text-txt-3 mb-4">Each task uses a dedicated model. Pick the best balance of quality vs. cost.</p>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    {% set roles = [
+      ("classification", "Classification", "Categorization & tagging", "Fast, cheap model"),
+      ("extraction", "Extraction", "Field extraction from documents", "Smart, detailed model"),
+      ("search", "Search (RAG)", "Answering questions about files", "Balanced quality"),
+      ("analysis", "Analysis", "Trends & multi-doc analytics", "Best quality model"),
+    ] %}
+    {% for role_id, role_name, role_desc, role_hint in roles %}
+    {% set mc = model_configs.get(role_id, {}) %}
+    {% set current_model = mc.get('model', '') %}
+    <div class="bg-surface-2 rounded-xl p-4 border border-border">
+      <div class="flex items-center justify-between mb-1">
+        <h4 class="text-sm font-semibold text-txt">{{ role_name }}</h4>
+        <span class="text-[10px] text-txt-3 bg-surface-3 px-1.5 py-0.5 rounded">{{ role_hint }}</span>
+      </div>
+      <p class="text-xs text-txt-3 mb-3">{{ role_desc }}</p>
+
+      <label class="text-xs text-txt-3 block mb-1">Model</label>
+      <div class="relative mb-2">
+        <select name="{{ role_id }}_model" class="input text-xs font-mono appearance-none pr-8">
+          {% for m in available_models %}
+          <option value="{{ m }}" {% if current_model == m or current_model == 'openai/' + m %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+          {% if current_model and current_model not in available_models and ('openai/' + current_model) not in available_models %}
+          {# Current model not in list — show it as selected option #}
+          {% set clean = current_model.replace('openai/', '') %}
+          {% if clean not in available_models %}
+          <option value="{{ current_model }}" selected>{{ current_model }}</option>
+          {% endif %}
+          {% endif %}
+        </select>
+        <svg class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Max tokens</label>
+          <input type="number" name="{{ role_id }}_max_tokens" class="input text-xs"
+                 value="{{ mc.get('max_tokens', 1024) }}" min="256" max="32768">
+        </div>
+        <div>
+          <label class="text-xs text-txt-3 block mb-1">Temperature</label>
+          <input type="number" name="{{ role_id }}_temperature" class="input text-xs"
+                 value="{{ mc.get('temperature', 0.1) }}" min="0" max="2" step="0.1">
+          <p class="text-xs text-txt-3 mt-0.5">0 = precise, 1 = creative</p>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="mt-4">
+    <button type="submit" class="btn-primary btn-sm">Save Models</button>
+  </div>
+  </form>
+</div>
+
+{# ── System Prompts (side by side) ── #}
+<div class="card">
+  <h3 class="card-header">System Prompts</h3>
+  <p class="text-xs text-txt-3 mb-4">Instructions sent to the AI for each task. Customize to fit your document types.</p>
+
+  <form method="POST" action="/settings/prompts/save">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <label class="text-xs font-medium text-txt-2">Search Prompt</label>
+          <span class="text-[10px] text-txt-3 bg-surface-2 px-1.5 py-0.5 rounded">RAG answers</span>
+        </div>
+        <textarea name="search_prompt" class="input font-mono text-xs min-h-[200px] resize-y leading-relaxed">{{ settings.llm.search_prompt }}</textarea>
+        <p class="text-xs text-txt-3 mt-1">Defines how the AI answers questions about your documents.</p>
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-1.5">
+          <label class="text-xs font-medium text-txt-2">Classification Prompt</label>
+          <span class="text-[10px] text-txt-3 bg-surface-2 px-1.5 py-0.5 rounded">Document tagging</span>
+        </div>
+        <textarea name="classification_prompt" class="input font-mono text-xs min-h-[200px] resize-y leading-relaxed">{{ settings.llm.classification_prompt }}</textarea>
+        <p class="text-xs text-txt-3 mt-1">Defines how uploaded documents are categorized and summarized.</p>
+      </div>
+    </div>
+    <div class="mt-4">
+      <button type="submit" class="btn-primary btn-sm">Save Prompts</button>
+    </div>
+  </form>
+</div>
+
+{% endblock %}

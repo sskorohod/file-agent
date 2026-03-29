@@ -270,11 +270,123 @@
   </script>
 </div>
 
-{# ── Storage ── #}
+{# ── Encryption ── #}
+<div class="card mb-4 border-l-2 border-l-warn">
+  <h3 class="card-header flex items-center gap-2">
+    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+    Encryption
+  </h3>
+
+  {% if not enc_configured %}
+  <div class="mb-3 px-3 py-2 rounded-lg bg-warn-bg text-warn-text text-sm">
+    Шифрование не настроено. Задайте мастер-пароль — он нигде не сохраняется, ключ вычисляется из него при каждом запуске.
+  </div>
+  <form method="POST" action="/settings/encryption/setup" class="space-y-3">
+    <div>
+      <label class="text-xs text-txt-3 block mb-1">Мастер-пароль (мин. 8 символов)</label>
+      <input type="password" name="master_password" required minlength="8" class="input" placeholder="Придумайте надёжный пароль">
+    </div>
+    <div>
+      <label class="text-xs text-txt-3 block mb-1">Повторите пароль</label>
+      <input type="password" name="confirm_password" required minlength="8" class="input" placeholder="Повторите">
+    </div>
+    <button type="submit" class="btn-primary btn-sm" onclick="return confirm('Настроить шифрование? После этого все новые файлы будут шифроваться.')">
+      🔐 Настроить шифрование
+    </button>
+  </form>
+
+  {% elif not enc_unlocked %}
+  <div class="mb-3 px-3 py-2 rounded-lg bg-err-bg text-err-text text-sm">
+    🔒 Шифрование настроено, но заблокировано. Введите мастер-пароль.
+  </div>
+  <form method="POST" action="/settings/encryption/unlock" class="space-y-3">
+    <div>
+      <label class="text-xs text-txt-3 block mb-1">Мастер-пароль</label>
+      <input type="password" name="master_password" required class="input" placeholder="Ваш мастер-пароль">
+    </div>
+    <button type="submit" class="btn-primary btn-sm">🔓 Разблокировать</button>
+  </form>
+
+  {% else %}
+  <div class="mb-3 px-3 py-2 rounded-lg bg-ok-bg text-ok-text text-sm">
+    🔓 Шифрование активно. Ключ в памяти — при перезапуске потребуется мастер-пароль.
+  </div>
+  <div class="grid grid-cols-[140px_1fr] gap-2 text-sm mb-3">
+    <span class="text-txt-3">Файлы на диске</span>
+    <span>{% if settings.encryption.files %}<span class="badge badge-ok">Зашифрованы</span>{% else %}<span class="badge badge-warn">Выключено</span>{% endif %}</span>
+    <span class="text-txt-3">База данных</span>
+    <span>{% if settings.encryption.database %}<span class="badge badge-ok">Зашифрована</span>{% else %}<span class="badge badge-warn">Выключено</span>{% endif %}</span>
+    <span class="text-txt-3">Qdrant (текст)</span>
+    <span>{% if settings.encryption.qdrant_strip %}<span class="badge badge-ok">Удалён</span>{% else %}<span class="badge badge-warn">Присутствует</span>{% endif %}</span>
+  </div>
+  {% if recovery_exists %}
+  <div class="px-3 py-2 rounded-lg bg-warn-bg text-warn-text text-sm mb-3">
+    ⚠️ Recovery key на диске — <a href="/settings/encryption/recovery" class="underline font-bold">скачайте</a>, сохраните и удалите.
+  </div>
+  {% endif %}
+  {% endif %}
+</div>
+
+{# ── Storage Backend ── #}
+<div class="card mb-4 border-l-2 border-l-info">
+  <h3 class="card-header flex items-center gap-2">
+    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+    Storage Backend
+  </h3>
+
+  <form method="POST" action="/settings/storage/save" class="space-y-4">
+    <div class="flex gap-3">
+      {% for opt in [("local", "Local Disk"), ("s3", "S3 / MinIO"), ("gdrive", "Google Drive")] %}
+      <label class="flex items-center gap-1.5 text-sm text-txt-2 cursor-pointer bg-surface-2 px-3 py-2 rounded-lg border border-border {% if settings.storage.backend == opt[0] %}border-accent bg-accent/10{% endif %}">
+        <input type="radio" name="backend" value="{{ opt[0] }}" class="accent-accent"
+               {% if settings.storage.backend == opt[0] %}checked{% endif %}
+               hx-get="/settings/storage/fields?backend={{ opt[0] }}" hx-target="#storage-fields" hx-swap="innerHTML">
+        {{ opt[1] }}
+      </label>
+      {% endfor %}
+    </div>
+
+    <div id="storage-fields">
+      {% if settings.storage.backend == 'local' %}
+      <div class="grid grid-cols-[120px_1fr] gap-2 text-sm">
+        <span class="text-txt-3">Path</span>
+        <span class="font-mono text-xs text-txt-2">{{ settings.storage.base_path }}</span>
+      </div>
+      {% elif settings.storage.backend == 's3' %}
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="text-xs text-txt-3 block mb-1">Bucket</label><input type="text" name="s3_bucket" value="{{ settings.storage.s3.bucket }}" class="input" placeholder="my-bucket"></div>
+        <div><label class="text-xs text-txt-3 block mb-1">Region</label><input type="text" name="s3_region" value="{{ settings.storage.s3.region }}" class="input" placeholder="us-east-1"></div>
+        <div><label class="text-xs text-txt-3 block mb-1">Prefix</label><input type="text" name="s3_prefix" value="{{ settings.storage.s3.prefix }}" class="input" placeholder="fileagent"></div>
+        <div><label class="text-xs text-txt-3 block mb-1">Endpoint URL</label><input type="text" name="s3_endpoint" value="{{ settings.storage.s3.endpoint_url }}" class="input" placeholder="(AWS default or MinIO URL)"></div>
+        <div><label class="text-xs text-txt-3 block mb-1">Access Key ID</label><input type="password" name="s3_access_key" value="{{ settings.storage.s3.access_key_id }}" class="input" autocomplete="off"></div>
+        <div><label class="text-xs text-txt-3 block mb-1">Secret Access Key</label><input type="password" name="s3_secret_key" value="{{ settings.storage.s3.secret_access_key }}" class="input" autocomplete="off"></div>
+      </div>
+      {% elif settings.storage.backend == 'gdrive' %}
+      <div class="space-y-3">
+        <div><label class="text-xs text-txt-3 block mb-1">Service Account JSON path</label><input type="text" name="gdrive_credentials" value="{{ settings.storage.gdrive.credentials_json }}" class="input" placeholder="/path/to/service-account.json"></div>
+        <div><label class="text-xs text-txt-3 block mb-1">Root Folder ID</label><input type="text" name="gdrive_folder_id" value="{{ settings.storage.gdrive.folder_id }}" class="input" placeholder="1a2b3c4d5e..."></div>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="flex items-center gap-3">
+      <button type="submit" class="btn-primary btn-sm">Save Storage Config</button>
+      <button type="button" class="btn-secondary btn-sm"
+              hx-post="/settings/storage/test" hx-target="#storage-test-result" hx-swap="innerHTML"
+              hx-include="closest form">
+        Test Connection
+      </button>
+      <span id="storage-test-result" class="text-xs"></span>
+    </div>
+
+    <p class="text-xs text-txt-3 mt-2">Existing files stay on their current backend. Only new uploads go to the selected backend.</p>
+  </form>
+</div>
+
+{# ── Storage Info ── #}
 <div class="card">
-  <h3 class="card-header">Storage & Embedding</h3>
+  <h3 class="card-header">Embedding & Limits</h3>
   <div class="grid grid-cols-[120px_1fr] gap-2 text-sm">
-    <span class="text-txt-3">Files path</span><span class="font-mono text-xs text-txt-2">{{ settings.storage.base_path }}</span>
     <span class="text-txt-3">DB path</span><span class="font-mono text-xs text-txt-2">{{ settings.database.path }}</span>
     <span class="text-txt-3">Embedding</span><span class="font-mono text-xs text-txt-2">{{ settings.embedding.model }}</span>
     <span class="text-txt-3">Chunk size</span><span class="text-txt-2">{{ settings.embedding.chunk_size_words }} words, overlap {{ settings.embedding.chunk_overlap_words }}</span>

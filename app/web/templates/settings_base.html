@@ -1,0 +1,47 @@
+{% extends "layout.html" %}
+{% block title %}Settings — FileAgent{% endblock %}
+{% block content %}
+
+{# ── Header ── #}
+<div class="mb-6">
+  <h1 class="text-xl font-bold text-txt">Settings</h1>
+  <p class="text-sm text-txt-3 mt-0.5">System configuration</p>
+</div>
+
+{# ── Toast notification ── #}
+{% if saved %}
+<div class="mb-4 px-4 py-2.5 rounded-lg bg-ok-bg border border-ok/20 text-ok-text text-sm flex items-center gap-2 animate-fade-in">
+  <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+  Saved successfully
+</div>
+{% endif %}
+{% if error %}
+<div class="mb-4 px-4 py-2.5 rounded-lg bg-err-bg border border-err/20 text-err-text text-sm">
+  {{ error }}
+</div>
+{% endif %}
+
+{# ── Tabs ── #}
+<div class="mb-6 -mx-1 overflow-x-auto scrollbar-hide">
+  <nav class="flex gap-1 min-w-max px-1">
+    {% set tabs = [
+      ("keys", "API & Keys", "/settings/keys"),
+      ("llm", "LLM", "/settings/llm"),
+      ("storage", "Storage", "/settings/storage"),
+      ("security", "Security", "/settings/security"),
+      ("advanced", "Advanced", "/settings/advanced"),
+    ] %}
+    {% for id, label, href in tabs %}
+    <a href="{{ href }}"
+       class="px-3.5 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap
+              {% if tab == id %}bg-accent/15 text-accent-2{% else %}text-txt-3 hover:text-txt hover:bg-surface-2{% endif %}">
+      {{ label }}
+    </a>
+    {% endfor %}
+  </nav>
+</div>
+
+{# ── Tab content ── #}
+{% block settings_content %}{% endblock %}
+
+{% endblock %}

@@ -167,35 +167,67 @@ class LLMAnalytics:
     # ── Step 2: Retrieve ───────────────────────────────────────────────
 
     async def _retrieve_documents(self, scope: dict) -> list[dict]:
-        """Fetch all matching documents from DB."""
+        """Hybrid retrieval: category + FTS + vector → unique file_ids → DB docs.
+
+        Pipeline:
+        1. Collect candidates from 3 channels (category filter, FTS, vector search)
+        2. Deduplicate by file_id
+        3. Load full DB records
+        4. Filter by COALESCE(document_date, created_at)
+        """
         category = scope.get("category")
         fts_query = scope.get("fts_query", "")
+        metrics = scope.get("metrics", [])
         time_range_days = scope.get("time_range_days", 0)
 
-        docs = []
+        candidate_ids: dict[str, None] = {}  # ordered set
 
-        # Primary: category-based retrieval
+        # Channel 1: category-based retrieval
         if category:
-            docs = await self.db.list_files(category=category, limit=200)
+            cat_docs = await self.db.list_files(category=category, limit=200)
+            for d in cat_docs:
+                candidate_ids[d["id"]] = None
 
-        # Fallback/supplement: FTS search
-        if fts_query and len(docs) < 5:
+        # Channel 2: FTS search
+        if fts_query:
             fts_docs = await self.db.search_files(fts_query, limit=50)
-            existing_ids = {d["id"] for d in docs}
             for d in fts_docs:
-                if d["id"] not in existing_ids:
-                    docs.append(d)
+                candidate_ids[d["id"]] = None
 
-        # Filter by time range
+        # Channel 3: vector search (semantic, using query or metrics)
+        vector_query = fts_query or " ".join(metrics) or category or ""
+        if vector_query and self.vector_store:
+            try:
+                from app.storage.vectors import SearchResult
+                vector_results = await self.vector_store.search(vector_query, top_k=20)
+                for r in vector_results:
+                    if r.score >= 0.45:  # lower threshold for analytics recall
+                        candidate_ids[r.file_id] = None
+            except Exception as e:
+                logger.debug(f"Vector search for analytics failed (non-fatal): {e}")
+
+        # Load full DB records for all unique candidates
+        docs = []
+        for fid in candidate_ids:
+            try:
+                doc = await self.db.get_file(fid)
+                if doc:
+                    docs.append(doc)
+            except Exception:
+                continue
+
+        # Filter by time range using COALESCE(document_date, created_at)
         if time_range_days > 0:
             cutoff = datetime.now() - timedelta(days=time_range_days)
             filtered = []
             for d in docs:
                 try:
-                    created = datetime.fromisoformat(d["created_at"])
-                    if created >= cutoff:
+                    # Prefer document_date if available
+                    date_str = d.get("document_date") or d.get("created_at")
+                    doc_date = datetime.fromisoformat(date_str)
+                    if doc_date >= cutoff:
                         filtered.append(d)
-                except (ValueError, KeyError):
+                except (ValueError, KeyError, TypeError):
                     filtered.append(d)  # keep if date unparseable
             docs = filtered
 
@@ -227,6 +259,94 @@ class LLMAnalytics:
         all_points.sort(key=lambda p: p.date)
         return all_points
 
+    @staticmethod
+    def _try_cached_fields(doc: dict, metrics: list[str]) -> list[DataPoint] | None:
+        """Try to build DataPoints from cached extracted_fields.
+
+        Guard rules — only use structured numeric datapoints:
+        - Must have a parseable date AND a numeric value
+        - If metrics filter is set, field must match
+        - Returns None if no valid structured data found (fallback to LLM)
+        """
+        try:
+            meta = json.loads(doc.get("metadata_json", "{}") or "{}")
+            fields = meta.get("extracted_fields")
+            if not fields or not isinstance(fields, dict):
+                return None
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        file_id = doc.get("id", "")
+        filename = doc.get("original_name", "unknown")
+
+        # Look for structured numeric data patterns in extracted_fields
+        points = []
+
+        # Pattern 1: fields with explicit date + value pairs (e.g., from skills)
+        date_val = None
+        for dk in ("date", "issue_date", "date_of_service", "measurement_date"):
+            if fields.get(dk):
+                date_val = fields[dk]
+                break
+
+        if not date_val:
+            return None  # No date → can't build time-series points
+
+        # Validate date
+        from datetime import datetime as _dt
+        parsed_date = None
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y", "%d/%m/%Y"):
+            try:
+                parsed_date = _dt.strptime(str(date_val), fmt).strftime("%Y-%m-%d")
+                break
+            except ValueError:
+                continue
+        if not parsed_date:
+            try:
+                _dt.fromisoformat(str(date_val))
+                parsed_date = str(date_val)[:10]
+            except ValueError:
+                return None
+
+        # Scan all fields for numeric values
+        skip_keys = {"date", "issue_date", "date_of_service", "measurement_date",
+                     "summary", "priority", "document_type", "expiry_date",
+                     "patient_name", "doctor", "clinic", "vendor", "description"}
+        for key, val in fields.items():
+            if key in skip_keys:
+                continue
+            # Try to parse as number
+            numeric_val = None
+            unit = ""
+            if isinstance(val, (int, float)):
+                numeric_val = float(val)
+            elif isinstance(val, str):
+                # Try "123.45 mg/dL" pattern
+                parts = val.strip().split(None, 1)
+                if parts:
+                    try:
+                        numeric_val = float(parts[0].replace(",", "."))
+                        unit = parts[1] if len(parts) > 1 else ""
+                    except ValueError:
+                        continue
+            if numeric_val is None:
+                continue
+
+            metric_name = key.replace("_", " ").title()
+            if metrics and not any(m.lower() in metric_name.lower() for m in metrics):
+                continue
+
+            points.append(DataPoint(
+                date=parsed_date,
+                metric=metric_name,
+                value=numeric_val,
+                unit=unit,
+                file_id=file_id,
+                source_filename=filename,
+            ))
+
+        return points if points else None
+
     async def _extract_from_one(
         self, doc: dict, metrics: list[str]
     ) -> list[DataPoint]:
@@ -236,16 +356,11 @@ class LLMAnalytics:
             file_id = doc.get("id", "")
             filename = doc.get("original_name", "unknown")
 
-            # Check if we have cached extracted_fields in metadata
-            try:
-                meta = json.loads(doc.get("metadata_json", "{}") or "{}")
-                cached_fields = meta.get("extracted_fields")
-                if cached_fields:
-                    # Try to use cached data if it has numeric values
-                    # (future optimization — for now always re-extract)
-                    pass
-            except (json.JSONDecodeError, TypeError):
-                pass
+            # Try cached extracted_fields first (avoids LLM call)
+            cached_points = self._try_cached_fields(doc, metrics)
+            if cached_points:
+                logger.debug(f"Used cached fields for {filename}: {len(cached_points)} points")
+                return cached_points
 
             try:
                 response = await self.llm.complete(

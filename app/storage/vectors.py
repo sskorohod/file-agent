@@ -87,10 +87,12 @@ class VectorStore:
         qdrant_config: QdrantConfig,
         embedding_config: EmbeddingConfig,
         google_api_key: str = "",
+        strip_text: bool = False,
     ):
         self.qdrant_config = qdrant_config
         self.embedding_config = embedding_config
         self._google_api_key = google_api_key
+        self._strip_text = strip_text  # Don't store text in Qdrant payload
         self._client = None
         self._local_embedder = None
         self._gemini_embedder = None
@@ -285,7 +287,7 @@ class VectorStore:
                     payload={
                         "file_id": file_id,
                         "chunk_index": -1,  # -1 = multimodal point
-                        "text": text[:500] if text else "",  # preview for display
+                        **({"text": text[:500] if text else ""} if not self._strip_text else {}),
                         "embedding_type": "multimodal",
                         "mime_type": mime_type,
                         "total_chunks": 0,  # updated below
@@ -305,7 +307,7 @@ class VectorStore:
                     payload={
                         "file_id": file_id,
                         "chunk_index": i,
-                        "text": chunk,
+                        **({"text": chunk} if not self._strip_text else {}),
                         "embedding_type": "text",
                         "total_chunks": len(chunks),
                         **meta,
@@ -429,6 +431,22 @@ class VectorStore:
             )
             for hit in response.points
         ]
+
+    async def update_document_metadata(self, file_id: str, payload_updates: dict) -> None:
+        """Update payload fields on all points belonging to a file (no re-embedding).
+
+        Uses Qdrant set_payload with a file_id filter to patch metadata in-place.
+        """
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        self.client.set_payload(
+            collection_name=self.qdrant_config.collection_name,
+            payload=payload_updates,
+            points=Filter(
+                must=[FieldCondition(key="file_id", match=MatchValue(value=file_id))]
+            ),
+        )
+        logger.info(f"Updated Qdrant payload for {file_id}: {list(payload_updates.keys())}")
 
     async def delete_document(self, file_id: str) -> int:
         """Delete all points for a file (multimodal + text chunks)."""

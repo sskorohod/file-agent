@@ -6,8 +6,10 @@ import base64
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
+
+from app.web.limiter import limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
@@ -108,7 +110,9 @@ async def api_download_file(file_id: str, auth: dict = Depends(verify_api_key)):
 
 
 @router.get("/search")
+@limiter.limit("30/minute")
 async def api_search(
+    request: Request,
     q: str, top_k: int = 5,
     auth: dict = Depends(verify_api_key),
 ):
@@ -147,7 +151,9 @@ async def api_search(
 
 
 @router.post("/files/upload")
+@limiter.limit("10/minute")
 async def api_upload_file(
+    request: Request,
     body: dict,
     auth: dict = Depends(verify_api_key),
 ):
@@ -181,27 +187,26 @@ async def api_upload_file(
 
 
 @router.delete("/files/{file_id}")
-async def api_delete_file(file_id: str, auth: dict = Depends(verify_api_key)):
-    """Cascading delete: disk + vectors + DB."""
-    db = _get("db")
-    file = await db.get_file(file_id)
-    if not file:
+@limiter.limit("20/minute")
+async def api_delete_file(request: Request, file_id: str, auth: dict = Depends(verify_api_key)):
+    """Cascading delete via lifecycle service."""
+    lifecycle = _get("lifecycle")
+    if not lifecycle:
+        raise HTTPException(status_code=500, detail="Lifecycle service not available")
+    deleted = await lifecycle.delete(file_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="File not found")
-
-    vs = _get("vector_store")
-    if vs:
-        try:
-            await vs.delete_document(file_id)
-        except Exception:
-            pass
-
-    if file.get("stored_path"):
-        try:
-            p = Path(file["stored_path"])
-            if p.exists():
-                p.unlink()
-        except Exception:
-            pass
-
-    await db.delete_file(file_id)
     return {"deleted": True, "file_id": file_id}
+
+
+@router.post("/files/{file_id}/reclassify")
+@limiter.limit("10/minute")
+async def api_reclassify_file(request: Request, file_id: str, auth: dict = Depends(verify_api_key)):
+    """Reclassify a file via lifecycle service."""
+    lifecycle = _get("lifecycle")
+    if not lifecycle:
+        raise HTTPException(status_code=500, detail="Lifecycle service not available")
+    result = await lifecycle.reclassify(file_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="File not found or classifier unavailable")
+    return result

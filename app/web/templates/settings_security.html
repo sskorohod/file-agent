@@ -1,0 +1,88 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+
+{# ── Encryption ── #}
+<div class="card mb-6">
+  <h3 class="card-header flex items-center gap-2">
+    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+    Data Encryption
+  </h3>
+
+  {% if not enc_configured %}
+  {# ── Not configured ── #}
+  <div class="mb-4 px-4 py-3 rounded-lg bg-warn-bg border border-warn/20 text-warn-text text-sm">
+    Encryption is not configured. Set a master password to encrypt your files and database. The password is never stored — the encryption key is derived from it at each startup and exists only in memory.
+  </div>
+  <form method="POST" action="/settings/encryption/setup" class="space-y-3 max-w-md">
+    <div>
+      <label class="text-xs font-medium text-txt-2 block mb-1">Master Password</label>
+      <input type="password" name="master_password" required minlength="8" class="input" placeholder="Minimum 8 characters">
+      <p class="text-xs text-txt-3 mt-1">Choose a strong password you can remember. It's the only way to access encrypted data.</p>
+    </div>
+    <div>
+      <label class="text-xs font-medium text-txt-2 block mb-1">Confirm Password</label>
+      <input type="password" name="confirm_password" required minlength="8" class="input" placeholder="Repeat password">
+    </div>
+    <button type="submit" class="btn-primary btn-sm" onclick="return confirm('Enable encryption? New files will be encrypted from now on.')">
+      Enable Encryption
+    </button>
+  </form>
+
+  {% elif not enc_unlocked %}
+  {# ── Locked ── #}
+  <div class="mb-4 px-4 py-3 rounded-lg bg-err-bg border border-err/20 text-err-text text-sm flex items-center gap-2">
+    <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+    Encryption is locked. Enter your master password to unlock.
+  </div>
+  <form method="POST" action="/settings/encryption/unlock" class="max-w-md">
+    <div class="mb-3">
+      <label class="text-xs font-medium text-txt-2 block mb-1">Master Password</label>
+      <input type="password" name="master_password" required class="input" placeholder="Your master password" autofocus>
+    </div>
+    <button type="submit" class="btn-primary btn-sm">Unlock</button>
+  </form>
+
+  {% else %}
+  {# ── Unlocked ── #}
+  <div class="mb-4 px-4 py-3 rounded-lg bg-ok-bg border border-ok/20 text-ok-text text-sm flex items-center gap-2">
+    <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    Encryption active. Key in memory — requires password after restart.
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+    {% for label, flag, desc in [
+      ("Files on disk", settings.encryption.files, "AES-256-GCM encryption for stored files"),
+      ("Database columns", settings.encryption.database, "Sensitive text fields in SQLite"),
+      ("Qdrant text strip", settings.encryption.qdrant_strip, "Remove text from vector payload"),
+    ] %}
+    <div class="bg-surface-2 rounded-lg p-3 border border-border">
+      <div class="flex items-center justify-between mb-1">
+        <span class="text-sm font-medium text-txt">{{ label }}</span>
+        {% if flag %}<span class="badge badge-ok">On</span>{% else %}<span class="badge badge-warn">Off</span>{% endif %}
+      </div>
+      <p class="text-xs text-txt-3">{{ desc }}</p>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if recovery_exists %}
+  <div class="px-4 py-3 rounded-lg bg-warn-bg border border-warn/20 text-warn-text text-sm mb-4">
+    Recovery key file is still on disk. <a href="/settings/encryption/recovery" class="underline font-bold">Download it</a>, save to your password manager, and delete from server.
+  </div>
+  {% endif %}
+  {% endif %}
+</div>
+
+{# ── Qdrant Health ── #}
+<div class="card">
+  <h3 class="card-header">Infrastructure Status</h3>
+  <div class="grid grid-cols-[120px_1fr] gap-2 text-sm">
+    <span class="text-txt-3">Qdrant</span>
+    <span>{% if qdrant_health.get('status') == 'healthy' %}<span class="badge badge-ok">Healthy</span>{% else %}<span class="badge badge-err">Unavailable</span>{% endif %}
+    {% if qdrant_health.get('points_count') %}<span class="text-txt-3 text-xs ml-2">{{ qdrant_health.points_count }} vectors</span>{% endif %}</span>
+    <span class="text-txt-3">Collection</span><span class="font-mono text-xs text-txt-2">{{ qdrant_health.get('collection', '—') }}</span>
+    <span class="text-txt-3">Embedding</span><span class="font-mono text-xs text-txt-2">{{ qdrant_health.get('embedding_model', '—') }}</span>
+  </div>
+</div>
+
+{% endblock %}

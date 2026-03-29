@@ -8,13 +8,20 @@
     <h1 class="text-lg sm:text-xl font-bold text-txt">Files</h1>
     <p class="text-xs sm:text-sm text-txt-3 mt-0.5">{{ total }} file{{ 's' if total != 1 }}</p>
   </div>
-  <form method="POST" action="/files/reclassify-uncategorized">
-    <button type="submit" class="btn-primary btn-sm touch-target"
-            onclick="return confirm('Reclassify all uncategorized files?')">
-      <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115.36-6.36L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15.36 6.36L3 16"/></svg>
-      <span class="hidden sm:inline">Reclassify</span>
+  <div class="flex gap-2">
+    <button type="button" onclick="document.getElementById('upload-dialog').showModal()"
+            class="btn-primary btn-sm touch-target">
+      <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      <span class="hidden sm:inline">Upload</span>
     </button>
-  </form>
+    <form method="POST" action="/files/reclassify-uncategorized">
+      <button type="submit" class="btn-secondary btn-sm touch-target"
+              onclick="return confirm('Reclassify all uncategorized files?')">
+        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115.36-6.36L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15.36 6.36L3 16"/></svg>
+        <span class="hidden sm:inline">Reclassify</span>
+      </button>
+    </form>
+  </div>
 </div>
 
 {# ── Filters ── #}
@@ -193,5 +200,34 @@
   </div>
 </div>
 {% endif %}
+
+{# ── Upload Dialog ── #}
+<dialog id="upload-dialog" class="bg-surface rounded-2xl p-5 border border-border shadow-xl backdrop:bg-black/50 w-full max-w-md">
+  <form method="POST" action="/files/upload" enctype="multipart/form-data">
+    <h2 class="text-lg font-bold text-txt mb-3">Upload file</h2>
+    <div id="drop-zone" class="border-2 border-dashed border-border rounded-xl p-6 text-center mb-4 transition-colors hover:border-accent cursor-pointer"
+         onclick="this.querySelector('input').click()">
+      <svg class="w-8 h-8 mx-auto text-txt-3 mb-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      <p class="text-sm text-txt-3" id="drop-label">Drop file here or click to browse</p>
+      <input type="file" name="file" class="hidden" required
+             onchange="document.getElementById('drop-label').textContent = this.files[0]?.name || 'Drop file here'">
+    </div>
+    <div class="flex gap-2 justify-end">
+      <button type="button" onclick="this.closest('dialog').close()" class="btn-secondary btn-sm">Cancel</button>
+      <button type="submit" class="btn-primary btn-sm">Upload</button>
+    </div>
+  </form>
+</dialog>
+<script>
+  const dz = document.getElementById('drop-zone');
+  if (dz) {
+    ['dragenter','dragover'].forEach(e => dz.addEventListener(e, ev => { ev.preventDefault(); dz.classList.add('border-accent'); }));
+    ['dragleave','drop'].forEach(e => dz.addEventListener(e, ev => { ev.preventDefault(); dz.classList.remove('border-accent'); }));
+    dz.addEventListener('drop', ev => {
+      const f = ev.dataTransfer.files[0];
+      if (f) { dz.querySelector('input').files = ev.dataTransfer.files; document.getElementById('drop-label').textContent = f.name; }
+    });
+  }
+</script>
 
 {% endblock %}

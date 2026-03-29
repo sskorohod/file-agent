@@ -1,0 +1,92 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+
+{# ── Internal API Keys ── #}
+<div class="card mb-6">
+  <h3 class="card-header">Internal API Keys</h3>
+  <p class="text-xs text-txt-3 mb-4">Keys for external apps to access your FileAgent via REST API or MCP.</p>
+
+  {% if new_key %}
+  <div class="mb-4 px-4 py-3 rounded-lg bg-ok-bg border border-ok/20 text-ok-text text-sm">
+    <p class="font-medium mb-1">Key created — copy now, shown only once:</p>
+    <code class="font-mono text-sm select-all font-bold block mt-1 break-all">{{ new_key }}</code>
+  </div>
+  {% endif %}
+
+  <form method="POST" action="/settings/api-keys/create" class="flex items-center gap-3 flex-wrap mb-4">
+    <input type="text" name="name" placeholder="Key name" value="default" class="input-sm w-40">
+    <label class="flex items-center gap-1.5 text-xs text-txt-2 cursor-pointer bg-surface-2 px-3 py-2 rounded-lg border border-border">
+      <input type="radio" name="mode" value="lite" checked class="accent-accent"> Lite
+    </label>
+    <label class="flex items-center gap-1.5 text-xs text-txt-2 cursor-pointer bg-surface-2 px-3 py-2 rounded-lg border border-border">
+      <input type="radio" name="mode" value="full" class="accent-accent"> Full
+    </label>
+    <button type="submit" class="btn-primary btn-sm">+ Create Key</button>
+  </form>
+  <p class="text-xs text-txt-3 mb-3">Lite: search only. Full: search + LLM answers + file access.</p>
+
+  {% if api_keys %}
+  <div class="overflow-x-auto rounded-lg border border-border">
+    <table class="w-full">
+      <thead class="bg-surface-2"><tr>
+        <th class="table-header">Key</th><th class="table-header">Name</th><th class="table-header">Mode</th><th class="table-header">Created</th><th class="table-header">Last used</th><th class="table-header w-10"></th>
+      </tr></thead>
+      <tbody>
+      {% for k in api_keys %}
+      <tr class="table-row">
+        <td class="table-cell font-mono text-xs">{{ k.key[:12] }}...{{ k.key[-4:] }}</td>
+        <td class="table-cell">{{ k.name }}</td>
+        <td class="table-cell">{% if k.mode == 'full' %}<span class="badge badge-accent">Full</span>{% else %}<span class="badge badge-info">Lite</span>{% endif %}</td>
+        <td class="table-cell text-txt-3 text-xs">{{ k.created_at[:16] }}</td>
+        <td class="table-cell text-txt-3 text-xs">{{ k.last_used_at[:16] if k.last_used_at else '—' }}</td>
+        <td class="table-cell">
+          <form method="POST" action="/settings/api-keys/{{ k.key }}/delete">
+            <button type="submit" class="text-txt-3 hover:text-err-text transition-colors p-1" onclick="return confirm('Delete key?')">
+              <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            </button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="text-sm text-txt-3">No API keys yet.</p>
+  {% endif %}
+</div>
+
+{# ── Provider API Keys ── #}
+<div class="card">
+  <h3 class="card-header">Provider Keys</h3>
+  <p class="text-xs text-txt-3 mb-4">API keys for AI providers. Stored encrypted in database.</p>
+
+  <form method="POST" action="/settings/keys/save">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+      {% for name, label, hint, value in [
+        ("anthropic", "Anthropic (Claude)", "console.anthropic.com", provider_keys.anthropic),
+        ("openai", "OpenAI (GPT)", "platform.openai.com", provider_keys.openai),
+        ("google", "Google (Gemini)", "aistudio.google.com", provider_keys.google),
+        ("qdrant", "Qdrant", "Qdrant Cloud dashboard", provider_keys.qdrant),
+      ] %}
+      <div class="bg-surface-2 rounded-lg p-3 border border-border">
+        <div class="flex items-center justify-between mb-2">
+          <label class="text-xs font-medium text-txt-2">{{ label }}</label>
+          {% if value and value != '***' %}
+          <span class="badge badge-ok">Configured</span>
+          {% else %}
+          <span class="badge badge-warn">Missing</span>
+          {% endif %}
+        </div>
+        <input type="password" name="{{ name }}" class="input text-xs" placeholder="sk-..." autocomplete="off"
+               value="">
+        <p class="text-xs text-txt-3 mt-1">Get key: {{ hint }}</p>
+      </div>
+      {% endfor %}
+    </div>
+    <button type="submit" class="btn-primary btn-sm">Save Provider Keys</button>
+    <span class="text-xs text-txt-3 ml-2">Leave empty to keep current key.</span>
+  </form>
+</div>
+
+{% endblock %}

@@ -104,45 +104,35 @@ class LLMSearch:
     ) -> dict:
         """Search documents and generate an answer. Returns {text, file_ids, cached}."""
 
-        # Step 0: Check cache
+        # Step 0: Check cache (keyed by query + compact + top_k + history)
+        cache_key = self._cache_key(query, compact, top_k, history)
         if self.db:
-            cached = await self._get_cache(query)
+            cached = await self._get_cache_by_key(cache_key)
             if cached:
                 logger.info(f"Cache hit for: {query[:50]}")
                 return {**cached, "cached": True}
 
-        # Step 1: Semantic search (wider net)
-        results = await self.vector_store.search(query, top_k=top_k)
+        # Step 1: Hybrid retrieval — vector + FTS, merged via RRF
+        file_scores = await self._hybrid_retrieve(query, top_k)
 
-        if not results:
+        if not file_scores:
             return {"text": "🔍 По вашему запросу ничего не найдено.", "file_ids": {}, "cached": False}
 
-        # Step 2: Group by file, pick best chunk per file
-        filtered = [r for r in results if r.score >= MIN_SCORE]
-        if not filtered:
-            filtered = results[:1]
-
+        # Step 2: Take top files by merged score
         from collections import defaultdict
-        by_file = defaultdict(list)
-        for r in filtered:
-            by_file[r.file_id].append(r)
+        ranked_files = sorted(file_scores.items(), key=lambda x: x[1]["score"], reverse=True)
 
-        # Sort files by best chunk score
+        seen_files = {}
         file_best = []
-        for fid, chunks in by_file.items():
-            best = max(chunks, key=lambda c: c.score)
-            file_best.append((fid, best))
-        file_best.sort(key=lambda x: x[1].score, reverse=True)
-
-        seen_files = {
-            fid: best.metadata.get("filename", "file")
-            for fid, best in file_best[:MAX_CHUNKS_LLM]
-        }
+        for fid, info in ranked_files[:MAX_CHUNKS_LLM]:
+            seen_files[fid] = info.get("filename", "file")
+            file_best.append((fid, info))
 
         # Step 3: Build context from top documents (use full text from DB when available)
         context_parts = []
-        for fid, best in file_best[:MAX_CHUNKS_LLM]:
-            fname = best.metadata.get("filename", "unknown")
+        for fid, info in file_best:
+            fname = info.get("filename", "unknown")
+            chunk_text = info.get("text", "")
 
             # Try to load full extracted_text from DB for richer answers
             full_text = None
@@ -155,7 +145,7 @@ class LLMSearch:
                 except Exception:
                     pass
 
-            text_source = full_text if full_text else best.text
+            text_source = full_text if full_text else chunk_text
             words = text_source.split()
             text = " ".join(words[:MAX_WORDS_PER_CHUNK])
             context_parts.append(f"[Document: {fname}]\n{text}")
@@ -183,7 +173,7 @@ class LLMSearch:
 
             # Save to cache
             if self.db:
-                await self._set_cache(query, result)
+                await self._set_cache_by_key(cache_key, query, result)
 
             return result
 
@@ -195,33 +185,105 @@ class LLMSearch:
                 lines.append(f"{i}. {r.metadata.get('filename', '?')}\n{preview}")
             return {"text": "\n\n".join(lines), "file_ids": seen_files, "cached": False}
 
+    # ── Hybrid Retrieval ────────────────────────────────────────────
+
+    _RRF_K = 60  # Standard Reciprocal Rank Fusion constant
+    _VECTOR_WEIGHT = 0.6
+    _FTS_WEIGHT = 0.4
+
+    async def _hybrid_retrieve(self, query: str, top_k: int) -> dict:
+        """Combine vector search and FTS into a single ranked file list.
+
+        Returns: {file_id: {"score": float, "filename": str, "text": str}}
+        """
+        file_scores: dict[str, dict] = {}
+
+        # Channel 1: Vector search (semantic)
+        try:
+            vector_results = await self.vector_store.search(query, top_k=top_k)
+            for r in vector_results:
+                if r.score < MIN_SCORE:
+                    continue
+                fid = r.file_id
+                if fid not in file_scores or r.score > file_scores[fid]["score"]:
+                    file_scores[fid] = {
+                        "vector_score": r.score,
+                        "fts_score": 0.0,
+                        "score": r.score * self._VECTOR_WEIGHT,
+                        "filename": r.metadata.get("filename", "file"),
+                        "text": r.text,
+                    }
+        except Exception as e:
+            logger.warning(f"Vector search failed: {e}")
+
+        # Channel 2: FTS search (lexical)
+        if self.db:
+            try:
+                fts_results = await self.db.search_files(query, limit=top_k)
+                for rank, doc in enumerate(fts_results):
+                    fid = doc["id"]
+                    rrf_score = 1.0 / (self._RRF_K + rank)
+                    if fid in file_scores:
+                        # Intersection: add weighted FTS score
+                        file_scores[fid]["fts_score"] = rrf_score
+                        file_scores[fid]["score"] = (
+                            file_scores[fid]["vector_score"] * self._VECTOR_WEIGHT
+                            + rrf_score * self._FTS_WEIGHT
+                        )
+                    else:
+                        # FTS-only candidate
+                        file_scores[fid] = {
+                            "vector_score": 0.0,
+                            "fts_score": rrf_score,
+                            "score": rrf_score * self._FTS_WEIGHT,
+                            "filename": doc.get("original_name", "file"),
+                            "text": (doc.get("extracted_text") or "")[:500],
+                        }
+            except Exception as e:
+                logger.debug(f"FTS search failed (non-fatal): {e}")
+
+        return file_scores
+
     # ── Cache ────────────────────────────────────────────────────────
 
     @staticmethod
+    def _cache_key(
+        query: str,
+        compact: bool = False,
+        top_k: int = 5,
+        history: list[dict] | None = None,
+    ) -> str:
+        """Build cache key from all parameters that affect the answer."""
+        parts = [query.lower().strip(), str(compact), str(top_k)]
+        if history:
+            # Fingerprint last 3 history entries
+            for h in history[-3:]:
+                parts.append(h.get("q", "")[:100])
+        return hashlib.md5("|".join(parts).encode()).hexdigest()
+
+    @staticmethod
     def _query_hash(query: str) -> str:
+        """Legacy hash — kept for backward compatibility with cache reads."""
         return hashlib.md5(query.lower().strip().encode()).hexdigest()
 
-    async def _get_cache(self, query: str) -> dict | None:
+    async def _get_cache_by_key(self, cache_key: str) -> dict | None:
         if not self.db:
             return None
-        qh = self._query_hash(query)
         try:
             cursor = await self.db.db.execute(
-                "SELECT response, file_ids, created_at FROM search_cache WHERE query_hash=?", (qh,)
+                "SELECT response, file_ids, created_at FROM search_cache WHERE query_hash=?", (cache_key,)
             )
             row = await cursor.fetchone()
             if not row:
                 return None
-            # Check TTL
             from datetime import datetime
             created = datetime.fromisoformat(row["created_at"])
             if (datetime.now() - created).total_seconds() > CACHE_TTL_SECONDS:
-                await self.db.db.execute("DELETE FROM search_cache WHERE query_hash=?", (qh,))
+                await self.db.db.execute("DELETE FROM search_cache WHERE query_hash=?", (cache_key,))
                 await self.db.db.commit()
                 return None
-            # Update hit counter
             await self.db.db.execute(
-                "UPDATE search_cache SET hits=hits+1 WHERE query_hash=?", (qh,)
+                "UPDATE search_cache SET hits=hits+1 WHERE query_hash=?", (cache_key,)
             )
             await self.db.db.commit()
             return {
@@ -232,14 +294,13 @@ class LLMSearch:
             logger.debug(f"Cache read error: {e}")
             return None
 
-    async def _set_cache(self, query: str, result: dict):
+    async def _set_cache_by_key(self, cache_key: str, query: str, result: dict):
         if not self.db:
             return
-        qh = self._query_hash(query)
         try:
             await self.db.db.execute(
                 "INSERT OR REPLACE INTO search_cache (query_hash, query, response, file_ids) VALUES (?, ?, ?, ?)",
-                (qh, query[:200], result.get("text", ""), json.dumps(result.get("file_ids", {}))),
+                (cache_key, query[:200], result.get("text", ""), json.dumps(result.get("file_ids", {}))),
             )
             await self.db.db.commit()
         except Exception as e:

@@ -1,75 +1,81 @@
 name: receipts
-display_name: "Чеки / Receipts"
-description: "Кассовые чеки, квитанции об оплате, онлайн-чеки"
+display_name: Чеки / Receipts
+description: Кассовые чеки, квитанции об оплате, онлайн-чеки
 category: business
-priority: 15
-enabled: true
-tags:
-  - receipt
-  - payment
-  - purchase
-
+storage_path: ''
 routing_rules:
   keywords:
-    - чек
-    - receipt
-    - итого
-    - total
-    - оплата
-    - payment
-    - кассовый
-    - квитанция
-    - покупка
-    - purchase
-    - сумма
-    - сдача
-    - безналичная оплата
-    - visa
-    - mastercard
+  - чек
+  - receipt
+  - итого
+  - total
+  - оплата
+  - payment
+  - кассовый
+  - квитанция
+  - покупка
+  - purchase
+  - сумма
+  - сдача
+  - безналичная оплата
+  - visa
+  - mastercard
   patterns:
-    - '(\d+[.,]\d{2})\s*(руб|₽|RUB|USD|\$|EUR|€)'
-    - '\b(ИТОГО|TOTAL|SUBTOTAL)\b'
-    - '\b(ИНН|КПП|ОГРН)\b'
-    - '\bФП\s*\d+'
-    - '\bФН\s*\d+'
+  - (\d+[.,]\d{2})\s*(руб|₽|RUB|USD|\$|EUR|€)
+  - \b(ИТОГО|TOTAL|SUBTOTAL)\b
+  - \b(ИНН|КПП|ОГРН)\b
+  - \bФП\s*\d+
+  - \bФН\s*\d+
   mime_types:
-    - application/pdf
-    - image/jpeg
-    - image/png
+  - application/pdf
+  - image/jpeg
+  - image/png
   min_confidence: 0.3
-
-naming_template: "{date}_{vendor}_{amount}"
-
-response_template: |
-  🧾 {document_type}
-  🏪 {vendor}
-  💰 {amount}
-  📅 {date}
-  {priority_badge} {priority}
-  📝 {summary}
-
+naming_template: '{date}_{vendor}_{amount}'
 extraction:
   fields:
-    - name: vendor
-      description: "Магазин, продавец или компания"
-      required: true
-    - name: amount
-      description: "Итоговая сумма с валютой"
-      required: true
-    - name: date
-      description: "Дата и время покупки"
-      required: false
-    - name: payment_method
-      description: "Способ оплаты"
-      required: false
-    - name: priority
-      description: "Важность: high (возврат/гарантия/крупная сумма), medium (средняя покупка), low (мелкая покупка). Одно слово."
-      required: true
-    - name: summary
-      description: "Описание на русском: что куплено, где, на какую сумму, способ оплаты. 2-3 предложения."
-      required: true
-  custom_prompt: >
-    Извлеки данные из чека. Отвечай на русском.
-    summary — что куплено, где, сумма, способ оплаты.
-    priority — high если крупная покупка (>$100/10000₽) или может понадобиться
-    для возврата/гарантии, medium для обычных покупок, low для мелких.
+  - name: vendor
+    description: Магазин, продавец или компания
+    required: true
+  - name: amount
+    description: Итоговая сумма с валютой
+    required: true
+  - name: date
+    description: Дата и время покупки
+    required: false
+  - name: payment_method
+    description: Способ оплаты
+    required: false
+  - name: priority
+    description: 'Важность: high (возврат/гарантия/крупная сумма), medium (средняя
+      покупка), low (мелкая покупка). Одно слово.'
+    required: true
+  - name: summary
+    description: 'Описание на русском: что куплено, где, на какую сумму, способ оплаты.
+      2-3 предложения.'
+    required: true
+  custom_prompt: 'Извлеки данные из чека. Отвечай на русском. summary — что куплено,
+    где, сумма, способ оплаты. priority — high если крупная покупка (>$100/10000₽)
+    или может понадобиться для возврата/гарантии, medium для обычных покупок, low
+    для мелких.
+
+    '
+response_template: '🧾 {document_type}
+
+  🏪 {vendor}
+
+  💰 {amount}
+
+  📅 {date}
+
+  {priority_badge} {priority}
+
+  📝 {summary}
+
+  '
+tags:
+- receipt
+- payment
+- purchase
+enabled: true
+priority: 15

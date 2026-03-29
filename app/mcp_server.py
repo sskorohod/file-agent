@@ -248,11 +248,11 @@ async def get_file_download(file_id: str) -> str:
     if not stored_path:
         return json.dumps({"error": "No stored path"})
 
-    p = Path(stored_path)
-    if not p.exists():
-        return json.dumps({"error": "File not found on disk"})
+    file_storage = _get("file_storage")
+    if not file_storage or not await file_storage.exists(stored_path):
+        return json.dumps({"error": "File not found"})
 
-    data = p.read_bytes()
+    data = await file_storage.read_file(stored_path)
     return json.dumps({
         "file_id": file["id"],
         "filename": file["original_name"],
@@ -289,28 +289,25 @@ async def upload_file(filename: str, data_base64: str) -> str:
 @mcp.tool()
 async def delete_file(file_id: str) -> str:
     """Delete a file from the archive (removes file, vectors, and metadata)."""
-    db = _get("db")
-    file = await db.get_file(file_id) if db else None
-    if not file:
+    lifecycle = _get("lifecycle")
+    if not lifecycle:
+        return json.dumps({"error": "Lifecycle service not available"})
+    deleted = await lifecycle.delete(file_id)
+    if not deleted:
         return json.dumps({"error": "File not found"})
-
-    vs = _get("vector_store")
-    if vs:
-        try:
-            await vs.delete_document(file_id)
-        except Exception:
-            pass
-
-    if file.get("stored_path"):
-        try:
-            p = Path(file["stored_path"])
-            if p.exists():
-                p.unlink()
-        except Exception:
-            pass
-
-    await db.delete_file(file_id)
     return json.dumps({"deleted": True})
+
+
+@mcp.tool()
+async def reclassify_file(file_id: str) -> str:
+    """Re-classify a file using LLM and update all metadata (DB, Qdrant, cache)."""
+    lifecycle = _get("lifecycle")
+    if not lifecycle:
+        return json.dumps({"error": "Lifecycle service not available"})
+    result = await lifecycle.reclassify(file_id)
+    if not result:
+        return json.dumps({"error": "File not found or classifier unavailable"})
+    return json.dumps(result)
 
 
 # ── Resources ────────────────────────────────────────────────────────────────

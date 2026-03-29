@@ -6,7 +6,16 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
-EXEMPT_PREFIXES = ("/health", "/api/v1/", "/login")
+# Exact paths that don't require auth
+_EXEMPT_EXACT = {"/health", "/login", "/telegram/webhook", "/favicon.ico"}
+# Prefixes that don't require auth (must end with /)
+_EXEMPT_PREFIXES = ("/api/v1/", "/mcp/", "/mcp")
+
+
+def _is_exempt(path: str) -> bool:
+    if path in _EXEMPT_EXACT:
+        return True
+    return any(path.startswith(p) for p in _EXEMPT_PREFIXES)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -15,7 +24,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         # Skip auth for exempt paths
-        if any(path == p or path.startswith(p + "/") or path.startswith(p) for p in EXEMPT_PREFIXES):
+        if _is_exempt(path):
             return await call_next(request)
 
         if not request.session.get("authenticated"):

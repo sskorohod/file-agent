@@ -7,7 +7,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from litellm.exceptions import (
+    APIConnectionError,
+    InternalServerError,
+    RateLimitError,
+    ServiceUnavailableError,
+)
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.config import LLMConfig, LLMModelConfig
 
@@ -60,7 +66,10 @@ class LLMRouter:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        retry=retry_if_exception_type((
+            ConnectionError, TimeoutError, OSError,
+            RateLimitError, APIConnectionError, InternalServerError, ServiceUnavailableError,
+        )),
         reraise=True,
     )
     async def complete(

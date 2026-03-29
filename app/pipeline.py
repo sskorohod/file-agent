@@ -1,4 +1,4 @@
-"""Main processing pipeline — 9-step document ingestion and classification."""
+"""Main processing pipeline — 8-step document ingestion and classification."""
 
 from __future__ import annotations
 
@@ -165,9 +165,11 @@ class Pipeline:
         filename: str,
         source: str = "telegram",
     ) -> PipelineResult:
-        """Run the full 9-step pipeline."""
+        """Run the full 8-step pipeline."""
+        import uuid as _uuid
         pipeline_start = time.monotonic()
         result = PipelineResult(file_id="")
+        result._run_id = str(_uuid.uuid4())
         temp_path: Path | None = None
 
         try:
@@ -258,6 +260,11 @@ class Pipeline:
             result.file_record = file_record
             result.file_id = file_record.id
 
+            # Backfill file_id on all earlier audit steps (receive..route)
+            run_id = getattr(result, "_run_id", None)
+            if run_id:
+                await self.db.backfill_run_file_id(run_id, file_record.id)
+
             # Step 7: Embed — create vectors in Qdrant
             self._last_semantic_dup = None  # reset before embed
             chunks = await self._log_step(
@@ -272,12 +279,30 @@ class Pipeline:
                 result.similarity_score = self._last_semantic_dup["score"]
 
             # Step 8: Save metadata — write to SQLite
-            await self._log_step(
-                result, "save_meta",
-                lambda: self._step_save_meta(
-                    file_record, parse_result, classification, source, chunks,
-                ),
-            )
+            # If save_meta fails after store succeeded, clean up orphaned artifacts
+            try:
+                await self._log_step(
+                    result, "save_meta",
+                    lambda: self._step_save_meta(
+                        file_record, parse_result, classification, source, chunks,
+                    ),
+                )
+            except Exception as save_err:
+                logger.error(f"save_meta failed, compensating: {save_err}")
+                # Remove stored file (created in step 6)
+                try:
+                    await self.file_storage.delete(file_record.stored_path)
+                    logger.info(f"Compensating: deleted stored file {file_record.stored_path}")
+                except Exception as e:
+                    logger.warning(f"Compensating: failed to delete stored file: {e}")
+                # Remove vectors (created in step 7, if any)
+                try:
+                    await self.vector_store.delete_document(file_record.id)
+                    logger.info(f"Compensating: deleted vectors for {file_record.id}")
+                except Exception as e:
+                    logger.warning(f"Compensating: failed to delete vectors: {e}")
+                result.file_id = ""
+                raise save_err
 
             # Step 8.5: Create auto-reminder if pending
             if hasattr(result, '_pending_reminder') and result._pending_reminder:
@@ -333,29 +358,48 @@ class Pipeline:
 
         return result
 
+    # Steps that depend on external services and can be retried
+    _RETRYABLE_STEPS = frozenset({"classify", "embed", "extract", "route"})
+    _MAX_RETRIES = 2
+    _RETRY_DELAY = 1.0  # seconds
+
     async def _log_step(self, result: PipelineResult, step_name: str, func):
-        """Execute a step with timing and DB logging."""
+        """Execute a step with timing, DB logging, and optional retry."""
+        import asyncio as _aio
         start = time.monotonic()
-        log_id = None
+        run_id = getattr(result, "_run_id", None)
 
-        if result.file_id:
-            log_id = await self.db.log_step(result.file_id, step_name)
+        # Always log — use file_id if available, otherwise run_id links it later
+        log_id = await self.db.log_step(
+            result.file_id or None, step_name, run_id=run_id,
+        )
 
-        try:
-            output = await func()
-            duration_ms = int((time.monotonic() - start) * 1000)
-            result.steps_completed.append(step_name)
+        retries = self._MAX_RETRIES if step_name in self._RETRYABLE_STEPS else 0
+        last_error = None
 
-            if log_id:
-                await self.db.finish_step(log_id, "success", duration_ms=duration_ms)
+        for attempt in range(1 + retries):
+            try:
+                if attempt > 0:
+                    logger.info(f"  Step [{step_name}] retry {attempt}/{retries}")
+                    await _aio.sleep(self._RETRY_DELAY * attempt)
+                output = await func()
+                duration_ms = int((time.monotonic() - start) * 1000)
+                result.steps_completed.append(step_name)
 
-            logger.debug(f"  Step [{step_name}] OK in {duration_ms}ms")
-            return output
-        except Exception as e:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            if log_id:
-                await self.db.finish_step(log_id, "error", error=str(e), duration_ms=duration_ms)
-            raise
+                if log_id:
+                    await self.db.finish_step(log_id, "success", duration_ms=duration_ms)
+
+                logger.debug(f"  Step [{step_name}] OK in {duration_ms}ms")
+                return output
+            except Exception as e:
+                last_error = e
+                if attempt < retries:
+                    logger.warning(f"  Step [{step_name}] failed (attempt {attempt + 1}): {e}")
+                    continue
+                duration_ms = int((time.monotonic() - start) * 1000)
+                if log_id:
+                    await self.db.finish_step(log_id, "error", error=str(e), duration_ms=duration_ms)
+                raise last_error
 
     # ── Individual Steps ────────────────────────────────────────────────
 
@@ -603,6 +647,10 @@ class Pipeline:
         if self._current_extracted_fields and self._current_extracted_fields.get("summary"):
             summary = self._current_extracted_fields["summary"]
 
+        # Extract document_date from extracted_fields by priority:
+        # date → issue_date → date_of_service → measurement_date → None
+        document_date = self._extract_document_date(self._current_extracted_fields)
+
         await self.db.insert_file(
             id=file_record.id,
             original_name=file_record.original_name,
@@ -626,4 +674,34 @@ class Pipeline:
                 "extracted_fields": self._current_extracted_fields or {},
             },
             priority=priority,
+            document_date=document_date,
         )
+
+    @staticmethod
+    def _extract_document_date(fields: dict | None) -> str | None:
+        """Extract the most relevant date from extracted_fields.
+
+        Priority: date → issue_date → date_of_service → measurement_date.
+        Returns ISO date string or None.
+        """
+        if not fields:
+            return None
+        for key in ("date", "issue_date", "date_of_service", "measurement_date"):
+            val = fields.get(key)
+            if not val or not isinstance(val, str):
+                continue
+            # Validate it's a parseable date
+            from datetime import datetime as _dt
+            for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y", "%d/%m/%Y"):
+                try:
+                    parsed = _dt.strptime(val, fmt)
+                    return parsed.strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
+            # Try ISO format directly
+            try:
+                _dt.fromisoformat(val)
+                return val[:10]  # trim time if present
+            except ValueError:
+                continue
+        return None
