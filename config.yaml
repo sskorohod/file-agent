@@ -80,11 +80,11 @@ storage:
 telegram:
   max_file_size_mb: 20
   polling_timeout: 30
-  owner_id: 169108358
+  # owner_id: set via TELEGRAM__OWNER_ID env var
   webhook_url: https://fag.n8nskorx.top/telegram/webhook
-  webhook_secret: pyPpUVTSA5lo39z0xvdPrw-W8pahKEyo2--WKUS4oqs
+  # webhook_secret: set via TELEGRAM__WEBHOOK_SECRET env var
   auto_delete_seconds: 120
-  pin_code: '2255'
+  # pin_code: set via TELEGRAM__PIN_CODE env var
 web:
   host: 0.0.0.0
   port: 8000
@@ -99,6 +99,15 @@ notes:
     - food
     - personal
     - fitness
+  expected_daily_signals:
+    - food_intake
+    - mood_score
+    - sleep_hours
+    - weight_kg
+    - daily_reflection
+  checkin_max_questions: 5
+  checkin_include_closing_prompt: true
+  checkin_weight_frequency_days: 7
   auto_embed: true
   correlation_metrics:
     - mood_score

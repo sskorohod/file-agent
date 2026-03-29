@@ -1,0 +1,61 @@
+{% extends "layout.html" %}
+{% block title %}Entities — FileAgent{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-lg font-bold text-txt">Entities</h1>
+    <p class="text-xs text-txt-3 mt-1">{{ clusters|length }} unique entities{% if duplicates %}, <span class="text-warn-text">{{ duplicates|length }} duplicates</span>{% endif %}</p>
+  </div>
+  <a href="/notes" class="btn-secondary btn-sm">Back to Notes</a>
+</div>
+
+{% if duplicates %}
+<div class="card !p-4 mb-4">
+  <h2 class="text-sm font-semibold text-warn-text mb-3">Duplicate Clusters</h2>
+  <div class="space-y-3">
+    {% for d in duplicates %}
+    <form method="POST" action="/notes/entities/merge" class="border border-border rounded-lg p-3">
+      <div class="flex items-center gap-2 mb-2">
+        {% set type_icons = {'person': 'person_name', 'company': 'company', 'vehicle': 'vehicle', 'place': 'place', 'project': 'project'} %}
+        <span class="text-xs font-medium px-2 py-0.5 rounded bg-accent-bg text-accent-2">{{ d.entity_type }}</span>
+        <span class="text-xs text-txt-3">{{ d.total_count }} mentions, {{ d.variant_count }} variants</span>
+      </div>
+      <div class="flex flex-wrap gap-1.5 mb-2">
+        {% for v in d.variants.split(',') %}
+        <span class="text-sm px-2 py-1 rounded bg-surface-2 text-txt">{{ v }}</span>
+        {% endfor %}
+      </div>
+      <input type="hidden" name="entity_type" value="{{ d.entity_type }}">
+      <input type="hidden" name="aliases" value="{{ d.variants }}">
+      <div class="flex items-center gap-2">
+        <label class="text-xs text-txt-3">Canonical:</label>
+        <input type="text" name="canonical" value="{{ d.normalized_value }}"
+               class="text-sm bg-bg border border-border rounded px-2 py-1 text-txt flex-1">
+        <button type="submit" class="btn-primary btn-sm">Merge</button>
+      </div>
+    </form>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<div class="card !p-4">
+  <h2 class="text-sm font-semibold text-txt mb-3">All Entities</h2>
+  {% set ent_icons = {'person_name': 'person', 'company': 'company', 'vehicle': 'vehicle', 'place': 'place', 'project': 'project'} %}
+  {% set type_emojis = {'person_name': '&#x1F464;', 'company': '&#x1F3E2;', 'vehicle': '&#x1F697;', 'place': '&#x1F4CD;', 'project': '&#x1F4C1;'} %}
+  <div class="space-y-1">
+    {% for c in clusters %}
+    <div class="flex items-center gap-2 py-1.5 border-b border-border/50 last:border-0">
+      <span class="text-xs font-medium px-1.5 py-0.5 rounded bg-surface-2 text-txt-3 w-20 text-center shrink-0">{{ c.entity_type }}</span>
+      <span class="text-sm text-txt font-medium flex-1">{{ c.normalized_value }}</span>
+      {% if c.variants != c.normalized_value %}
+      <span class="text-xs text-txt-3 truncate max-w-[200px]" title="{{ c.variants }}">{{ c.variants }}</span>
+      {% endif %}
+      <span class="text-xs text-txt-3 shrink-0">{{ c.count }}x</span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+{% endblock %}

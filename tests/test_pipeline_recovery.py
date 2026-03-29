@@ -100,6 +100,13 @@ class TestCompensatingCleanup:
         # Vectors should be cleaned up
         mock_vector_store.delete_document.assert_awaited_once_with("comp-test-1")
 
+        # Audit log should be cleaned up (no orphaned entries)
+        cursor = await db.db.execute(
+            "SELECT COUNT(*) FROM processing_log WHERE file_id='comp-test-1'"
+        )
+        row = await cursor.fetchone()
+        assert row[0] == 0, "Orphaned processing_log entries should be cleaned up"
+
     @pytest.mark.asyncio
     async def test_embed_failure_is_nonfatal(self, db, tmp_dir, file_storage):
         """Embed failure does NOT trigger cleanup — file is kept, just not searchable."""

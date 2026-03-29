@@ -373,6 +373,41 @@ class VectorStore:
             for hit in response.points
         ]
 
+    async def search_notes(
+        self, query: str, top_k: int = 10, category: str = "",
+    ) -> list[dict]:
+        """Semantic search across note embeddings in Qdrant."""
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        query_vector = self.embed([query], task_type="RETRIEVAL_QUERY")[0]
+
+        conditions = [FieldCondition(key="type", match=MatchValue(value="note"))]
+        if category:
+            conditions.append(FieldCondition(key="category", match=MatchValue(value=category)))
+
+        response = self.client.query_points(
+            collection_name=self.qdrant_config.collection_name,
+            query=query_vector,
+            limit=top_k,
+            query_filter=Filter(must=conditions),
+            with_payload=True,
+        )
+
+        # Deduplicate by note_id (multiple chunks per note)
+        seen_ids: set[int] = set()
+        results = []
+        for hit in response.points:
+            note_id = hit.payload.get("note_id")
+            if note_id and note_id not in seen_ids:
+                seen_ids.add(note_id)
+                results.append({
+                    "note_id": note_id,
+                    "score": hit.score,
+                    "matched_text": hit.payload.get("text", ""),
+                    "category": hit.payload.get("category", ""),
+                })
+        return results
+
     def get_file_vector(self, file_id: str) -> list[float] | None:
         """Retrieve the stored vector for a file (prefer multimodal point)."""
         from qdrant_client.models import Filter, FieldCondition, MatchValue

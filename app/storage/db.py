@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS files (
 
 CREATE INDEX IF NOT EXISTS idx_files_category ON files(category);
 CREATE INDEX IF NOT EXISTS idx_files_created ON files(created_at);
-CREATE INDEX IF NOT EXISTS idx_files_docdate ON files(document_date);
 CREATE INDEX IF NOT EXISTS idx_files_hash ON files(sha256);
+-- NOTE: idx_files_docdate is created in post-migration block (after ALTER TABLE adds the column)
 
 CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
     original_name, category, tags, summary, extracted_text,
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS processing_log (
 
 CREATE INDEX IF NOT EXISTS idx_log_file ON processing_log(file_id);
 CREATE INDEX IF NOT EXISTS idx_log_status ON processing_log(status);
-CREATE INDEX IF NOT EXISTS idx_log_run ON processing_log(run_id);
+-- NOTE: idx_log_run is created in post-migration block (after ALTER TABLE adds the column)
 
 CREATE TABLE IF NOT EXISTS llm_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,6 +210,59 @@ CREATE TABLE IF NOT EXISTS note_entities (
 CREATE INDEX IF NOT EXISTS idx_entities_note ON note_entities(note_id);
 CREATE INDEX IF NOT EXISTS idx_entities_type ON note_entities(entity_type, normalized_value);
 
+CREATE TABLE IF NOT EXISTS entity_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    canonical_value TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(entity_type, alias)
+);
+
+CREATE TABLE IF NOT EXISTS checkin_signal_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id TEXT NOT NULL,
+    date TEXT NOT NULL,
+    action TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkin_stats ON checkin_signal_stats(signal_id, date);
+
+CREATE TABLE IF NOT EXISTS anomaly_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_type TEXT NOT NULL,
+    date TEXT NOT NULL,
+    message TEXT NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_date ON anomaly_alerts(alert_type, date);
+
+CREATE TABLE IF NOT EXISTS habits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    frequency TEXT NOT NULL DEFAULT 'daily',
+    target_value REAL DEFAULT 1,
+    metric_key TEXT DEFAULT '',
+    active INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS habit_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    completed INTEGER DEFAULT 0,
+    value REAL DEFAULT 0,
+    auto_detected INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(habit_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_habit_entries ON habit_entries(habit_id, date);
+
 CREATE TABLE IF NOT EXISTS note_facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -288,6 +341,64 @@ CREATE TABLE IF NOT EXISTS insights (
     document_count INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Food Analytics v1
+CREATE TABLE IF NOT EXISTS food_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    entry_type TEXT DEFAULT 'meal',
+    meal_type TEXT DEFAULT 'unknown',
+    food_name TEXT NOT NULL,
+    quantity_value REAL,
+    quantity_unit TEXT DEFAULT '',
+    calories_kcal REAL,
+    protein_g REAL,
+    fat_g REAL,
+    carbs_g REAL,
+    estimated INTEGER DEFAULT 1,
+    confidence REAL DEFAULT 0,
+    consumed_at TEXT NOT NULL,
+    source_text TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_food_entries_note ON food_entries(note_id);
+CREATE INDEX IF NOT EXISTS idx_food_entries_date ON food_entries(consumed_at);
+
+CREATE TABLE IF NOT EXISTS grocery_expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    merchant TEXT DEFAULT '',
+    amount REAL NOT NULL,
+    currency TEXT DEFAULT 'USD',
+    expense_category TEXT DEFAULT 'groceries',
+    date TEXT NOT NULL,
+    estimated INTEGER DEFAULT 1,
+    confidence REAL DEFAULT 0,
+    source_text TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_grocery_note ON grocery_expenses(note_id);
+CREATE INDEX IF NOT EXISTS idx_grocery_date ON grocery_expenses(date);
+
+-- Reminder System v1
+CREATE TABLE IF NOT EXISTS note_reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    task_id INTEGER REFERENCES note_tasks(id) ON DELETE SET NULL,
+    description TEXT NOT NULL,
+    remind_at TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    source TEXT DEFAULT 'explicit',
+    confidence REAL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    sent_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_rem_status ON note_reminders(status, remind_at);
+CREATE INDEX IF NOT EXISTS idx_note_rem_note ON note_reminders(note_id);
 """
 
 
@@ -333,6 +444,10 @@ class Database:
             ("raw_content", "''"), ("status", "'enriched'"),
             ("content_type", "'text'"), ("user_title", "''"),
             ("current_enrichment_id", "NULL"), ("archived_at", "NULL"),
+            # v1.6: Manual metadata edit
+            ("metadata_manual", "0"),
+            # v1.7: Note pinning
+            ("is_pinned", "0"),
         ]:
             try:
                 await self._db.execute(f"ALTER TABLE notes ADD COLUMN {col} TEXT DEFAULT {default}")
@@ -355,13 +470,34 @@ class Database:
             )
         except Exception:
             pass
-        # v1.5 backfill: set status for existing notes
+        # v1.5 backfill: legacy status repair for pre-v1.5 rows only.
+        # Source of truth for modern notes is status + current_enrichment_id;
+        # processed_at is compatibility-only and must not downgrade runtime state.
         try:
             await self._db.execute(
-                "UPDATE notes SET status = 'enriched' WHERE processed_at IS NOT NULL AND status = 'enriched'"
+                "UPDATE notes SET status = 'enriched' "
+                "WHERE current_enrichment_id IS NOT NULL AND status = 'captured'"
             )
             await self._db.execute(
-                "UPDATE notes SET status = 'captured' WHERE processed_at IS NULL AND status = 'enriched'"
+                "UPDATE notes SET status = 'enriched' "
+                "WHERE current_enrichment_id IS NOT NULL AND status = 'processing'"
+            )
+            await self._db.execute(
+                "UPDATE notes SET status = 'captured' "
+                "WHERE current_enrichment_id IS NULL AND status = 'processing'"
+            )
+            await self._db.execute(
+                "UPDATE notes SET status = 'enriched' "
+                "WHERE current_enrichment_id IS NULL "
+                "AND processed_at IS NOT NULL "
+                "AND status IS NOT NULL "
+                "AND status NOT IN ('processing', 'enriched', 'needs_review', 'failed', 'archived')"
+            )
+            await self._db.execute(
+                "UPDATE notes SET status = 'captured' "
+                "WHERE current_enrichment_id IS NULL "
+                "AND processed_at IS NULL "
+                "AND (status IS NULL OR status = '' OR status = 'enriched')"
             )
         except Exception:
             pass
@@ -383,12 +519,26 @@ class Database:
         # Migrate: add document_date column to files if missing
         try:
             await self._db.execute("ALTER TABLE files ADD COLUMN document_date TEXT")
+            import logging as _log
+            _log.getLogger(__name__).info("Migrated: added document_date column to files")
         except Exception:
-            pass
+            pass  # column already exists
         try:
             await self._db.execute("CREATE INDEX IF NOT EXISTS idx_files_docdate ON files(document_date)")
         except Exception:
             pass
+
+        # Migrate: add recurrence columns to note_reminders
+        for col, default in [
+            ("recurrence_rule", "''"),
+            ("recurrence_end", "''"),
+        ]:
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE note_reminders ADD COLUMN {col} TEXT DEFAULT {default}"
+                )
+            except Exception:
+                pass
 
         # Create notes FTS5 index (after migration to ensure columns exist)
         await self._setup_notes_fts()
@@ -661,6 +811,17 @@ class Database:
         )
         await self.db.commit()
 
+    async def delete_run_logs(self, run_id: str):
+        """Delete all processing_log entries for a pipeline run.
+
+        Used during compensating cleanup when save_meta fails — prevents
+        orphaned audit entries pointing to a file_id that no longer exists.
+        """
+        await self.db.execute(
+            "DELETE FROM processing_log WHERE run_id=?", (run_id,),
+        )
+        await self.db.commit()
+
     async def delete_file(self, file_id: str) -> bool:
         """Delete file record and all associated processing logs.
 
@@ -849,7 +1010,7 @@ class Database:
             params.append(category)
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY created_at DESC LIMIT ?"
+        query += " ORDER BY COALESCE(is_pinned, 0) DESC, created_at DESC LIMIT ?"
         params.append(limit)
         cursor = await self.db.execute(query, params)
         return [self._decrypt_note_row(dict(r)) for r in await cursor.fetchall()]
@@ -863,7 +1024,7 @@ class Database:
         return [self._decrypt_note_row(dict(r)) for r in await cursor.fetchall()]
 
     async def search_notes(self, query: str, limit: int = 20) -> list[dict]:
-        """Full-text search across notes."""
+        """Full-text search across notes (FTS5 — works on unencrypted fields only)."""
         cursor = await self.db.execute(
             """SELECT n.* FROM notes n
                JOIN notes_fts fts ON n.id = fts.rowid
@@ -873,9 +1034,40 @@ class Database:
         )
         return [self._decrypt_note_row(dict(r)) for r in await cursor.fetchall()]
 
+    async def search_notes_keyword(
+        self, query: str, category: str = "", status: str = "",
+        source: str = "", limit: int = 30,
+    ) -> list[dict]:
+        """Keyword search across unencrypted note fields (title, tags, category)."""
+        q = f"%{query}%"
+        sql = """SELECT * FROM notes WHERE (
+            user_title LIKE ? OR title LIKE ? OR tags LIKE ?
+            OR category LIKE ? OR subcategory LIKE ?
+        )"""
+        params: list[Any] = [q, q, q, q, q]
+
+        if category:
+            sql += " AND category=?"
+            params.append(category)
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        else:
+            sql += " AND status != 'archived'"
+        if source:
+            sql += " AND source=?"
+            params.append(source)
+
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = await self.db.execute(sql, params)
+        return [self._decrypt_note_row(dict(r)) for r in await cursor.fetchall()]
+
     async def delete_note(self, note_id: int) -> bool:
         """Cascading delete: v1.5 derived + legacy + note."""
-        for t in ("note_enrichments", "note_entities", "note_facts", "note_tasks"):
+        for t in ("note_enrichments", "note_entities", "note_facts", "note_tasks",
+                   "food_entries", "grocery_expenses", "note_reminders"):
             await self.db.execute(f"DELETE FROM {t} WHERE note_id=?", (note_id,))
         for t in ("note_relations", "note_links"):
             await self.db.execute(
@@ -984,6 +1176,46 @@ class Database:
             )
         await self.db.commit()
 
+    async def record_checkin_signal(self, signal_id: str, date: str, action: str):
+        """Record a checkin signal answer or skip."""
+        await self.db.execute(
+            "INSERT INTO checkin_signal_stats (signal_id, date, action) VALUES (?, ?, ?)",
+            (signal_id, date, action),
+        )
+        await self.db.commit()
+
+    async def get_signal_skip_rate(self, signal_id: str, lookback_days: int = 30) -> float:
+        """Get skip rate for a signal over the last N days. Returns 0.0-1.0."""
+        cursor = await self.db.execute(
+            """SELECT
+                 COUNT(*) as total,
+                 SUM(CASE WHEN action='skipped' THEN 1 ELSE 0 END) as skipped
+               FROM checkin_signal_stats
+               WHERE signal_id=? AND date >= date('now', ?)""",
+            (signal_id, f"-{lookback_days} days"),
+        )
+        row = await cursor.fetchone()
+        if not row or not row[0]:
+            return 0.0
+        return row[1] / row[0]
+
+    async def get_all_signal_skip_rates(self, lookback_days: int = 30) -> dict[str, float]:
+        """Get skip rates for all signals."""
+        cursor = await self.db.execute(
+            """SELECT signal_id,
+                      COUNT(*) as total,
+                      SUM(CASE WHEN action='skipped' THEN 1 ELSE 0 END) as skipped
+               FROM checkin_signal_stats
+               WHERE date >= date('now', ?)
+               GROUP BY signal_id""",
+            (f"-{lookback_days} days",),
+        )
+        result = {}
+        for row in await cursor.fetchall():
+            if row[1]:
+                result[row[0]] = row[2] / row[1]
+        return result
+
     async def get_category_distribution(self, days: int = 30) -> dict:
         """Note count by category for the last N days."""
         cursor = await self.db.execute(
@@ -1058,6 +1290,53 @@ class Database:
         await self.db.execute("UPDATE notes SET status=? WHERE id=?", (status, note_id))
         await self.db.commit()
 
+    async def bulk_archive_notes(self, note_ids: list[int]) -> int:
+        """Archive multiple notes. Returns count affected."""
+        if not note_ids:
+            return 0
+        placeholders = ",".join("?" * len(note_ids))
+        cursor = await self.db.execute(
+            f"UPDATE notes SET status='archived', archived_at=datetime('now') WHERE id IN ({placeholders})",
+            note_ids,
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
+    async def bulk_delete_notes(self, note_ids: list[int]) -> int:
+        """Delete multiple notes. Returns count affected."""
+        if not note_ids:
+            return 0
+        placeholders = ",".join("?" * len(note_ids))
+        # Cascade deletes handle enrichments, entities, facts, tasks, relations
+        cursor = await self.db.execute(
+            f"DELETE FROM notes WHERE id IN ({placeholders})", note_ids,
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
+    async def bulk_set_category(self, note_ids: list[int], category: str) -> int:
+        """Set category for multiple notes."""
+        if not note_ids:
+            return 0
+        placeholders = ",".join("?" * len(note_ids))
+        cursor = await self.db.execute(
+            f"UPDATE notes SET category=?, metadata_manual=1 WHERE id IN ({placeholders})",
+            [category] + note_ids,
+        )
+        await self.db.commit()
+        return cursor.rowcount
+
+    async def toggle_note_pin(self, note_id: int) -> bool:
+        """Toggle pin status. Returns new is_pinned state."""
+        cursor = await self.db.execute("SELECT is_pinned FROM notes WHERE id=?", (note_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return False
+        new_val = 0 if row[0] else 1
+        await self.db.execute("UPDATE notes SET is_pinned=? WHERE id=?", (new_val, note_id))
+        await self.db.commit()
+        return bool(new_val)
+
     async def get_notes_by_status(self, status: str, limit: int = 50) -> list[dict]:
         cursor = await self.db.execute(
             "SELECT * FROM notes WHERE status=? ORDER BY created_at DESC LIMIT ?",
@@ -1100,6 +1379,14 @@ class Database:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_enrichment_history(self, note_id: int) -> list[dict]:
+        """Get all enrichments for a note, newest first."""
+        cursor = await self.db.execute(
+            "SELECT * FROM note_enrichments WHERE note_id=? ORDER BY processed_at DESC",
+            (note_id,),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
     async def update_note_bridge_fields(
         self, note_id: int, category: str = "", subcategory: str = "",
         tags: str = "[]", vault_path: str = "",
@@ -1111,12 +1398,34 @@ class Database:
         )
         await self.db.commit()
 
+    async def update_note_metadata(
+        self, note_id: int, user_title: str = "",
+        category: str = "", subcategory: str = "",
+        tags: str = "[]",
+    ):
+        """Save user-edited metadata and set metadata_manual flag."""
+        await self.db.execute(
+            "UPDATE notes SET user_title=?, category=?, subcategory=?, tags=?, metadata_manual=1 WHERE id=?",
+            (user_title, category, subcategory, tags, note_id),
+        )
+        await self.db.commit()
+
     # ── Entities ──
 
     async def save_entity(
         self, note_id: int, entity_type: str, entity_value: str,
         normalized_value: str = "", role: str = "",
     ):
+        # Check alias table for canonical normalization
+        if normalized_value:
+            cursor = await self.db.execute(
+                "SELECT canonical_value FROM entity_aliases WHERE entity_type=? AND alias=?",
+                (entity_type, normalized_value),
+            )
+            alias_row = await cursor.fetchone()
+            if alias_row:
+                normalized_value = alias_row[0]
+
         await self.db.execute(
             "INSERT INTO note_entities (note_id, entity_type, entity_value, normalized_value, role) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -1130,6 +1439,56 @@ class Database:
             (note_id,),
         )
         return [dict(r) for r in await cursor.fetchall()]
+
+    async def find_duplicate_entities(self) -> list[dict]:
+        """Find entity clusters with multiple distinct surface forms."""
+        cursor = await self.db.execute(
+            """SELECT entity_type, normalized_value,
+                      GROUP_CONCAT(DISTINCT entity_value) as variants,
+                      COUNT(DISTINCT entity_value) as variant_count,
+                      COUNT(*) as total_count
+               FROM note_entities
+               WHERE normalized_value != ''
+               GROUP BY entity_type, normalized_value
+               HAVING COUNT(DISTINCT entity_value) > 1
+               ORDER BY total_count DESC""",
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_all_entity_clusters(self) -> list[dict]:
+        """Get all unique entities grouped by type and normalized value."""
+        cursor = await self.db.execute(
+            """SELECT entity_type, normalized_value,
+                      GROUP_CONCAT(DISTINCT entity_value) as variants,
+                      COUNT(*) as count
+               FROM note_entities
+               WHERE normalized_value != ''
+               GROUP BY entity_type, normalized_value
+               ORDER BY entity_type, count DESC""",
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def merge_entities(
+        self, entity_type: str, canonical: str, aliases: list[str],
+    ) -> int:
+        """Merge entity aliases into canonical form. Updates entities + saves aliases."""
+        count = 0
+        for alias in aliases:
+            if alias == canonical:
+                continue
+            # Update existing entities
+            cursor = await self.db.execute(
+                "UPDATE note_entities SET normalized_value=? WHERE entity_type=? AND normalized_value=?",
+                (canonical, entity_type, alias),
+            )
+            count += cursor.rowcount
+            # Save alias for future auto-normalization
+            await self.db.execute(
+                "INSERT OR REPLACE INTO entity_aliases (entity_type, alias, canonical_value) VALUES (?, ?, ?)",
+                (entity_type, alias, canonical),
+            )
+        await self.db.commit()
+        return count
 
     async def clear_note_derived(self, note_id: int):
         """Delete all derived data for a note (entities, facts, tasks) before re-enrichment."""
@@ -1252,6 +1611,93 @@ class Database:
             "DELETE FROM note_relations WHERE source_note_id=?", (note_id,)
         )
         await self.db.commit()
+
+    async def get_graph_data(self, center_id: int = 0, limit: int = 100) -> dict:
+        """Build graph data: nodes (notes + entities) and edges (relations + entity links).
+        Returns {nodes: [...], edges: [...]}."""
+        nodes = {}
+        edges = []
+
+        # Get recent notes as nodes
+        if center_id:
+            # Start from center note + its relations
+            cursor = await self.db.execute(
+                """SELECT DISTINCT n.id, n.user_title, n.category, n.created_at
+                   FROM notes n
+                   WHERE n.id = ?
+                   UNION
+                   SELECT DISTINCT n.id, n.user_title, n.category, n.created_at
+                   FROM note_relations nr
+                   JOIN notes n ON (n.id = nr.target_note_id OR n.id = nr.source_note_id)
+                   WHERE nr.source_note_id = ? OR nr.target_note_id = ?
+                   LIMIT ?""",
+                (center_id, center_id, center_id, limit),
+            )
+        else:
+            cursor = await self.db.execute(
+                """SELECT id, user_title, category, created_at
+                   FROM notes WHERE status != 'archived'
+                   ORDER BY created_at DESC LIMIT ?""",
+                (limit,),
+            )
+
+        note_ids = []
+        for r in await cursor.fetchall():
+            r = dict(r)
+            nid = f"n:{r['id']}"
+            nodes[nid] = {
+                "id": nid, "label": (r["user_title"] or f"#{r['id']}")[:30],
+                "group": r["category"] or "other",
+                "type": "note", "note_id": r["id"],
+            }
+            note_ids.append(r["id"])
+
+        if not note_ids:
+            return {"nodes": [], "edges": []}
+
+        # Get relations between these notes
+        ph = ",".join("?" * len(note_ids))
+        cursor = await self.db.execute(
+            f"""SELECT source_note_id, target_note_id, relation_type, score
+                FROM note_relations
+                WHERE source_note_id IN ({ph}) AND target_note_id IN ({ph})""",
+            note_ids + note_ids,
+        )
+        for r in await cursor.fetchall():
+            r = dict(r)
+            edges.append({
+                "from": f"n:{r['source_note_id']}", "to": f"n:{r['target_note_id']}",
+                "label": r["relation_type"], "value": r["score"],
+            })
+
+        # Get entities shared across these notes
+        cursor = await self.db.execute(
+            f"""SELECT entity_type, normalized_value,
+                       GROUP_CONCAT(DISTINCT note_id) as note_ids,
+                       COUNT(DISTINCT note_id) as note_count
+                FROM note_entities
+                WHERE note_id IN ({ph}) AND normalized_value != ''
+                GROUP BY entity_type, normalized_value
+                HAVING COUNT(DISTINCT note_id) >= 2
+                LIMIT 50""",
+            note_ids,
+        )
+        for r in await cursor.fetchall():
+            r = dict(r)
+            eid = f"e:{r['entity_type']}:{r['normalized_value']}"
+            type_shapes = {"person_name": "person", "place": "place", "vehicle": "vehicle", "project": "project"}
+            nodes[eid] = {
+                "id": eid, "label": r["normalized_value"][:20],
+                "group": r["entity_type"], "type": "entity",
+                "shape": type_shapes.get(r["entity_type"], "dot"),
+            }
+            for nid_str in r["note_ids"].split(","):
+                edges.append({
+                    "from": f"n:{nid_str}", "to": eid,
+                    "label": r["entity_type"], "dashes": True,
+                })
+
+        return {"nodes": list(nodes.values()), "edges": edges}
 
     # ── Chat History (persistent dialog memory) ───────────────────────
 
@@ -1472,3 +1918,188 @@ class Database:
         await self.db.execute("DELETE FROM file_folders WHERE folder_id=?", (folder_id,))
         await self.db.execute("DELETE FROM folders WHERE id=?", (folder_id,))
         await self.db.commit()
+
+    # ── Food Analytics ────────────────────────────────────────────────
+
+    async def save_food_entry(
+        self, note_id: int, food_name: str, consumed_at: str,
+        entry_type: str = "meal", meal_type: str = "unknown",
+        quantity_value: float | None = None, quantity_unit: str = "",
+        calories_kcal: float | None = None,
+        protein_g: float | None = None, fat_g: float | None = None,
+        carbs_g: float | None = None,
+        estimated: int = 1, confidence: float = 0, source_text: str = "",
+    ):
+        await self.db.execute(
+            """INSERT INTO food_entries
+               (note_id, entry_type, meal_type, food_name, quantity_value, quantity_unit,
+                calories_kcal, protein_g, fat_g, carbs_g, estimated, confidence,
+                consumed_at, source_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (note_id, entry_type, meal_type, food_name, quantity_value, quantity_unit,
+             calories_kcal, protein_g, fat_g, carbs_g, estimated, confidence,
+             consumed_at, source_text),
+        )
+        await self.db.commit()
+
+    async def save_grocery_expense(
+        self, note_id: int, amount: float, date: str,
+        merchant: str = "", currency: str = "USD",
+        expense_category: str = "groceries",
+        estimated: int = 1, confidence: float = 0, source_text: str = "",
+    ):
+        await self.db.execute(
+            """INSERT INTO grocery_expenses
+               (note_id, merchant, amount, currency, expense_category, date,
+                estimated, confidence, source_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (note_id, merchant, amount, currency, expense_category, date,
+             estimated, confidence, source_text),
+        )
+        await self.db.commit()
+
+    async def clear_food_entries(self, note_id: int):
+        await self.db.execute("DELETE FROM food_entries WHERE note_id=?", (note_id,))
+        await self.db.commit()
+
+    async def clear_grocery_expenses(self, note_id: int):
+        await self.db.execute("DELETE FROM grocery_expenses WHERE note_id=?", (note_id,))
+        await self.db.commit()
+
+    async def get_food_entries_by_date(self, date: str) -> list[dict]:
+        cursor = await self.db.execute(
+            "SELECT * FROM food_entries WHERE consumed_at=? ORDER BY meal_type, id",
+            (date,),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_food_entries_by_note(self, note_id: int) -> list[dict]:
+        cursor = await self.db.execute(
+            "SELECT * FROM food_entries WHERE note_id=? ORDER BY id", (note_id,),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_daily_nutrition(self, date: str) -> dict:
+        """Daily nutrition totals from food_entries."""
+        cursor = await self.db.execute(
+            """SELECT SUM(calories_kcal) as calories, SUM(protein_g) as protein,
+                      SUM(fat_g) as fat, SUM(carbs_g) as carbs, COUNT(*) as items
+               FROM food_entries WHERE consumed_at=?""",
+            (date,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return {"calories": 0, "protein": 0, "fat": 0, "carbs": 0, "items": 0}
+        return {
+            "calories": row[0] or 0, "protein": row[1] or 0,
+            "fat": row[2] or 0, "carbs": row[3] or 0, "items": row[4] or 0,
+        }
+
+    async def get_nutrition_trend(self, days: int = 7) -> list[dict]:
+        """Per-day nutrition totals for last N days."""
+        cursor = await self.db.execute(
+            """SELECT consumed_at as date,
+                      SUM(calories_kcal) as calories, SUM(protein_g) as protein,
+                      SUM(fat_g) as fat, SUM(carbs_g) as carbs, COUNT(*) as items
+               FROM food_entries WHERE consumed_at >= date('now', ?)
+               GROUP BY consumed_at ORDER BY consumed_at""",
+            (f"-{days} days",),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_monthly_food_spend(self, year_month: str) -> list[dict]:
+        """Monthly food spending by category."""
+        cursor = await self.db.execute(
+            """SELECT expense_category, SUM(amount) as total, currency
+               FROM grocery_expenses WHERE date LIKE ?
+               GROUP BY expense_category, currency""",
+            (f"{year_month}%",),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_grocery_expenses_by_note(self, note_id: int) -> list[dict]:
+        cursor = await self.db.execute(
+            "SELECT * FROM grocery_expenses WHERE note_id=? ORDER BY id", (note_id,),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    # ── Note Reminders ────────────────────────────────────────────────
+
+    async def create_note_reminder(
+        self, note_id: int, description: str, remind_at: str,
+        task_id: int | None = None, source: str = "explicit",
+        confidence: float = 0, recurrence_rule: str = "",
+        recurrence_end: str = "",
+    ) -> int:
+        cursor = await self.db.execute(
+            """INSERT INTO note_reminders
+               (note_id, task_id, description, remind_at, source, confidence,
+                recurrence_rule, recurrence_end)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (note_id, task_id, description, remind_at, source, confidence,
+             recurrence_rule, recurrence_end),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
+
+    async def get_due_note_reminders(self) -> list[dict]:
+        """Get pending reminders whose remind_at <= now."""
+        cursor = await self.db.execute(
+            """SELECT r.*, n.user_title, n.category
+               FROM note_reminders r
+               JOIN notes n ON r.note_id = n.id
+               WHERE r.status = 'pending' AND datetime(r.remind_at) <= datetime('now')
+               ORDER BY r.remind_at""",
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def mark_note_reminder_sent(self, reminder_id: int):
+        await self.db.execute(
+            "UPDATE note_reminders SET status='sent', sent_at=datetime('now') WHERE id=?",
+            (reminder_id,),
+        )
+        await self.db.commit()
+
+    async def complete_note_reminder(self, reminder_id: int):
+        await self.db.execute(
+            "UPDATE note_reminders SET status='done', completed_at=datetime('now') WHERE id=?",
+            (reminder_id,),
+        )
+        await self.db.commit()
+
+    async def snooze_note_reminder(self, reminder_id: int, hours: int = 24):
+        await self.db.execute(
+            f"UPDATE note_reminders SET status='pending', sent_at=NULL, "
+            f"remind_at=datetime(remind_at, '+{hours} hours') WHERE id=?",
+            (reminder_id,),
+        )
+        await self.db.commit()
+
+    async def cancel_note_reminder(self, reminder_id: int):
+        await self.db.execute(
+            "UPDATE note_reminders SET status='cancelled' WHERE id=?",
+            (reminder_id,),
+        )
+        await self.db.commit()
+
+    async def list_note_reminders(self, include_done: bool = False) -> list[dict]:
+        where = "WHERE r.status IN ('pending', 'sent')" if not include_done else ""
+        cursor = await self.db.execute(
+            f"""SELECT r.*, n.user_title, n.category
+                FROM note_reminders r
+                JOIN notes n ON r.note_id = n.id
+                {where} ORDER BY r.remind_at""",
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_note_reminder_by_task(
+        self, note_id: int, task_id: int,
+    ) -> dict | None:
+        """Check if reminder already exists for this note+task (dedup)."""
+        cursor = await self.db.execute(
+            """SELECT * FROM note_reminders
+               WHERE note_id=? AND task_id=? AND status IN ('pending', 'sent')""",
+            (note_id, task_id),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None

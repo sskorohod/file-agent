@@ -19,9 +19,12 @@ class LocalBackend(StorageBackend):
         self._encryption_key = encryption_key
 
     def _resolve_path(self, uri: str) -> Path:
-        """Convert URI or bare path to local Path."""
+        """Convert URI or bare path to local Path. Validates path is within base_path."""
         path_str = uri.removeprefix("local://") if uri.startswith("local://") else uri
-        return Path(path_str)
+        resolved = Path(path_str).resolve()
+        if not resolved.is_relative_to(self.base_path):
+            raise ValueError(f"Path traversal blocked: {uri}")
+        return resolved
 
     def _build_path(self, category: str, original_name: str) -> Path:
         """Build target: base/<category>/<YYYY-MM>/<filename> with collision avoidance."""

@@ -197,6 +197,32 @@ class TestReclassify:
         assert required_keys == set(result.keys())
 
     @pytest.mark.asyncio
+    async def test_reclassify_atomic_db_update(
+        self, db, file_storage, mock_vector_store, mock_llm_search, mock_classifier
+    ):
+        """Reclassify updates category + metadata_json.document_type in a single DB call."""
+        await _insert_test_file(db, "atomic-1", category="uncategorized")
+
+        # Track update_file calls
+        original_update = db.update_file
+        update_calls = []
+
+        async def tracking_update(fid, **fields):
+            update_calls.append(fields)
+            return await original_update(fid, **fields)
+
+        db.update_file = tracking_update
+
+        svc = FileLifecycleService(db, file_storage, mock_vector_store, mock_llm_search, mock_classifier)
+        await svc.reclassify("atomic-1")
+
+        # Should be exactly 1 update_file call (atomic), not 2
+        assert len(update_calls) == 1, f"Expected 1 DB update, got {len(update_calls)}"
+        call = update_calls[0]
+        assert "category" in call
+        assert "metadata_json" in call
+
+    @pytest.mark.asyncio
     async def test_reclassify_nonexistent(
         self, db, file_storage, mock_vector_store, mock_llm_search, mock_classifier
     ):

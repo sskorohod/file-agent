@@ -75,6 +75,9 @@ class NoteProcessor:
 
         self._in_progress.add(note_id)
         try:
+            existing_note = await self.db.get_note(note_id)
+            had_enrichment_before = bool(existing_note and existing_note.get("current_enrichment_id"))
+
             # EnrichmentService atomically handles status transitions
             ok = await self.enrichment.process(note_id)
 
@@ -92,11 +95,11 @@ class NoteProcessor:
                     logger.warning(f"Projection failed for note #{note_id}: {e}")
 
                 # Telegram notification
-                await self._notify_telegram(note_id)
+                await self._notify_telegram(note_id, had_enrichment_before=had_enrichment_before)
         finally:
             self._in_progress.discard(note_id)
 
-    async def _notify_telegram(self, note_id: int):
+    async def _notify_telegram(self, note_id: int, had_enrichment_before: bool = False):
         """Send second message with enrichment result to Telegram."""
         if not self.tg_app:
             return
@@ -109,7 +112,16 @@ class NoteProcessor:
 
             note = await self.db.get_note(note_id)
             enrichment = await self.db.get_latest_enrichment(note_id)
-            if not enrichment:
+            if not note or not enrichment:
+                return
+
+            # Do not replay second messages for notes that already had
+            # an enrichment before this processor pass (restart/recovery/reprocess).
+            if had_enrichment_before:
+                return
+
+            # Notify only for freshly processed terminal states.
+            if note.get("status") not in {"enriched", "needs_review"}:
                 return
 
             # Only notify for recently captured notes (not reprocessed old ones)
@@ -151,8 +163,10 @@ class NoteProcessor:
             # Entities
             entities = await self.db.get_entities_by_note(note_id)
             for ent in entities[:3]:
-                etype = {"person": "👤", "company": "🏢", "place": "📍", "project": "📁"}.get(ent["entity_type"], "")
-                parts.append(f"{etype} {ent['entity_value']} ({ent.get('role', ent['entity_type'])})")
+                etype = {"person": "👤", "company": "🏢", "vehicle": "🚗", "place": "📍", "project": "📁"}.get(ent["entity_type"], "")
+                role = ent.get("role", "")
+                role_suffix = f" ({role})" if role else ""
+                parts.append(f"{etype} {ent['entity_value']}{role_suffix}")
 
             # Tasks
             tasks = await self.db.get_tasks_by_note(note_id)
@@ -161,11 +175,15 @@ class NoteProcessor:
                 parts.append(f"✅ {pri} {task['description']}")
 
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            keyboard = InlineKeyboardMarkup([[
+            has_due_tasks = any(t.get("due_date") for t in tasks[:3])
+            buttons = [
                 InlineKeyboardButton("OK", callback_data=f"note:ok:{note_id}"),
                 InlineKeyboardButton("Edit", callback_data=f"note:edit:{note_id}"),
-                InlineKeyboardButton("Archive", callback_data=f"note:archive:{note_id}"),
-            ]])
+            ]
+            if has_due_tasks:
+                buttons.append(InlineKeyboardButton("Remind", callback_data=f"nrem:create:{note_id}"))
+            buttons.append(InlineKeyboardButton("Archive", callback_data=f"note:archive:{note_id}"))
+            keyboard = InlineKeyboardMarkup([buttons])
 
             await self.tg_app.bot.send_message(
                 chat_id=chat_id,

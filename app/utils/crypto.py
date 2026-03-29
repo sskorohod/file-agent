@@ -203,6 +203,7 @@ def setup_master_password(
     # Header byte: 0x01 = password only, 0x02 = password + key file
     header = b"\x02" if key_file_data else b"\x01"
     path.write_bytes(header + salt + verify_token)
+    path.chmod(0o600)
     return key
 
 
@@ -271,6 +272,7 @@ def generate_key_file(path: str = "data/keyfile.secret") -> bytes:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(data)
+    p.chmod(0o600)
     return data
 
 

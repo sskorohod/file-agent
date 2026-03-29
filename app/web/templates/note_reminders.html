@@ -1,0 +1,60 @@
+{% extends "layout.html" %}
+{% block title %}Note Reminders — FileAgent{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-lg font-bold text-txt">Note Reminders</h1>
+    <p class="text-xs text-txt-3 mt-1">{{ reminders | length }} pending</p>
+  </div>
+  <a href="/notes" class="btn-secondary btn-sm">Back to Notes</a>
+</div>
+
+{% if reminders %}
+<div class="space-y-3">
+  {% for r in reminders %}
+  <div class="card !p-4">
+    <div class="flex items-start justify-between gap-3">
+      <div class="flex-1">
+        <p class="text-sm font-semibold text-txt">{{ r.description }}</p>
+        {% if r.user_title %}
+        <a href="/notes/{{ r.note_id }}" class="text-xs text-accent hover:underline">{{ r.user_title }}</a>
+        {% else %}
+        <a href="/notes/{{ r.note_id }}" class="text-xs text-accent hover:underline">Note #{{ r.note_id }}</a>
+        {% endif %}
+        <div class="flex items-center gap-2 mt-2 text-xs text-txt-3">
+          {% set status_colors = {'pending': 'bg-warn-bg text-warn-text', 'sent': 'bg-blue-500/10 text-blue-400', 'done': 'bg-ok-bg text-ok-text', 'cancelled': 'bg-surface-2 text-txt-3'} %}
+          <span class="px-2 py-0.5 rounded-full {{ status_colors.get(r.status, 'bg-surface-2 text-txt-3') }}">{{ r.status }}</span>
+          <span>{{ r.remind_at[:16] }}</span>
+          <span class="px-1.5 py-0.5 rounded bg-surface-2">{{ r.source }}</span>
+          {% if r.category %}
+          <span class="px-1.5 py-0.5 rounded bg-accent-bg text-accent-2">{{ r.category }}</span>
+          {% endif %}
+          {% if r.recurrence_rule %}
+          {% set rule_labels = {'daily': 'ежедневно', 'weekly': 'еженедельно', 'monthly': 'ежемесячно', 'weekdays': 'по будням'} %}
+          <span class="px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400">🔄 {{ rule_labels.get(r.recurrence_rule, r.recurrence_rule) }}</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="flex gap-1 shrink-0">
+        {% if r.status in ('pending', 'sent') %}
+        <form method="POST" action="/notes/reminders/{{ r.id }}/done" class="inline">
+          <button class="btn-primary btn-sm">Done</button>
+        </form>
+        <form method="POST" action="/notes/reminders/{{ r.id }}/cancel" class="inline">
+          <button class="btn-secondary btn-sm">Cancel</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card flex flex-col items-center justify-center py-8 text-center">
+  <p class="text-sm text-txt-3">No pending reminders</p>
+  <p class="text-xs text-txt-3 mt-1">Reminders are created from notes with explicit reminder intent or via the Remind button</p>
+</div>
+{% endif %}
+
+{% endblock %}

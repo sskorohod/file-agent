@@ -9,11 +9,26 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from app.web.csrf import get_csrf_token
 from app.web.limiter import limiter
+
 router = APIRouter()
 
 _templates_dir = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_templates_dir))
+
+# Override TemplateResponse to auto-inject csrf_token into every context
+_original_template_response = templates.TemplateResponse
+
+
+def _csrf_template_response(name, context, **kwargs):
+    request = context.get("request")
+    if request and "csrf_token" not in context:
+        context["csrf_token"] = get_csrf_token(request)
+    return _original_template_response(name, context, **kwargs)
+
+
+templates.TemplateResponse = _csrf_template_response
 
 
 def _get(key: str):
@@ -938,7 +953,9 @@ def _save_session_key(key: bytes):
     from cryptography.fernet import Fernet
     import hashlib, base64
     from app.config import get_settings
-    secret = get_settings().web.session_secret or "fallback-secret-key"
+    secret = get_settings().web.session_secret
+    if not secret:
+        raise RuntimeError("WEB__SESSION_SECRET must be set to persist encryption key")
     fernet_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
     f = Fernet(fernet_key)
     _SESSION_KEY_PATH.write_bytes(f.encrypt(key))
@@ -952,7 +969,9 @@ def load_session_key() -> bytes | None:
     from cryptography.fernet import Fernet, InvalidToken
     import hashlib, base64
     from app.config import get_settings
-    secret = get_settings().web.session_secret or "fallback-secret-key"
+    secret = get_settings().web.session_secret
+    if not secret:
+        return None
     fernet_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
     try:
         f = Fernet(fernet_key)
@@ -1327,7 +1346,11 @@ async def notes_delete(request: Request, note_id: int):
 
 @router.post("/notes/{note_id}/reprocess")
 async def notes_reprocess(request: Request, note_id: int):
-    """Enqueue note for re-enrichment. Don't change status here — processor does it."""
+    """Enqueue note for re-enrichment. Clears manual override so AI can update."""
+    db = _get("db")
+    if db:
+        await db.db.execute("UPDATE notes SET metadata_manual=0 WHERE id=?", (note_id,))
+        await db.db.commit()
     capture = _get("note_capture")
     if capture:
         await capture.enqueue_enrichment(note_id)
@@ -1343,12 +1366,172 @@ async def notes_approve(request: Request, note_id: int):
     return RedirectResponse(f"/notes/{note_id}", status_code=303)
 
 
+@router.post("/notes/{note_id}/edit")
+async def notes_edit(request: Request, note_id: int):
+    """Save manual metadata edits (title, category, subcategory, tags)."""
+    db = _get("db")
+    if not db:
+        return RedirectResponse(f"/notes/{note_id}", status_code=303)
+
+    form = await request.form()
+    user_title = form.get("user_title", "").strip()
+    category = form.get("category", "").strip()
+    subcategory = form.get("subcategory", "").strip()
+    tags_raw = form.get("tags", "").strip()
+
+    import json as _json
+    tags_list = [t.strip() for t in tags_raw.split(",") if t.strip()]
+    tags_json = _json.dumps(tags_list, ensure_ascii=False)
+
+    await db.update_note_metadata(
+        note_id=note_id,
+        user_title=user_title,
+        category=category,
+        subcategory=subcategory,
+        tags=tags_json,
+    )
+
+    # Auto-approve if currently in review
+    note = await db.get_note(note_id)
+    if note and note.get("status") == "needs_review":
+        await db.set_note_status(note_id, "enriched")
+
+    return RedirectResponse(f"/notes/{note_id}", status_code=303)
+
+
 @router.post("/notes/{note_id}/archive")
 async def notes_archive(request: Request, note_id: int):
     db = _get("db")
     if db:
         await db.set_note_status(note_id, "archived")
     return RedirectResponse("/notes", status_code=303)
+
+
+@router.get("/notes/graph", response_class=HTMLResponse)
+async def notes_graph(request: Request, center: int = 0):
+    """Knowledge graph visualization."""
+    return templates.TemplateResponse("note_graph.html", {
+        "request": request, "page": "notes", "center_id": center,
+    })
+
+
+@router.get("/api/notes/graph")
+async def notes_graph_api(request: Request, center: int = 0, limit: int = 100):
+    """JSON API for graph data."""
+    db = _get("db")
+    if not db:
+        return JSONResponse({"nodes": [], "edges": []})
+    limit = min(max(limit, 10), 500)
+    data = await db.get_graph_data(center, limit)
+    return JSONResponse(data)
+
+
+@router.get("/notes/habits", response_class=HTMLResponse)
+async def notes_habits(request: Request):
+    """Habit tracking page — define habits, view streaks."""
+    db = _get("db")
+    if not db:
+        return HTMLResponse("Database not available", status_code=500)
+
+    from app.notes.habits import HabitTracker
+    tracker = HabitTracker(db)
+    today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+    habit_statuses = await tracker.check_habits_for_date(today)
+    return templates.TemplateResponse("note_habits.html", {
+        "request": request, "page": "notes",
+        "habits": habit_statuses, "today": today,
+    })
+
+
+@router.post("/notes/habits/create")
+async def notes_habits_create(
+    request: Request, name: str = Form(""), metric_key: str = Form(""),
+    target_value: float = Form(1), frequency: str = Form("daily"),
+):
+    db = _get("db")
+    if db and name:
+        from app.notes.habits import HabitTracker
+        await HabitTracker(db).create_habit(name, frequency, target_value, metric_key)
+    return RedirectResponse("/notes/habits", status_code=303)
+
+
+@router.post("/notes/habits/{habit_id}/delete")
+async def notes_habits_delete(request: Request, habit_id: int):
+    db = _get("db")
+    if db:
+        from app.notes.habits import HabitTracker
+        await HabitTracker(db).delete_habit(habit_id)
+    return RedirectResponse("/notes/habits", status_code=303)
+
+
+@router.post("/notes/habits/{habit_id}/toggle")
+async def notes_habits_toggle(request: Request, habit_id: int):
+    db = _get("db")
+    if db:
+        from app.notes.habits import HabitTracker
+        today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+        await HabitTracker(db).toggle_habit_entry(habit_id, today)
+    return RedirectResponse("/notes/habits", status_code=303)
+
+
+@router.get("/notes/entities", response_class=HTMLResponse)
+async def notes_entities(request: Request):
+    """Entity management page — view clusters, merge duplicates."""
+    db = _get("db")
+    clusters = await db.get_all_entity_clusters() if db else []
+    duplicates = await db.find_duplicate_entities() if db else []
+    return templates.TemplateResponse("note_entities.html", {
+        "request": request, "page": "notes",
+        "clusters": clusters, "duplicates": duplicates,
+    })
+
+
+@router.post("/notes/entities/merge")
+async def notes_entities_merge(
+    request: Request, entity_type: str = Form(""),
+    canonical: str = Form(""), aliases: str = Form(""),
+):
+    db = _get("db")
+    if db and entity_type and canonical and aliases:
+        alias_list = [a.strip() for a in aliases.split(",") if a.strip()]
+        await db.merge_entities(entity_type, canonical, alias_list)
+    return RedirectResponse("/notes/entities", status_code=303)
+
+
+@router.post("/notes/bulk/archive")
+async def notes_bulk_archive(request: Request, note_ids: str = Form("")):
+    db = _get("db")
+    if db and note_ids:
+        ids = [int(x) for x in note_ids.split(",") if x.strip().isdigit()]
+        count = await db.bulk_archive_notes(ids)
+    return RedirectResponse("/notes", status_code=303)
+
+
+@router.post("/notes/bulk/delete")
+async def notes_bulk_delete(request: Request, note_ids: str = Form("")):
+    db = _get("db")
+    if db and note_ids:
+        ids = [int(x) for x in note_ids.split(",") if x.strip().isdigit()]
+        count = await db.bulk_delete_notes(ids)
+    return RedirectResponse("/notes", status_code=303)
+
+
+@router.post("/notes/bulk/category")
+async def notes_bulk_category(request: Request, note_ids: str = Form(""), category: str = Form("")):
+    db = _get("db")
+    if db and note_ids and category:
+        ids = [int(x) for x in note_ids.split(",") if x.strip().isdigit()]
+        count = await db.bulk_set_category(ids, category)
+    return RedirectResponse("/notes", status_code=303)
+
+
+@router.post("/notes/{note_id}/pin")
+async def notes_pin(request: Request, note_id: int):
+    db = _get("db")
+    if db:
+        await db.toggle_note_pin(note_id)
+    referer = request.headers.get("referer", "/notes")
+    return RedirectResponse(referer, status_code=303)
 
 
 # ── Note Chart Partials ───────────────────────────────────────────────────
@@ -1385,12 +1568,16 @@ async def note_detail(request: Request, note_id: int):
     facts = await db.get_facts_by_note(note_id)
     tasks = await db.get_tasks_by_note(note_id)
     relations = await db.get_note_relations_v2(note_id)
+    enrichment_history = await db.get_enrichment_history(note_id)
 
+    from app.notes.categorizer import CATEGORIES
     return templates.TemplateResponse("note_detail.html", {
         "request": request, "page": "notes",
         "note": note, "enrichment": enrichment,
         "entities": entities, "facts": facts,
         "tasks": tasks, "relations": relations,
+        "categories": CATEGORIES,
+        "enrichment_history": enrichment_history,
     })
 
 
@@ -1408,11 +1595,50 @@ async def toggle_task(request: Request, task_id: int):
     return RedirectResponse("/notes", status_code=303)
 
 
-@router.get("/partials/note-mood-chart", response_class=HTMLResponse)
-async def note_mood_chart(request: Request):
+@router.get("/notes/export")
+async def notes_export(request: Request, format: str = "csv", type: str = "notes",
+                       from_date: str = "", to_date: str = ""):
+    """Export notes data as CSV or JSON."""
+    from starlette.responses import Response
     db = _get("db")
+    if not db:
+        return HTMLResponse("Database not available", status_code=500)
+
+    from app.notes.export import ExportService
+    svc = ExportService(db)
+
+    now = __import__("datetime").datetime.now().strftime("%Y%m%d")
+
+    if format == "json":
+        data = await svc.export_all_json(from_date, to_date)
+        return Response(
+            content=data, media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="notes_export_{now}.json"'},
+        )
+
+    # CSV export by type
+    if type == "food":
+        data = await svc.export_food_csv(from_date, to_date)
+        filename = f"food_{now}.csv"
+    elif type == "facts":
+        data = await svc.export_facts_csv(from_date=from_date, to_date=to_date)
+        filename = f"facts_{now}.csv"
+    else:
+        data = await svc.export_notes_csv(from_date, to_date)
+        filename = f"notes_{now}.csv"
+
+    return Response(
+        content=data, media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/partials/note-mood-chart", response_class=HTMLResponse)
+async def note_mood_chart(request: Request, days: int = 30):
+    db = _get("db")
+    days = min(max(days, 7), 365)
     from app.notes.analytics import NoteAnalytics
-    data = await NoteAnalytics(db).get_mood_trend(30) if db else []
+    data = await NoteAnalytics(db).get_mood_trend(days) if db else []
     max_val = 10  # mood is always 1-10
     return templates.TemplateResponse("partials/note_charts.html", {
         "request": request, "data": data, "max_val": max_val,
@@ -1421,10 +1647,11 @@ async def note_mood_chart(request: Request):
 
 
 @router.get("/partials/note-calories-chart", response_class=HTMLResponse)
-async def note_calories_chart(request: Request):
+async def note_calories_chart(request: Request, days: int = 30):
     db = _get("db")
+    days = min(max(days, 7), 365)
     from app.notes.analytics import NoteAnalytics
-    data = await NoteAnalytics(db).get_calorie_trend(30) if db else []
+    data = await NoteAnalytics(db).get_calorie_trend(days) if db else []
     max_val = max((d.get("total", 0) for d in data), default=2500) or 2500
     # Use total for calories (sum per day)
     for d in data:
@@ -1436,10 +1663,11 @@ async def note_calories_chart(request: Request):
 
 
 @router.get("/partials/note-weight-chart", response_class=HTMLResponse)
-async def note_weight_chart(request: Request):
+async def note_weight_chart(request: Request, days: int = 90):
     db = _get("db")
+    days = min(max(days, 7), 365)
     from app.notes.analytics import NoteAnalytics
-    data = await NoteAnalytics(db).get_weight_trend(90) if db else []
+    data = await NoteAnalytics(db).get_weight_trend(days) if db else []
     max_val = max((d.get("avg", 0) for d in data), default=100) or 100
     return templates.TemplateResponse("partials/note_charts.html", {
         "request": request, "data": data, "max_val": max_val,
@@ -1448,9 +1676,10 @@ async def note_weight_chart(request: Request):
 
 
 @router.get("/partials/note-category-dist", response_class=HTMLResponse)
-async def note_category_dist(request: Request):
+async def note_category_dist(request: Request, days: int = 30):
     db = _get("db")
-    distribution = await db.get_category_distribution(30) if db else {}
+    days = min(max(days, 7), 365)
+    distribution = await db.get_category_distribution(days) if db else {}
     total = sum(distribution.values()) if distribution else 0
     return templates.TemplateResponse("partials/note_category_dist.html", {
         "request": request, "distribution": distribution, "total": total,
@@ -1458,19 +1687,103 @@ async def note_category_dist(request: Request):
 
 
 @router.get("/partials/note-search", response_class=HTMLResponse)
-async def note_search_partial(request: Request, q: str = ""):
+async def note_search_partial(
+    request: Request, q: str = "", category: str = "",
+    status: str = "", source: str = "", mode: str = "keyword",
+):
+    """Search notes: keyword (LIKE on unencrypted fields), semantic (Qdrant), or hybrid."""
     db = _get("db")
-    notes = []
-    if db and q.strip():
-        try:
-            notes = await db.search_notes(q.strip(), limit=20)
-        except Exception:
-            notes = await db.list_notes(limit=20)
-    elif db:
-        notes = await db.list_notes(limit=50)
-    # Return just the notes list HTML
+    notes: list[dict] = []
+    semantic_ids: dict[int, float] = {}
+
+    if not db:
+        return templates.TemplateResponse("partials/note_list.html", {
+            "request": request, "notes": [], "semantic_ids": {},
+        })
+
+    if not q.strip():
+        # No query — list with filters only
+        notes = await db.list_notes(limit=50, category=category)
+        if status:
+            notes = [n for n in notes if n.get("status") == status]
+        if source:
+            notes = [n for n in notes if n.get("source") == source]
+    else:
+        # Keyword search
+        notes = await db.search_notes_keyword(
+            q.strip(), category=category, status=status, source=source,
+        )
+
+        # Semantic search (hybrid or semantic mode)
+        if mode in ("semantic", "hybrid"):
+            vector_store = _get("vector_store")
+            if vector_store:
+                try:
+                    sem_results = await vector_store.search_notes(
+                        q.strip(), category=category,
+                    )
+                    semantic_ids = {r["note_id"]: r["score"] for r in sem_results}
+
+                    # Append semantic results not already in keyword results
+                    keyword_ids = {n["id"] for n in notes}
+                    for sem in sem_results:
+                        if sem["note_id"] not in keyword_ids:
+                            note = await db.get_note(sem["note_id"])
+                            if note and note.get("status") != "archived":
+                                notes.append(note)
+                except Exception:
+                    pass  # Qdrant unavailable — keyword only
+
     return templates.TemplateResponse("partials/note_list.html", {
         "request": request, "notes": notes,
+        "semantic_ids": semantic_ids,
+    })
+
+
+@router.get("/notes/reminders", response_class=HTMLResponse)
+async def note_reminders_page(request: Request):
+    """Note reminders list page."""
+    db = _get("db")
+    reminders = await db.list_note_reminders(include_done=False) if db else []
+    return templates.TemplateResponse("note_reminders.html", {
+        "request": request, "page": "notes", "reminders": reminders,
+    })
+
+
+@router.post("/notes/reminders/{reminder_id}/done")
+async def note_reminder_done(request: Request, reminder_id: int):
+    db = _get("db")
+    if db:
+        await db.complete_note_reminder(reminder_id)
+    return RedirectResponse("/notes/reminders", status_code=303)
+
+
+@router.post("/notes/reminders/{reminder_id}/cancel")
+async def note_reminder_cancel(request: Request, reminder_id: int):
+    db = _get("db")
+    if db:
+        await db.cancel_note_reminder(reminder_id)
+    return RedirectResponse("/notes/reminders", status_code=303)
+
+
+@router.get("/partials/food-today", response_class=HTMLResponse)
+async def food_today_partial(request: Request):
+    """Today's nutrition breakdown from food_entries."""
+    db = _get("db")
+    if not db:
+        return HTMLResponse("")
+    from datetime import datetime as dt
+    date = dt.now().strftime("%Y-%m-%d")
+    entries = await db.get_food_entries_by_date(date)
+    nutrition = await db.get_daily_nutrition(date)
+    # Group entries by meal_type
+    meals: dict[str, list] = {}
+    for e in entries:
+        mt = e.get("meal_type", "unknown")
+        meals.setdefault(mt, []).append(e)
+    return templates.TemplateResponse("partials/food_today.html", {
+        "request": request, "entries": entries, "nutrition": nutrition,
+        "meals": meals, "date": date,
     })
 
 

@@ -185,6 +185,9 @@ class BotHandlers:
         BotCommand("note", "Быстрая заметка"),
         BotCommand("today", "Метрики дня"),
         BotCommand("missing", "Что не заполнено"),
+        BotCommand("morning", "Утренний брифинг"),
+        BotCommand("habits", "Привычки и стрики"),
+        BotCommand("export", "Экспорт заметок"),
         BotCommand("analyze", "Недельный анализ"),
         BotCommand("unlock", "Разблокировать шифрование"),
     ]
@@ -207,6 +210,9 @@ class BotHandlers:
         app.add_handler(CommandHandler("note", self.cmd_note))
         app.add_handler(CommandHandler("today", self.cmd_today))
         app.add_handler(CommandHandler("missing", self.cmd_missing))
+        app.add_handler(CommandHandler("morning", self.cmd_morning))
+        app.add_handler(CommandHandler("habits", self.cmd_habits))
+        app.add_handler(CommandHandler("export", self.cmd_export))
         app.add_handler(CommandHandler("analyze", self.cmd_analyze))
         app.add_handler(CommandHandler("unlock", self.cmd_unlock))
 
@@ -223,6 +229,7 @@ class BotHandlers:
         app.add_handler(CallbackQueryHandler(self.handle_voice_choice, pattern="^vc:"))
         app.add_handler(CallbackQueryHandler(self.handle_text_choice, pattern="^tc:"))
         app.add_handler(CallbackQueryHandler(self.handle_reminder_action, pattern="^rem:"))
+        app.add_handler(CallbackQueryHandler(self.handle_note_reminder_action, pattern="^nrem:"))
         app.add_handler(CallbackQueryHandler(self.handle_note_action, pattern="^note:"))
         app.add_handler(CallbackQueryHandler(self.handle_checkin_callback, pattern="^ci:"))
         app.add_handler(CallbackQueryHandler(self.handle_dedup_choice, pattern="^dedup:"))
@@ -1160,6 +1167,74 @@ class BotHandlers:
         await update.message.reply_text("\n".join(parts))
 
     @owner_only
+    async def cmd_morning(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Send morning briefing on demand."""
+        ack = await update.message.reply_text("☀️ Генерирую утренний брифинг...")
+
+        from app.main import get_state
+        morning_engine = get_state("morning_engine")
+        if not morning_engine:
+            await ack.edit_text("❌ Morning engine не инициализирован")
+            return
+
+        try:
+            brief = await morning_engine.generate_morning_brief()
+            text = morning_engine.format_telegram_brief(brief)
+            await ack.edit_text(text or "Недостаточно данных для брифинга")
+        except Exception as e:
+            await ack.edit_text(f"❌ Ошибка: {e}")
+
+    @owner_only
+    async def cmd_habits(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show today's habit status and streaks."""
+        from datetime import datetime
+        from app.notes.habits import HabitTracker
+        tracker = HabitTracker(self.pipeline.db)
+        today = datetime.now().strftime("%Y-%m-%d")
+        statuses = await tracker.check_habits_for_date(today)
+
+        if not statuses:
+            await update.message.reply_text("Привычки не настроены. Создайте на /notes/habits")
+            return
+
+        lines = [f"📋 Привычки ({today}):", ""]
+        for h in statuses:
+            check = "✅" if h["completed"] else "⬜"
+            streak_str = f" 🔥{h['streak']}" if h["streak"] > 0 else ""
+            lines.append(f"{check} {h['name']}{streak_str}")
+
+        done = sum(1 for h in statuses if h["completed"])
+        lines.append(f"\n{done}/{len(statuses)} выполнено")
+
+        await update.message.reply_text("\n".join(lines))
+
+    @owner_only
+    async def cmd_export(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Export notes data as JSON file."""
+        ack = await update.message.reply_text("📦 Готовлю экспорт...")
+
+        try:
+            from app.notes.export import ExportService
+            svc = ExportService(self.pipeline.db)
+            data = await svc.export_all_json()
+
+            from io import BytesIO
+            buf = BytesIO(data.encode("utf-8"))
+            buf.name = "notes_export.json"
+            buf.seek(0)
+
+            from datetime import datetime
+            now = datetime.now().strftime("%Y%m%d")
+            await update.message.reply_document(
+                document=buf,
+                filename=f"notes_export_{now}.json",
+                caption=f"📦 Экспорт заметок (последние 30 дней)",
+            )
+            await ack.delete()
+        except Exception as e:
+            await ack.edit_text(f"❌ Ошибка экспорта: {e}")
+
+    @owner_only
     async def cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Run weekly analysis on demand."""
         ack = await update.message.reply_text("📊 Генерирую недельный отчёт...")
@@ -1204,6 +1279,11 @@ class BotHandlers:
         elif action == "archive":
             await db.set_note_status(note_id, "archived")
             await query.edit_message_text(f"📦 Заметка #{note_id} архивирована")
+        elif action == "pin":
+            is_pinned = await db.toggle_note_pin(note_id)
+            emoji = "📌" if is_pinned else "📎"
+            label = "закреплена" if is_pinned else "откреплена"
+            await query.answer(f"{emoji} Заметка #{note_id} {label}", show_alert=False)
         elif action == "edit":
             # v1: Edit metadata only — redirect to web detail page
             from app.config import get_settings
@@ -1228,10 +1308,15 @@ class BotHandlers:
 
         from app.notes.checkin import EveningCheckin
         from app.config import get_settings
+        ns = get_settings().notes
         checkin = EveningCheckin(
             self.pipeline.db,
-            expected_categories=get_settings().notes.expected_daily_categories,
+            expected_categories=ns.expected_daily_categories,
+            expected_signals=ns.expected_daily_signals,
             capture=get_state("note_capture"),
+            max_questions=ns.checkin_max_questions,
+            include_closing=ns.checkin_include_closing_prompt,
+            weight_frequency_days=ns.checkin_weight_frequency_days,
         )
 
         action = parts[1]
@@ -1276,6 +1361,36 @@ class BotHandlers:
             )
             await db.db.commit()
             await query.edit_message_text(query.message.text + "\n\n⏰ Отложено на 1 день.")
+
+    @owner_only
+    async def handle_note_reminder_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle note reminder buttons: create, done, snooze."""
+        query = update.callback_query
+        await query.answer()
+
+        parts = query.data.split(":")  # "nrem:create:14" or "nrem:done:5"
+        if len(parts) < 3:
+            return
+
+        action = parts[1]
+        id_val = int(parts[2])
+        db = self.pipeline.db
+
+        if action == "create":
+            from app.notes.reminders import ReminderExtractionService
+            svc = ReminderExtractionService(db)
+            count = await svc.create_for_inferred(id_val)  # id_val = note_id
+            await query.edit_message_reply_markup(reply_markup=None)
+            if count:
+                await query.message.reply_text(f"⏰ Создано напоминаний: {count}")
+            else:
+                await query.message.reply_text("Нет задач с дедлайном для напоминания")
+        elif action == "done":
+            await db.complete_note_reminder(id_val)  # id_val = reminder_id
+            await query.edit_message_text(query.message.text + "\n\n✅ Выполнено")
+        elif action == "snooze":
+            await db.snooze_note_reminder(id_val)  # id_val = reminder_id
+            await query.edit_message_text(query.message.text + "\n\n⏰ Отложено на 24ч")
 
     @owner_only
     async def handle_dedup_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

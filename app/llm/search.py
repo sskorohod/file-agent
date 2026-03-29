@@ -180,9 +180,11 @@ class LLMSearch:
         except Exception as e:
             logger.error(f"LLM search answer failed: {e}")
             lines = [f"🔍 Найдено по «{query}»:\n"]
-            for i, r in enumerate(filtered[:3], 1):
-                preview = r.text[:200] + "..." if len(r.text) > 200 else r.text
-                lines.append(f"{i}. {r.metadata.get('filename', '?')}\n{preview}")
+            for i, (fid, info) in enumerate(list(file_best)[:3], 1):
+                text_preview = info.get("text", "")[:200]
+                if len(info.get("text", "")) > 200:
+                    text_preview += "..."
+                lines.append(f"{i}. {info.get('filename', '?')}\n{text_preview}")
             return {"text": "\n\n".join(lines), "file_ids": seen_files, "cached": False}
 
     # ── Hybrid Retrieval ────────────────────────────────────────────

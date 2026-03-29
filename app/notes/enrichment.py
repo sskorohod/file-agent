@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -72,13 +73,33 @@ class NoteEnrichmentService:
             # 6. Extract tasks
             await self._save_tasks(note_id, result)
 
-            # 7. Update bridge fields for compatibility
-            await self.db.update_note_bridge_fields(
-                note_id=note_id,
-                category=result.category,
-                subcategory=result.subcategory,
-                tags=json.dumps(result.tags, ensure_ascii=False),
-            )
+            # 6.5 Food analytics extraction (for food/finance notes)
+            if result.category in ("food", "finance"):
+                try:
+                    from app.notes.food import FoodAnalyticsService
+                    food_svc = FoodAnalyticsService(self.db, self.categorizer.llm)
+                    await food_svc.extract(note_id)
+                except Exception as e:
+                    logger.warning(f"Food analytics failed for note #{note_id}: {e}")
+
+            # 6.6 Reminder extraction (for notes with tasks)
+            if result.action_items:
+                try:
+                    from app.notes.reminders import ReminderExtractionService
+                    rem_svc = ReminderExtractionService(self.db)
+                    await rem_svc.extract(note_id)
+                except Exception as e:
+                    logger.warning(f"Reminder extraction failed for note #{note_id}: {e}")
+
+            # 7. Update bridge fields (skip if user manually edited metadata)
+            note_fresh = await self.db.get_note(note_id)
+            if not (note_fresh and note_fresh.get("metadata_manual") in (1, "1")):
+                await self.db.update_note_bridge_fields(
+                    note_id=note_id,
+                    category=result.category,
+                    subcategory=result.subcategory,
+                    tags=json.dumps(result.tags, ensure_ascii=False),
+                )
 
             # 8. Set final status
             if result.confidence < 0.5:
@@ -92,6 +113,17 @@ class NoteEnrichmentService:
             )
             return True
 
+        except asyncio.CancelledError:
+            # Recover to a terminal or retryable state on reload/shutdown.
+            try:
+                note_fresh = await self.db.get_note(note_id)
+                if note_fresh and note_fresh.get("current_enrichment_id"):
+                    await self.db.set_note_status(note_id, "enriched")
+                else:
+                    await self.db.set_note_status(note_id, "captured")
+            except Exception:
+                pass
+            raise
         except Exception as e:
             logger.error(f"Enrichment failed for note #{note_id}: {e}", exc_info=True)
             await self.db.set_note_status(note_id, "failed")
@@ -101,23 +133,32 @@ class NoteEnrichmentService:
         """Extract and save entities from structured data."""
         sd = result.structured_data
 
-        # Person entities
+        # Person entities — with optional role
+        person_role = sd.get("person_role", "")
+        if not isinstance(person_role, str):
+            person_role = ""
         for field in ("person_name", "patient_name"):
             name = sd.get(field)
             if name and isinstance(name, str):
                 await self.db.save_entity(
                     note_id, "person", name,
                     normalized_value=name.lower().strip(),
+                    role=person_role,
                 )
 
-        # Company/vehicle from auto category
+        # Vehicle/product asset (not company — Tesla in auto context is a car, not a corp)
         vehicle = sd.get("vehicle")
-        if vehicle:
-            await self.db.save_entity(note_id, "company", vehicle, normalized_value=vehicle.lower())
+        if vehicle and isinstance(vehicle, str):
+            await self.db.save_entity(note_id, "vehicle", vehicle, normalized_value=vehicle.lower())
+
+        # Place entities
+        place = sd.get("place_name")
+        if place and isinstance(place, str):
+            await self.db.save_entity(note_id, "place", place, normalized_value=place.lower().strip())
 
         # Project context
         project = sd.get("project_name")
-        if project:
+        if project and isinstance(project, str):
             await self.db.save_entity(note_id, "project", project, normalized_value=project.lower())
 
     async def _save_facts(self, note_id: int, result: NoteCategoryResult, date: str):
@@ -190,19 +231,37 @@ class NoteEnrichmentService:
                 value_text=", ".join(str(f) for f in foods), date=date,
             )
 
+    # Explicit urgency markers that justify high priority
+    _URGENCY_WORDS = {"срочно", "немедленно", "критично", "asap", "urgent", "сегодня", "завтра"}
+
     async def _save_tasks(self, note_id: int, result: NoteCategoryResult):
-        """Extract and save tasks from action_items."""
+        """Extract and save tasks from action_items with priority normalization."""
+        # Check original note text for urgency words once
+        note = await self.db.get_note(note_id)
+        note_lower = (note.get("raw_content") or note.get("content", "")).lower() if note else ""
+        has_urgency = any(w in note_lower for w in self._URGENCY_WORDS)
+
         for item in result.action_items:
             if isinstance(item, dict):
                 desc = item.get("task", "")
                 priority = item.get("priority", "medium")
                 due = item.get("due_date", "")
+                due_hint = item.get("due_hint", "")
             elif isinstance(item, str):
                 desc = item
                 priority = "medium"
                 due = ""
+                due_hint = ""
             else:
                 continue
+
+            # Normalize priority: high only with explicit urgency or very close deadline
+            if priority == "high" and not has_urgency:
+                # Check due_hint for same-day / next-day signals
+                hint_lower = (due_hint or "").lower()
+                close_deadline = any(w in hint_lower for w in ("сегодня", "завтра", "через час", "немедленно"))
+                if not close_deadline:
+                    priority = "medium"
 
             if desc:
                 await self.db.save_task(note_id, desc, priority=priority, due_date=due or "")

@@ -177,6 +177,10 @@ class NotesConfig(BaseModel):
     inbox_watch_enabled: bool = True
     inbox_watch_interval: int = 10  # seconds
     expected_daily_categories: list[str] = ["food", "personal", "fitness"]
+    expected_daily_signals: list[str] | None = None  # None = legacy category mode
+    checkin_max_questions: int = 5  # 4 required + 1 closing
+    checkin_include_closing_prompt: bool = True
+    checkin_weight_frequency_days: int = 7  # ask weight once a week
     auto_embed: bool = True
     correlation_metrics: list[str] = ["mood_score", "calories", "sleep_hours", "weight_kg", "energy"]
 

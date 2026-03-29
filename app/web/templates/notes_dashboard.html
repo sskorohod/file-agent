@@ -8,6 +8,9 @@
     <p class="text-xs sm:text-sm text-txt-3 mt-0.5">{{ notes|length }} note{{ 's' if notes|length != 1 }}</p>
   </div>
   <div class="flex gap-2">
+    <a href="/notes/graph" class="btn-secondary btn-sm touch-target" title="Knowledge Graph">Graph</a>
+    <a href="/notes/habits" class="btn-secondary btn-sm touch-target" title="Habits">Habits</a>
+    <a href="/notes/export?format=json" class="btn-secondary btn-sm touch-target" title="Export JSON">Export</a>
     <a href="/notes/review" class="btn-secondary btn-sm touch-target">Review</a>
     <button type="button" onclick="document.getElementById('new-note-dialog').showModal()"
             class="btn-primary btn-sm touch-target">
@@ -45,37 +48,70 @@
   </div>
 </div>
 
+{# ── Food Today ── #}
+<div hx-get="/partials/food-today" hx-trigger="load" hx-swap="innerHTML"></div>
+
 {# ── Charts Section ── #}
+<div class="flex items-center justify-between mb-3">
+  <h3 class="text-sm font-semibold text-txt">Графики</h3>
+  <select id="chart-period" class="text-xs bg-surface border border-border rounded-lg px-2 py-1 text-txt-2"
+          onchange="window._updateCharts(this.value)">
+    <option value="7">7 дней</option>
+    <option value="14">14 дней</option>
+    <option value="30" selected>30 дней</option>
+    <option value="90">90 дней</option>
+  </select>
+</div>
 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
   {# Mood Chart #}
   <div class="card !p-4">
-    <h3 class="text-sm font-semibold text-txt mb-2">Настроение (30 дней)</h3>
-    <div id="mood-chart-container" hx-get="/partials/note-mood-chart" hx-trigger="load" hx-swap="innerHTML">
+    <h3 class="text-sm font-semibold text-txt mb-2" data-chart-label="Настроение">Настроение (30 дней)</h3>
+    <div id="mood-chart-container" hx-get="/partials/note-mood-chart?days=30" hx-trigger="load" hx-swap="innerHTML">
       <p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p>
     </div>
   </div>
   {# Calories Chart #}
   <div class="card !p-4">
-    <h3 class="text-sm font-semibold text-txt mb-2">Калории (30 дней)</h3>
-    <div id="cal-chart-container" hx-get="/partials/note-calories-chart" hx-trigger="load" hx-swap="innerHTML">
+    <h3 class="text-sm font-semibold text-txt mb-2" data-chart-label="Калории">Калории (30 дней)</h3>
+    <div id="cal-chart-container" hx-get="/partials/note-calories-chart?days=30" hx-trigger="load" hx-swap="innerHTML">
       <p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p>
     </div>
   </div>
   {# Weight Chart #}
   <div class="card !p-4">
-    <h3 class="text-sm font-semibold text-txt mb-2">Вес (90 дней)</h3>
-    <div id="weight-chart-container" hx-get="/partials/note-weight-chart" hx-trigger="load" hx-swap="innerHTML">
+    <h3 class="text-sm font-semibold text-txt mb-2" data-chart-label="Вес">Вес (90 дней)</h3>
+    <div id="weight-chart-container" hx-get="/partials/note-weight-chart?days=90" hx-trigger="load" hx-swap="innerHTML">
       <p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p>
     </div>
   </div>
   {# Category Distribution #}
   <div class="card !p-4">
-    <h3 class="text-sm font-semibold text-txt mb-2">Категории (30 дней)</h3>
-    <div id="cat-chart-container" hx-get="/partials/note-category-dist" hx-trigger="load" hx-swap="innerHTML">
+    <h3 class="text-sm font-semibold text-txt mb-2" data-chart-label="Категории">Категории (30 дней)</h3>
+    <div id="cat-chart-container" hx-get="/partials/note-category-dist?days=30" hx-trigger="load" hx-swap="innerHTML">
       <p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p>
     </div>
   </div>
 </div>
+<script>
+window._updateCharts = function(days) {
+  var charts = [
+    {id: 'mood-chart-container', url: '/partials/note-mood-chart'},
+    {id: 'cal-chart-container', url: '/partials/note-calories-chart'},
+    {id: 'weight-chart-container', url: '/partials/note-weight-chart'},
+    {id: 'cat-chart-container', url: '/partials/note-category-dist'},
+  ];
+  charts.forEach(function(c) {
+    var el = document.getElementById(c.id);
+    if (el) {
+      el.setAttribute('hx-get', c.url + '?days=' + days);
+      htmx.trigger(el, 'htmx:load');
+      htmx.ajax('GET', c.url + '?days=' + days, {target: '#' + c.id, swap: 'innerHTML'});
+    }
+    var label = el && el.closest('.card') && el.closest('.card').querySelector('[data-chart-label]');
+    if (label) label.textContent = label.dataset.chartLabel + ' (' + days + ' дней)';
+  });
+};
+</script>
 
 {# ── Correlations ── #}
 {% if correlations %}
@@ -97,111 +133,141 @@
 </div>
 {% endif %}
 
-{# ── Category Filter ── #}
-<div class="flex gap-2 mb-3 overflow-x-auto pb-1">
-  <a href="/notes" class="text-xs px-2.5 py-1 rounded-full whitespace-nowrap transition-colors
-    {% if not current_category %}bg-accent text-white{% else %}bg-surface-2 text-txt-3 hover:text-txt{% endif %}">
-    Все
-  </a>
-  {% set cat_emoji = {'food':'🍽','health':'🏥','fitness':'💪','business':'💼','personal':'💭','finance':'💰','learning':'📚','goals':'🎯'} %}
-  {% for cat in categories %}
-  <a href="/notes?category={{ cat }}" class="text-xs px-2.5 py-1 rounded-full whitespace-nowrap transition-colors
-    {% if current_category == cat %}bg-accent text-white{% else %}bg-surface-2 text-txt-3 hover:text-txt{% endif %}">
-    {{ cat_emoji.get(cat, '📝') }} {{ cat }}
-  </a>
-  {% endfor %}
+{# ── Search & Filters ── #}
+<div class="mb-4 space-y-3">
+
+  {# Search bar #}
+  <div class="relative group">
+    <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+      <svg class="w-4 h-4 text-txt-3 group-focus-within:text-accent-2 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+    </div>
+    <input type="search" name="q" id="note-search-q"
+           placeholder="Поиск по заметкам..."
+           class="w-full bg-surface-2 border border-border rounded-xl pl-10 pr-36 py-3 text-sm text-txt placeholder:text-txt-3 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all"
+           hx-get="/partials/note-search"
+           hx-trigger="keyup changed delay:300ms"
+           hx-target="#notes-list"
+           hx-swap="innerHTML"
+           hx-include=".note-filter"
+           hx-indicator="#search-spinner"
+           autocomplete="off">
+    {# Mode toggle inside search bar #}
+    <div class="absolute inset-y-0 right-1.5 flex items-center gap-1">
+      <div id="search-spinner" class="htmx-indicator">
+        <svg class="animate-spin w-4 h-4 text-accent-2" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"/></svg>
+      </div>
+      <div class="flex bg-surface-3 rounded-lg p-0.5">
+        <label class="search-mode-label">
+          <input type="radio" name="mode" value="keyword" class="note-filter sr-only peer" checked
+                 hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
+          <span class="block text-[11px] font-medium px-2 py-1 rounded-md cursor-pointer transition-all text-txt-3 peer-checked:bg-accent peer-checked:text-white peer-checked:shadow-sm">
+            Text
+          </span>
+        </label>
+        <label class="search-mode-label">
+          <input type="radio" name="mode" value="hybrid" class="note-filter sr-only peer"
+                 hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
+          <span class="block text-[11px] font-medium px-2 py-1 rounded-md cursor-pointer transition-all text-txt-3 peer-checked:bg-accent peer-checked:text-white peer-checked:shadow-sm">
+            Hybrid
+          </span>
+        </label>
+        <label class="search-mode-label">
+          <input type="radio" name="mode" value="semantic" class="note-filter sr-only peer"
+                 hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
+          <span class="block text-[11px] font-medium px-2 py-1 rounded-md cursor-pointer transition-all text-txt-3 peer-checked:bg-accent peer-checked:text-white peer-checked:shadow-sm">
+            AI
+          </span>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  {# Filter row: categories + status + source #}
+  <div class="flex items-center gap-2 overflow-x-auto pb-0.5 scrollbar-hide">
+    {# Category pills #}
+    <a href="/notes" class="shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-lg whitespace-nowrap transition-all
+      {% if not current_category %}bg-accent/15 text-accent-2 ring-1 ring-accent/30{% else %}bg-surface-2 text-txt-3 hover:text-txt hover:bg-surface-3{% endif %}">
+      Все
+    </a>
+    {% set cat_emoji = {'food':'🍽','health':'🏥','fitness':'💪','business':'💼','personal':'💭','finance':'💰','learning':'📚','goals':'🎯'} %}
+    {% for cat in categories %}
+    <a href="/notes?category={{ cat }}" class="shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-lg whitespace-nowrap transition-all
+      {% if current_category == cat %}bg-accent/15 text-accent-2 ring-1 ring-accent/30{% else %}bg-surface-2 text-txt-3 hover:text-txt hover:bg-surface-3{% endif %}">
+      {{ cat_emoji.get(cat, '📝') }} {{ cat }}
+    </a>
+    {% endfor %}
+
+    {# Divider #}
+    <div class="shrink-0 w-px h-5 bg-border mx-0.5"></div>
+
+    {# Status filter #}
+    <select name="status" class="note-filter shrink-0 bg-surface-2 border border-border rounded-lg text-[11px] font-medium text-txt-3 pl-2.5 pr-6 py-1.5 appearance-none cursor-pointer hover:text-txt hover:bg-surface-3 focus:outline-none focus:ring-1 focus:ring-accent/30 transition-all"
+            style="background-image:url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 fill=%27%2371717a%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 11L3 6h10z%27/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 6px center;"
+            hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
+      <option value="">Status</option>
+      <option value="enriched">Enriched</option>
+      <option value="needs_review">Needs review</option>
+      <option value="captured">Captured</option>
+      <option value="failed">Failed</option>
+      <option value="archived">Archived</option>
+    </select>
+
+    {# Source filter #}
+    <select name="source" class="note-filter shrink-0 bg-surface-2 border border-border rounded-lg text-[11px] font-medium text-txt-3 pl-2.5 pr-6 py-1.5 appearance-none cursor-pointer hover:text-txt hover:bg-surface-3 focus:outline-none focus:ring-1 focus:ring-accent/30 transition-all"
+            style="background-image:url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 fill=%27%2371717a%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 11L3 6h10z%27/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 6px center;"
+            hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
+      <option value="">Source</option>
+      <option value="voice">Voice</option>
+      <option value="web">Web</option>
+      <option value="telegram">Telegram</option>
+    </select>
+  </div>
 </div>
 
-{# ── Search ── #}
-<div class="mb-4">
-  <input type="search" name="q" placeholder="Поиск заметок..."
-         class="input text-sm"
-         hx-get="/partials/note-search"
-         hx-trigger="keyup changed delay:300ms"
-         hx-target="#notes-list"
-         hx-swap="innerHTML">
+{# ── Results header + Bulk toolbar ── #}
+<div class="flex items-center justify-between mb-3">
+  <div class="flex items-center gap-3">
+    <label class="flex items-center gap-1.5 text-xs text-txt-3 cursor-pointer select-none">
+      <input type="checkbox" id="select-all" class="accent-accent" onchange="window._toggleAll(this.checked)">
+      Select all
+    </label>
+    <p class="text-xs text-txt-3">
+      <span class="font-medium text-txt-2">{{ notes|length }}</span> заметок
+      {% if current_category %}<span class="text-accent-2 ml-1">in {{ current_category }}</span>{% endif %}
+    </p>
+  </div>
+  <div id="bulk-toolbar" class="hidden flex items-center gap-2">
+    <span id="bulk-count" class="text-xs text-txt-3"></span>
+    <form method="POST" action="/notes/bulk/archive" class="inline">
+      <input type="hidden" name="note_ids" id="bulk-ids-archive">
+      <button class="btn-secondary btn-sm" onclick="document.getElementById('bulk-ids-archive').value=window._getSelected()">Archive</button>
+    </form>
+    <form method="POST" action="/notes/bulk/delete" class="inline">
+      <input type="hidden" name="note_ids" id="bulk-ids-delete">
+      <button class="btn-secondary btn-sm text-err-text" onclick="if(!confirm('Удалить выбранные?'))event.preventDefault(); document.getElementById('bulk-ids-delete').value=window._getSelected()">Delete</button>
+    </form>
+  </div>
 </div>
 
 {# ── Notes List ── #}
-<div id="notes-list" class="space-y-3">
+<div id="notes-list" class="space-y-2">
   {% if notes %}
     {% for n in notes %}
-    <div class="card !p-4 animate-fade-in">
-      <div class="flex items-start justify-between gap-3">
-        <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-2 mb-1">
-            {% if n.status and n.status != 'enriched' %}
-            {% set status_colors = {'captured': 'bg-surface-2 text-txt-3', 'processing': 'bg-warn-bg text-warn-text animate-pulse-soft', 'needs_review': 'bg-orange-500/10 text-orange-400', 'failed': 'bg-err-bg text-err-text', 'archived': 'bg-surface-2 text-txt-3 opacity-50'} %}
-            <span class="text-xs px-1.5 py-0.5 rounded-full {{ status_colors.get(n.status, '') }}">{{ n.status }}</span>
-            {% endif %}
-            {% if n.category %}
-            <span class="text-xs px-1.5 py-0.5 rounded-full
-              {% if n.category == 'food' %}bg-orange-500/10 text-orange-400
-              {% elif n.category == 'health' %}bg-red-500/10 text-red-400
-              {% elif n.category == 'fitness' %}bg-green-500/10 text-green-400
-              {% elif n.category == 'business' %}bg-blue-500/10 text-blue-400
-              {% elif n.category == 'personal' %}bg-purple-500/10 text-purple-400
-              {% elif n.category == 'finance' %}bg-yellow-500/10 text-yellow-400
-              {% elif n.category == 'learning' %}bg-cyan-500/10 text-cyan-400
-              {% elif n.category == 'goals' %}bg-pink-500/10 text-pink-400
-              {% else %}bg-surface-2 text-txt-3{% endif %}">
-              {{ n.category }}{% if n.subcategory %}/{{ n.subcategory }}{% endif %}
-            </span>
-            {% endif %}
-            {% if n.mood_score %}
-            <span class="text-xs {% if n.mood_score >= 7 %}text-ok-text{% elif n.mood_score <= 4 %}text-err-text{% else %}text-txt-3{% endif %}">
-              mood: {{ n.mood_score }}/10
-            </span>
-            {% endif %}
-          </div>
-          {% if n.title or n.user_title %}
-          <a href="/notes/{{ n.id }}" class="text-sm font-semibold text-txt hover:text-accent-2 mb-1 block">{{ n.user_title or n.title }}</a>
-          {% endif %}
-          <a href="/notes/{{ n.id }}" class="text-sm text-txt-2 line-clamp-2 block hover:text-txt">{{ (n.raw_content or n.content)[:200] }}</a>
-          <div class="flex items-center gap-3 mt-2 text-xs text-txt-3 flex-wrap">
-            <span>{{ n.created_at[11:16] if n.created_at|length > 16 else n.created_at[:16] }}</span>
-            <span class="px-1.5 py-0.5 rounded bg-surface-2">{{ n.source }}</span>
-            {% if n.tags %}
-              {% for tag in n.tags %}
-              <span class="px-1.5 py-0.5 rounded bg-accent-bg text-accent-2">#{{ tag }}</span>
-              {% endfor %}
-            {% endif %}
-            {% if n.confidence and n.confidence|float < 0.5 %}
-            <span class="px-1.5 py-0.5 rounded bg-warn-bg text-warn-text">low confidence</span>
-            {% endif %}
-            {% if n.sentiment is not none and n.sentiment != '' %}
-              {% set s = n.sentiment|float %}
-              {% if s > 0.3 %}
-              <span class="text-ok-text">+{{ '%.1f'|format(s) }}</span>
-              {% elif s < -0.3 %}
-              <span class="text-err-text">{{ '%.1f'|format(s) }}</span>
-              {% endif %}
-            {% endif %}
-            {% if n.energy %}
-            <span>energy: {{ n.energy }}/10</span>
-            {% endif %}
-          </div>
-        </div>
-        <div class="shrink-0 flex flex-col gap-1">
-          <form method="POST" action="/notes/{{ n.id }}/reprocess" class="inline">
-            <button type="submit" class="text-txt-3 hover:text-accent-2 transition-colors p-1" title="Reprocess">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-            </button>
-          </form>
-          <form method="POST" action="/notes/{{ n.id }}/delete" class="inline">
-            <button type="submit" class="text-txt-3 hover:text-err-text transition-colors p-1"
-                    onclick="return confirm('Удалить заметку?')" title="Delete">
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-            </button>
-          </form>
-        </div>
+    <div class="flex items-start gap-2">
+      <input type="checkbox" class="note-cb accent-accent mt-4 shrink-0" value="{{ n.id }}"
+             onchange="window._updateBulk()" onclick="event.stopPropagation()">
+      <div class="flex-1">
+        {% include "partials/_note_card.html" %}
       </div>
     </div>
     {% endfor %}
   {% else %}
-  <div class="card flex flex-col items-center justify-center py-16 text-center">
-    <p class="text-sm font-medium text-txt mb-1">Заметок нет</p>
-    <p class="text-xs text-txt-3">Отправьте голосовое сообщение в Telegram или создайте заметку здесь</p>
+  <div class="flex flex-col items-center justify-center py-20 text-center">
+    <div class="w-12 h-12 rounded-2xl bg-surface-2 flex items-center justify-center mb-4">
+      <svg class="w-6 h-6 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+    </div>
+    <p class="text-sm font-medium text-txt mb-1">Заметок пока нет</p>
+    <p class="text-xs text-txt-3 max-w-[260px]">Отправьте голосовое или текст в Telegram, либо создайте заметку здесь</p>
   </div>
   {% endif %}
 </div>
@@ -218,5 +284,26 @@
     </div>
   </form>
 </dialog>
+
+<script>
+window._getSelected = function() {
+  return Array.from(document.querySelectorAll('.note-cb:checked')).map(function(c){return c.value}).join(',');
+};
+window._updateBulk = function() {
+  var checked = document.querySelectorAll('.note-cb:checked');
+  var toolbar = document.getElementById('bulk-toolbar');
+  var cnt = document.getElementById('bulk-count');
+  if (checked.length > 0) {
+    toolbar.classList.remove('hidden');
+    cnt.textContent = checked.length + ' selected';
+  } else {
+    toolbar.classList.add('hidden');
+  }
+};
+window._toggleAll = function(on) {
+  document.querySelectorAll('.note-cb').forEach(function(c){c.checked = on});
+  window._updateBulk();
+};
+</script>
 
 {% endblock %}

@@ -301,6 +301,14 @@ class Pipeline:
                     logger.info(f"Compensating: deleted vectors for {file_record.id}")
                 except Exception as e:
                     logger.warning(f"Compensating: failed to delete vectors: {e}")
+                # Clean up orphaned audit log entries for this run
+                run_id = getattr(result, "_run_id", None)
+                if run_id:
+                    try:
+                        await self.db.delete_run_logs(run_id)
+                        logger.info(f"Compensating: deleted audit logs for run {run_id}")
+                    except Exception as e:
+                        logger.warning(f"Compensating: failed to delete audit logs: {e}")
                 result.file_id = ""
                 raise save_err
 

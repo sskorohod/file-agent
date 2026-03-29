@@ -273,6 +273,10 @@ async def lifespan(app: FastAPI):
     insights_engine = InsightsEngine(llm_router, db)
     _state["insights_engine"] = insights_engine
 
+    from app.notes.morning import MorningBriefingEngine
+    morning_engine = MorningBriefingEngine(db, llm_router)
+    _state["morning_engine"] = morning_engine
+
     # Initialize Smart Notes v1.5 services
     note_agent = None  # legacy compat
     note_capture = None
@@ -346,8 +350,14 @@ async def lifespan(app: FastAPI):
     reminder_task = asyncio.create_task(
         _reminder_loop(db, tg_app, settings.telegram.bot_token, interval=3600)
     )
+    note_reminder_task = asyncio.create_task(
+        _note_reminder_loop(db, tg_app, interval=300)
+    )
     advice_task = asyncio.create_task(
-        _daily_advice_loop(insights_engine, tg_app)
+        _daily_advice_loop(insights_engine, morning_engine, tg_app)
+    )
+    anomaly_task = asyncio.create_task(
+        _anomaly_check_loop(db, tg_app, interval=14400)
     )
 
     note_processing_task = None
@@ -397,8 +407,9 @@ async def lifespan(app: FastAPI):
             await _state["_mcp_cm"].__aexit__(None, None, None)
         except Exception:
             pass
-    for t in [cleanup_task, reminder_task, note_processing_task, checkin_task,
-              daily_summary_task, weekly_report_task, inbox_watcher_task]:
+    for t in [cleanup_task, reminder_task, note_reminder_task, anomaly_task,
+              note_processing_task, checkin_task, daily_summary_task, weekly_report_task,
+              inbox_watcher_task]:
         if t:
             t.cancel()
             try:
@@ -553,6 +564,96 @@ async def _reminder_loop(db, tg_app, bot_token: str, interval: int = 3600):
             logger.error(f"Reminder loop error: {e}")
 
 
+async def _note_reminder_loop(db, tg_app, interval: int = 3600):
+    """Check for due note reminders and send Telegram notifications."""
+    await asyncio.sleep(120)  # initial delay
+    while True:
+        try:
+            if not db:
+                await asyncio.sleep(interval)
+                continue
+            due = await db.get_due_note_reminders()
+            if not due:
+                await asyncio.sleep(interval)
+                continue
+
+            from app.bot.handlers import get_owner_chat_id_async
+            chat_id = await get_owner_chat_id_async(db)
+
+            for r in due:
+                try:
+                    text = f"⏰ Напоминание\n\n📝 {r['description']}"
+                    if r.get("user_title"):
+                        text += f"\n📎 Заметка: {r['user_title']}"
+
+                    if chat_id and tg_app:
+                        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                        keyboard = InlineKeyboardMarkup([[
+                            InlineKeyboardButton("✅ Готово", callback_data=f"nrem:done:{r['id']}"),
+                            InlineKeyboardButton("⏰ +1 день", callback_data=f"nrem:snooze:{r['id']}"),
+                        ]])
+                        await tg_app.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+                        logger.info(f"Note reminder sent: #{r['id']} for note #{r['note_id']}")
+                    else:
+                        logger.info(f"NOTE REMINDER DUE (no chat_id): {text}")
+
+                    await db.mark_note_reminder_sent(r["id"])
+
+                    # Create next occurrence for recurring reminders
+                    rule = r.get("recurrence_rule", "")
+                    if rule:
+                        from app.notes.reminders import compute_next_occurrence
+                        next_at = compute_next_occurrence(
+                            r["remind_at"], rule, r.get("recurrence_end", ""),
+                        )
+                        if next_at:
+                            await db.create_note_reminder(
+                                note_id=r["note_id"],
+                                description=r["description"],
+                                remind_at=next_at,
+                                task_id=r.get("task_id"),
+                                source="recurring",
+                                recurrence_rule=rule,
+                                recurrence_end=r.get("recurrence_end", ""),
+                            )
+                            logger.info(f"Recurring reminder scheduled: next at {next_at}")
+                except Exception as e:
+                    logger.warning(f"Failed to send note reminder {r['id']}: {e}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Note reminder loop error: {e}")
+        await asyncio.sleep(interval)
+
+
+async def _anomaly_check_loop(db, tg_app, interval: int = 14400):
+    """Check for anomalies every 4 hours and send alerts."""
+    await asyncio.sleep(300)  # initial delay
+    while True:
+        try:
+            from app.notes.anomaly import AnomalyDetector
+            detector = AnomalyDetector(db)
+            alerts = await detector.check_anomalies()
+
+            if alerts and tg_app:
+                from app.bot.handlers import get_owner_chat_id_async
+                chat_id = await get_owner_chat_id_async(db)
+                if chat_id:
+                    severity_icons = {"critical": "🚨", "warning": "⚠️"}
+                    for a in alerts:
+                        icon = severity_icons.get(a.severity, "ℹ️")
+                        text = f"{icon} {a.message}"
+                        if a.context:
+                            text += f"\n\n💡 {a.context}"
+                        await tg_app.bot.send_message(chat_id=chat_id, text=text)
+                        logger.info(f"Anomaly alert sent: {a.alert_type}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Anomaly check error: {e}")
+        await asyncio.sleep(interval)
+
+
 async def _skill_reload_loop(skill_engine, interval: int):
     while True:
         await asyncio.sleep(interval)
@@ -566,8 +667,8 @@ async def _skill_reload_loop(skill_engine, interval: int):
             logger.error(f"Skill reload error: {e}")
 
 
-async def _daily_advice_loop(insights_engine, tg_app):
-    """Send daily motivational advice at 9:00 and 20:00."""
+async def _daily_advice_loop(insights_engine, morning_engine, tg_app):
+    """Send morning briefing at 9:00 and evening advice at 20:00."""
     from datetime import datetime, timedelta
     from app.bot.handlers import get_owner_chat_id_async
 
@@ -591,19 +692,29 @@ async def _daily_advice_loop(insights_engine, tg_app):
 
             await asyncio.sleep(wait_seconds)
 
-            # Generate and send advice
             chat_id = await get_owner_chat_id_async()
-            if chat_id and tg_app and insights_engine:
+            if not chat_id or not tg_app:
+                continue
+
+            if time_of_day == "morning" and morning_engine:
+                # Morning: note-centric personalized briefing
+                brief = await morning_engine.generate_morning_brief()
+                text = morning_engine.format_telegram_brief(brief)
+                if text:
+                    await tg_app.bot.send_message(chat_id=chat_id, text=text)
+                    logger.info("Morning briefing sent")
+            elif insights_engine:
+                # Evening: document-insights advice (existing behavior)
                 advice = await insights_engine.generate_daily_advice(time_of_day)
                 if advice:
                     await tg_app.bot.send_message(chat_id=chat_id, text=advice)
-                    logger.info(f"Daily advice sent ({time_of_day})")
+                    logger.info("Evening advice sent")
 
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"Daily advice error: {e}")
-            await asyncio.sleep(3600)  # retry in 1 hour
+            await asyncio.sleep(3600)
 
 
 async def _note_processing_loop(note_agent, interval: int = 900):
@@ -648,7 +759,11 @@ async def _evening_checkin_loop(note_capture, db, tg_app, settings):
             checkin = EveningCheckin(
                 db,
                 expected_categories=settings.notes.expected_daily_categories,
+                expected_signals=settings.notes.expected_daily_signals,
                 capture=note_capture,
+                max_questions=settings.notes.checkin_max_questions,
+                include_closing=settings.notes.checkin_include_closing_prompt,
+                weight_frequency_days=settings.notes.checkin_weight_frequency_days,
             )
             await checkin.run_checkin(tg_app, chat_id)
             logger.info("Evening check-in sent")
@@ -771,6 +886,7 @@ import secrets as _secrets
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from app.web.auth import AuthMiddleware
+from app.web.csrf import CSRFMiddleware
 
 _settings = get_settings()
 
@@ -808,6 +924,9 @@ class SecurityHeadersMiddleware:
 
 
 app.add_middleware(SecurityHeadersMiddleware)
+
+# CSRF middleware (validates token on POST/PUT/PATCH/DELETE)
+app.add_middleware(CSRFMiddleware)
 
 # Auth middleware (checks session cookie)
 app.add_middleware(AuthMiddleware)

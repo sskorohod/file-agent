@@ -1,0 +1,118 @@
+{% extends "layout.html" %}
+{% block title %}Knowledge Graph — FileAgent{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-lg font-bold text-txt">Knowledge Graph</h1>
+    <p class="text-xs text-txt-3 mt-1" id="graph-stats">Loading...</p>
+  </div>
+  <div class="flex gap-2">
+    <select id="graph-limit" class="text-xs bg-surface border border-border rounded-lg px-2 py-1 text-txt-2"
+            onchange="loadGraph()">
+      <option value="30">30 notes</option>
+      <option value="60">60 notes</option>
+      <option value="100" selected>100 notes</option>
+      <option value="200">200 notes</option>
+    </select>
+    <a href="/notes" class="btn-secondary btn-sm">Back</a>
+  </div>
+</div>
+
+<div class="card !p-0 mb-4" style="height: 70vh; min-height: 500px;">
+  <div id="graph" style="width: 100%; height: 100%;"></div>
+</div>
+
+<div class="card !p-4">
+  <h3 class="text-xs font-semibold text-txt-3 uppercase tracking-wider mb-2">Legend</h3>
+  <div class="flex flex-wrap gap-3 text-xs">
+    <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-orange-400 inline-block"></span> food</span>
+    <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-red-400 inline-block"></span> health</span>
+    <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-green-400 inline-block"></span> fitness</span>
+    <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-blue-400 inline-block"></span> business</span>
+    <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-purple-400 inline-block"></span> personal</span>
+    <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-yellow-400 inline-block"></span> finance</span>
+    <span class="flex items-center gap-1"><span class="w-3 h-3 rounded-full bg-cyan-400 inline-block"></span> learning</span>
+    <span class="flex items-center gap-1"><span class="w-3 h-3 rounded bg-gray-500 inline-block" style="width:12px;height:12px;border-radius:2px;"></span> entity</span>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<script>
+var network = null;
+var CAT_COLORS = {
+  food: '#fb923c', health: '#f87171', fitness: '#4ade80', business: '#60a5fa',
+  personal: '#c084fc', finance: '#facc15', learning: '#22d3ee', goals: '#f472b6',
+  ideas: '#a78bfa', family: '#fb7185', auto: '#94a3b8', other: '#71717a',
+  person_name: '#e879f9', place: '#34d399', vehicle: '#fbbf24', project: '#38bdf8',
+  company: '#a3e635',
+};
+
+function loadGraph() {
+  var limit = document.getElementById('graph-limit').value;
+  var center = {{ center_id }};
+  var url = '/api/notes/graph?limit=' + limit;
+  if (center) url += '&center=' + center;
+
+  fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+    var nodes = data.nodes.map(function(n) {
+      var node = {
+        id: n.id, label: n.label,
+        color: { background: CAT_COLORS[n.group] || '#71717a', border: 'transparent',
+                 highlight: { background: '#a78bfa', border: '#7c3aed' } },
+        font: { color: '#fafafa', size: 11 },
+      };
+      if (n.type === 'entity') {
+        node.shape = 'diamond';
+        node.size = 12;
+        node.font.size = 9;
+      } else {
+        node.shape = 'dot';
+        node.size = n.note_id == center ? 20 : 14;
+      }
+      return node;
+    });
+
+    var edges = data.edges.map(function(e) {
+      return {
+        from: e.from, to: e.to,
+        color: { color: 'rgba(113,113,122,0.3)', highlight: '#a78bfa' },
+        width: Math.max(1, (e.value || 0.5) * 3),
+        dashes: e.dashes || false,
+        smooth: { type: 'continuous' },
+      };
+    });
+
+    document.getElementById('graph-stats').textContent =
+      nodes.length + ' nodes, ' + edges.length + ' edges';
+
+    var container = document.getElementById('graph');
+    var graphData = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+    var options = {
+      physics: {
+        solver: 'forceAtlas2Based',
+        forceAtlas2Based: { gravitationalConstant: -30, centralGravity: 0.005, springLength: 120 },
+        stabilization: { iterations: 100 },
+      },
+      interaction: { hover: true, tooltipDelay: 200, zoomView: true, dragView: true },
+      layout: { improvedLayout: true },
+    };
+
+    if (network) network.destroy();
+    network = new vis.Network(container, graphData, options);
+
+    network.on('doubleClick', function(params) {
+      if (params.nodes.length > 0) {
+        var nid = params.nodes[0];
+        if (nid.startsWith('n:')) {
+          window.location.href = '/notes/' + nid.split(':')[1];
+        }
+      }
+    });
+  });
+}
+
+loadGraph();
+</script>
+
+{% endblock %}

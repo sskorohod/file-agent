@@ -1,0 +1,101 @@
+{% extends "layout.html" %}
+{% block title %}Habits — FileAgent{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-lg font-bold text-txt">Habits</h1>
+    <p class="text-xs text-txt-3 mt-1">{{ today }}</p>
+  </div>
+  <div class="flex gap-2">
+    <button onclick="document.getElementById('new-habit').classList.toggle('hidden')" class="btn-primary btn-sm">+ New</button>
+    <a href="/notes" class="btn-secondary btn-sm">Back</a>
+  </div>
+</div>
+
+{# ── New Habit Form ── #}
+<div id="new-habit" class="card !p-4 mb-4 hidden">
+  <h2 class="text-sm font-semibold text-txt mb-3">New Habit</h2>
+  <form method="POST" action="/notes/habits/create" class="space-y-3">
+    <input type="text" name="name" placeholder="Habit name" required
+           class="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm text-txt">
+    <div class="grid grid-cols-3 gap-2">
+      <select name="metric_key" class="bg-bg border border-border rounded-lg px-2 py-2 text-xs text-txt">
+        <option value="">Manual</option>
+        <option value="food_log">Food logged</option>
+        <option value="calories">Calories >= target</option>
+        <option value="sleep_hours">Sleep >= target hrs</option>
+        <option value="exercise_min">Exercise >= target min</option>
+        <option value="weight_kg">Weight logged</option>
+        <option value="mood_score">Mood >= target</option>
+        <option value="water_ml">Water >= target ml</option>
+        <option value="note_any">Any note created</option>
+        <option value="category:food">Food note</option>
+        <option value="category:fitness">Fitness note</option>
+        <option value="category:personal">Personal note</option>
+      </select>
+      <input type="number" name="target_value" value="1" step="0.1" min="0"
+             class="bg-bg border border-border rounded-lg px-2 py-2 text-xs text-txt" placeholder="Target">
+      <select name="frequency" class="bg-bg border border-border rounded-lg px-2 py-2 text-xs text-txt">
+        <option value="daily">Daily</option>
+        <option value="weekly:3">3x/week</option>
+        <option value="weekly:5">5x/week</option>
+      </select>
+    </div>
+    <button type="submit" class="btn-primary btn-sm">Create</button>
+  </form>
+</div>
+
+{# ── Habits List ── #}
+{% if habits %}
+<div class="space-y-3">
+  {% for h in habits %}
+  <div class="card !p-4">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <form method="POST" action="/notes/habits/{{ h.id }}/toggle" class="inline">
+          <button type="submit" class="w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-all
+            {% if h.completed %}border-ok bg-ok/20 text-ok{% else %}border-border-2 hover:border-accent{% endif %}">
+            {% if h.completed %}
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            {% endif %}
+          </button>
+        </form>
+        <div>
+          <h3 class="text-sm font-semibold text-txt">{{ h.name }}</h3>
+          <div class="flex items-center gap-2 mt-0.5">
+            {% if h.metric_key %}
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-surface-2 text-txt-3">{{ h.metric_key }}</span>
+            {% endif %}
+            <span class="text-[10px] text-txt-3">{{ h.frequency }}</span>
+            {% if h.target_value > 1 %}
+            <span class="text-[10px] text-txt-3">target: {{ h.target_value }}</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        {% if h.streak > 0 %}
+        <div class="text-center">
+          <span class="text-lg font-bold {% if h.streak >= 7 %}text-ok-text{% elif h.streak >= 3 %}text-accent-2{% else %}text-txt-2{% endif %}">{{ h.streak }}</span>
+          <p class="text-[10px] text-txt-3">streak</p>
+        </div>
+        {% endif %}
+        <form method="POST" action="/notes/habits/{{ h.id }}/delete" class="inline">
+          <button type="submit" class="p-1 rounded text-txt-3 hover:text-err-text" onclick="return confirm('Delete?')" title="Delete">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card flex flex-col items-center justify-center py-12 text-center">
+  <p class="text-sm text-txt-3 mb-2">No habits yet</p>
+  <p class="text-xs text-txt-3">Create habits to track daily goals like sleep, food logging, or exercise</p>
+</div>
+{% endif %}
+
+{% endblock %}

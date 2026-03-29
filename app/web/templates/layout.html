@@ -6,6 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#09090b">
+<meta name="csrf-token" content="{{ csrf_token }}">
 <title>{% block title %}FileAgent{% endblock %}</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📁</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
@@ -13,6 +14,23 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+<script>
+document.addEventListener('htmx:configRequest', function(e) {
+  var t = document.querySelector('meta[name="csrf-token"]');
+  if (t) e.detail.headers['X-CSRF-Token'] = t.content;
+});
+document.addEventListener('DOMContentLoaded', function() {
+  var t = document.querySelector('meta[name="csrf-token"]');
+  if (!t) return;
+  document.querySelectorAll('form[method="POST"],form[method="post"]').forEach(function(f) {
+    if (!f.querySelector('input[name="csrf_token"]')) {
+      var i = document.createElement('input');
+      i.type = 'hidden'; i.name = 'csrf_token'; i.value = t.content;
+      f.prepend(i);
+    }
+  });
+});
+</script>
 <script>
 tailwind.config = {
   darkMode: 'class',
@@ -61,6 +79,10 @@ tailwind.config = {
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #2d2d2d; border-radius: 10px; }
+  .htmx-indicator { display: none; }
+  .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline-flex; }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
+  .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 </style>
 <style type="text/tailwindcss">
 @layer components {

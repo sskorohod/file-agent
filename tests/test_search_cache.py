@@ -141,6 +141,28 @@ class TestHybridRetrieval:
         assert "low" not in scores
 
 
+# ── LLM Fallback Tests ───────────────────────────────────────────────────
+
+
+class TestLLMFallback:
+    @pytest.mark.asyncio
+    async def test_llm_failure_returns_degraded_answer(self):
+        """When LLM fails, answer() returns a degraded response (not NameError)."""
+        vs = _make_vector_store([
+            SearchResult(file_id="f1", chunk_index=0, text="Some document text", score=0.8,
+                         metadata={"filename": "report.pdf"}),
+        ])
+        llm = _make_llm()
+        llm.search_answer = AsyncMock(side_effect=RuntimeError("LLM timeout"))
+
+        search = LLMSearch(vs, llm, db=None)
+        result = await search.answer("test query")
+
+        # Should NOT raise NameError, should return degraded response
+        assert result["cached"] is False
+        assert "report.pdf" in result["text"] or "test query" in result["text"]
+
+
 # ── Integration: Cache + Hybrid ──────────────────────────────────────────
 
 

@@ -85,22 +85,21 @@ class FileLifecycleService:
             text=text, filename=filename, mime_type=mime_type,
         )
 
-        # 2. Update DB columns
-        await self.db.update_file(
-            file_id,
-            category=result.category,
-            tags=result.tags,
-            summary=result.summary,
-        )
-
-        # 3. Update document_type inside metadata_json
+        # 2. Update DB columns + document_type in metadata_json (single atomic update)
         meta_raw = file.get("metadata_json") or "{}"
         try:
             meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
         except (json.JSONDecodeError, TypeError):
             meta = {}
         meta["document_type"] = result.document_type
-        await self.db.update_file(file_id, metadata_json=meta)
+
+        await self.db.update_file(
+            file_id,
+            category=result.category,
+            tags=result.tags,
+            summary=result.summary,
+            metadata_json=meta,
+        )
 
         # 4. Update Qdrant payload (no re-embedding needed)
         if self.vector_store:
