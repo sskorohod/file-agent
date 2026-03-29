@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.config import get_settings
 
@@ -52,8 +53,119 @@ async def lifespan(app: FastAPI):
     logging.basicConfig(level=settings.logging.level, format=settings.logging.format)
     logger.info("Starting AI File Intelligence Agent v0.1.0")
 
+    # ── Encryption setup ────────────────────────────────────────────────
+    import os as _os
+    encryption_key_bytes = None
+
+    from app.utils.crypto import (
+        is_encryption_configured,
+        setup_master_password,
+        unlock_with_password,
+        generate_recovery_key,
+        parse_encryption_key,
+    )
+
+    # Priority 1: Master password (interactive or via env MASTER_PASSWORD)
+    # Priority 2: ENCRYPTION_KEY env var (legacy / automation / Docker)
+    encryption_key_hex = settings.encryption_key or _os.environ.get("ENCRYPTION_KEY", "")
+    master_password = _os.environ.get("MASTER_PASSWORD", "")
+
+    # Optional key file for 2FA (e.g. on USB drive)
+    key_file_path = _os.environ.get("KEY_FILE", "")
+    key_file_data = None
+    if key_file_path:
+        kf = Path(key_file_path)
+        if kf.exists():
+            key_file_data = kf.read_bytes()
+            logger.info(f"Key file loaded: {key_file_path}")
+        else:
+            raise SystemExit(
+                f"Файл-ключ не найден: {key_file_path}\n"
+                "Подключите USB-накопитель с файлом-ключом."
+            )
+
+    if master_password and is_encryption_configured():
+        # Password provided + already configured → unlock
+        keyfile = str(Path("data/encryption.key"))
+        try:
+            encryption_key_bytes = unlock_with_password(
+                master_password, keyfile, key_file_data=key_file_data,
+            )
+        except ValueError as e:
+            raise SystemExit(f"❌ {e}") from None
+        logger.info("Encryption unlocked (key in memory only)")
+
+    elif master_password and not is_encryption_configured():
+        # Password provided + first time → setup
+        keyfile = str(Path("data/encryption.key"))
+        encryption_key_bytes = setup_master_password(
+            master_password, keyfile, key_file_data=key_file_data,
+        )
+        if key_file_data:
+            logger.info("2FA: master password + key file")
+        logger.info("Encryption key derived — in memory only, not on disk")
+
+        recovery_file = Path("data/RECOVERY_KEY.txt")
+        recovery = generate_recovery_key(encryption_key_bytes)
+        recovery_file.parent.mkdir(parents=True, exist_ok=True)
+        recovery_file.write_text(
+            "КЛЮЧ ВОССТАНОВЛЕНИЯ (RECOVERY KEY)\n"
+            "====================================\n"
+            f"{recovery}\n\n"
+            "Сохраните этот ключ в менеджере паролей и УДАЛИТЕ этот файл.\n"
+            "Без этого ключа расшифровать данные НЕВОЗМОЖНО.\n"
+        )
+        recovery_file.chmod(0o600)  # Owner-read only
+        logger.warning(
+            f"Recovery key → {recovery_file} — "
+            "сохраните его в надёжном месте и удалите файл!"
+        )
+
+    elif is_encryption_configured() and not master_password:
+        # Try to load key from previous web unlock session
+        from app.web.routes import load_session_key
+        session_key = load_session_key()
+        if session_key:
+            encryption_key_bytes = session_key
+            logger.info("🔓 Encryption unlocked from previous session")
+        else:
+            logger.warning(
+                "🔒 Encryption configured but no MASTER_PASSWORD — "
+                "unlock via Settings or restart with MASTER_PASSWORD=..."
+            )
+
+    elif encryption_key_hex:
+        # Legacy mode — raw key from env (for Docker / automation)
+        encryption_key_bytes = parse_encryption_key(encryption_key_hex)
+        logger.info("Encryption enabled via ENCRYPTION_KEY (legacy mode)")
+        logger.warning(
+            "Рекомендуется перейти на мастер-пароль: "
+            "уберите ENCRYPTION_KEY и перезапустите"
+        )
+    else:
+        if settings.encryption.files or settings.encryption.database:
+            logger.warning(
+                "Encryption flags set but no password/key provided — "
+                "encryption disabled"
+            )
+
+    # Warn if recovery key file still on disk
+    if encryption_key_bytes:
+        recovery_file = Path("data/RECOVERY_KEY.txt")
+        if recovery_file.exists():
+            logger.warning(
+                f"⚠️  Recovery key file still at {recovery_file} — "
+                "сохраните и удалите!"
+            )
+
+    # Store key in state for web UI unlock access
+    _state["_encryption_key"] = encryption_key_bytes
+
+    enc_files = encryption_key_bytes if settings.encryption.files else None
+    enc_db = encryption_key_bytes if settings.encryption.database else None
+
     from app.storage.db import Database
-    db = Database(settings.database.path)
+    db = Database(settings.database.path, encryption_key=enc_db)
     await db.connect()
     _state["db"] = db
     logger.info(f"Database ready: {settings.database.path}")
@@ -65,14 +177,47 @@ async def lifespan(app: FastAPI):
         logger.warning("WEB__SESSION_SECRET not set — encrypted secrets will NOT be loaded from DB")
 
     from app.storage.files import FileStorage
+    from app.storage.backends.local import LocalBackend
+    backends: dict = {"local": LocalBackend(settings.storage.base_path, enc_files)}
+
+    if settings.storage.backend == "s3" or settings.storage.s3.bucket:
+        try:
+            from app.storage.backends.s3 import S3Backend
+            s3 = settings.storage.s3
+            backends["s3"] = S3Backend(
+                bucket=s3.bucket, prefix=s3.prefix, region=s3.region,
+                access_key_id=s3.access_key_id,
+                secret_access_key=s3.secret_access_key,
+                endpoint_url=s3.endpoint_url, encryption_key=enc_files,
+            )
+        except Exception as e:
+            logger.warning(f"S3 backend init failed: {e}")
+
+    if settings.storage.backend == "gdrive" or settings.storage.gdrive.folder_id:
+        try:
+            from app.storage.backends.gdrive import GDriveBackend
+            gd = settings.storage.gdrive
+            backends["gdrive"] = GDriveBackend(
+                credentials_json=gd.credentials_json,
+                folder_id=gd.folder_id, encryption_key=enc_files,
+            )
+        except Exception as e:
+            logger.warning(f"Google Drive backend init failed: {e}")
+
+    active = settings.storage.backend if settings.storage.backend in backends else "local"
     file_storage = FileStorage(
-        base_path=settings.storage.base_path,
+        active_backend=active, backends=backends,
         allowed_extensions=settings.storage.allowed_extensions,
     )
     _state["file_storage"] = file_storage
+    logger.info(f"Storage backend: {active}")
 
     from app.storage.vectors import VectorStore
-    vector_store = VectorStore(settings.qdrant, settings.embedding, google_api_key=settings.google_api_key)
+    vector_store = VectorStore(
+        settings.qdrant, settings.embedding,
+        google_api_key=settings.google_api_key,
+        strip_text=settings.encryption.qdrant_strip,
+    )
     try:
         await vector_store.connect()
         logger.info(f"Qdrant connected: {settings.qdrant.url}")
@@ -114,9 +259,50 @@ async def lifespan(app: FastAPI):
     llm_analytics = LLMAnalytics(vector_store, llm_router, db=db)
     _state["llm_analytics"] = llm_analytics
 
+    from app.services.lifecycle import FileLifecycleService
+    lifecycle = FileLifecycleService(
+        db=db,
+        file_storage=file_storage,
+        vector_store=vector_store,
+        llm_search=llm_search,
+        classifier=classifier,
+    )
+    _state["lifecycle"] = lifecycle
+
     from app.llm.insights import InsightsEngine
     insights_engine = InsightsEngine(llm_router, db)
     _state["insights_engine"] = insights_engine
+
+    # Initialize Smart Notes v1.5 services
+    note_agent = None  # legacy compat
+    note_capture = None
+    note_processor = None
+    if settings.notes.enabled:
+        from app.notes.capture import NoteCaptureService
+        from app.notes.enrichment import NoteEnrichmentService
+        from app.notes.relations import NoteRelationService
+        from app.notes.projection import NoteProjectionService
+        from app.notes.processor import NoteProcessor
+        from app.notes.vault import ObsidianVault
+
+        vault_path = settings.notes.vault_path or str(settings.storage.resolved_path / "notes")
+        enc_key = _state.get("_encryption_key") if settings.encryption.files else None
+        vault = ObsidianVault(vault_path, encryption_key=enc_key)
+
+        enrichment_svc = NoteEnrichmentService(db, llm_router)
+        relation_svc = NoteRelationService(db, vector_store)
+        projection_svc = NoteProjectionService(db, vector_store, vault)
+
+        note_capture = NoteCaptureService(db)
+        note_processor = NoteProcessor(db, enrichment_svc, relation_svc, projection_svc)
+        note_capture.set_processor(note_processor)
+
+        _state["note_capture"] = note_capture
+        _state["note_processor"] = note_processor
+        _state["note_vault"] = vault
+        # Legacy compat — some code still checks note_agent
+        _state["note_agent"] = note_processor
+        logger.info("Smart Notes v1.5 initialized (capture → enrich → relate → project)")
 
     tg_app = None
     if settings.telegram.bot_token:
@@ -129,9 +315,22 @@ async def lifespan(app: FastAPI):
         await tg_app.initialize()
         await tg_app.bot.set_my_commands(bot_handlers.COMMANDS)
         await tg_app.start()
-        await tg_app.updater.start_polling(poll_interval=1)
+
+        if settings.telegram.webhook_url:
+            # Webhook mode — Telegram pushes updates to our HTTPS endpoint
+            webhook_url = settings.telegram.webhook_url
+            secret = settings.telegram.webhook_secret
+            await tg_app.bot.set_webhook(
+                url=webhook_url,
+                secret_token=secret or None,
+            )
+            logger.info(f"Telegram bot started (webhook: {webhook_url})")
+        else:
+            # Polling mode — we pull updates from Telegram
+            await tg_app.updater.start_polling(poll_interval=1)
+            logger.info("Telegram bot started (polling)")
+
         _state["tg_app"] = tg_app
-        logger.info("Telegram bot started (polling)")
     else:
         logger.warning("TELEGRAM_BOT_TOKEN not set — bot disabled")
 
@@ -151,6 +350,36 @@ async def lifespan(app: FastAPI):
         _daily_advice_loop(insights_engine, tg_app)
     )
 
+    note_processing_task = None
+    checkin_task = None
+    daily_summary_task = None
+    weekly_report_task = None
+    if note_processor and settings.notes.enabled:
+        # v1.5: NoteProcessor runs its own loop (queue + DB scan)
+        note_processor.tg_app = tg_app
+        note_processing_task = asyncio.create_task(note_processor.run())
+        if settings.notes.checkin_enabled:
+            checkin_task = asyncio.create_task(
+                _evening_checkin_loop(note_capture, db, tg_app, settings)
+            )
+        daily_summary_task = asyncio.create_task(
+            _daily_summary_note_loop(note_processor, db, tg_app)
+        )
+        weekly_report_task = asyncio.create_task(
+            _weekly_report_loop(note_processor, db, llm_router, tg_app)
+        )
+    # Inbox file watcher
+    inbox_watcher_task = None
+    if note_capture and settings.notes.enabled and settings.notes.inbox_watch_enabled:
+        vault_base = settings.notes.vault_path or str(settings.storage.resolved_path / "notes")
+        inbox_p = settings.notes.inbox_path or f"{vault_base}/_inbox"
+        archive_p = settings.notes.archive_path or f"{vault_base}/_archive"
+        from app.notes.watcher import InboxWatcher
+        watcher = InboxWatcher(inbox_p, archive_p, db, note_capture)
+        inbox_watcher_task = asyncio.create_task(
+            watcher.watch_loop(settings.notes.inbox_watch_interval)
+        )
+
     # Initialize MCP streamable HTTP session manager
     from app.mcp_server import mcp as _mcp_server
     _streamable_app = _mcp_server.streamable_http_app()
@@ -168,12 +397,14 @@ async def lifespan(app: FastAPI):
             await _state["_mcp_cm"].__aexit__(None, None, None)
         except Exception:
             pass
-    for t in [cleanup_task, reminder_task]:
-        t.cancel()
-        try:
-            await t
-        except asyncio.CancelledError:
-            pass
+    for t in [cleanup_task, reminder_task, note_processing_task, checkin_task,
+              daily_summary_task, weekly_report_task, inbox_watcher_task]:
+        if t:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
     if reload_task:
         reload_task.cancel()
         try:
@@ -181,7 +412,8 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     if tg_app:
-        await tg_app.updater.stop()
+        if tg_app.updater and tg_app.updater.running:
+            await tg_app.updater.stop()
         await tg_app.stop()
         await tg_app.shutdown()
     await vector_store.close()
@@ -209,27 +441,67 @@ async def _orphan_cleanup_loop(db, vector_store, interval: int = 300):
             for f in files:
                 stored_path = f.get("stored_path", "")
                 known_paths.add(stored_path)
-                if stored_path and not Path(stored_path).exists():
-                    file_id = f["id"]
+                file_storage = get_state("file_storage")
+                is_missing = False
+                if file_storage:
                     try:
-                        await vector_store.delete_document(file_id)
+                        is_missing = stored_path and not await file_storage.exists(stored_path)
                     except Exception:
-                        pass
-                    await db.delete_file(file_id)
+                        is_missing = False
+                else:
+                    is_missing = stored_path and not Path(stored_path).exists()
+                if is_missing:
+                    file_id = f["id"]
+                    lifecycle = get_state("lifecycle")
+                    if lifecycle:
+                        await lifecycle.delete(file_id)
+                    else:
+                        try:
+                            await vector_store.delete_document(file_id)
+                        except Exception:
+                            pass
+                        await db.delete_file(file_id)
                     removed_db += 1
 
             # Direction 2: disk → DB (file on disk but no DB record)
+            # Skip notes/ directory — notes are managed by NoteAgent, not file pipeline
+            skip_dirs = {"notes"}
             if base_path.exists():
                 for disk_file in base_path.rglob("*"):
                     if disk_file.is_file() and str(disk_file) not in known_paths:
+                        # Don't delete files in excluded directories
+                        try:
+                            rel = disk_file.relative_to(base_path)
+                            if rel.parts and rel.parts[0] in skip_dirs:
+                                continue
+                        except ValueError:
+                            pass
                         disk_file.unlink()
                         removed_disk += 1
 
-            if removed_db or removed_disk:
-                logger.info(
-                    f"Orphan cleanup: {removed_db} DB orphan(s), "
-                    f"{removed_disk} disk orphan(s) removed"
+            # Direction 3: Notes — DB record exists but vault .md is gone → delete from DB
+            removed_notes = 0
+            try:
+                cursor = await db.db.execute(
+                    "SELECT id, vault_path FROM notes WHERE vault_path != '' AND vault_path IS NOT NULL"
                 )
+                for row in await cursor.fetchall():
+                    note_id, vault_path = row[0], row[1]
+                    if vault_path and not Path(vault_path).exists():
+                        await db.delete_note(note_id)
+                        removed_notes += 1
+            except Exception as e:
+                logger.debug(f"Note orphan check error: {e}")
+
+            if removed_db or removed_disk or removed_notes:
+                parts = []
+                if removed_db:
+                    parts.append(f"{removed_db} DB orphan(s)")
+                if removed_disk:
+                    parts.append(f"{removed_disk} disk orphan(s)")
+                if removed_notes:
+                    parts.append(f"{removed_notes} note orphan(s)")
+                logger.info(f"Orphan cleanup: {', '.join(parts)} removed")
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -247,8 +519,8 @@ async def _reminder_loop(db, tg_app, bot_token: str, interval: int = 3600):
             if not due:
                 continue
 
-            from app.bot.handlers import get_owner_chat_id
-            chat_id = get_owner_chat_id()
+            from app.bot.handlers import get_owner_chat_id_async
+            chat_id = await get_owner_chat_id_async(db)
 
             for r in due:
                 try:
@@ -297,7 +569,7 @@ async def _skill_reload_loop(skill_engine, interval: int):
 async def _daily_advice_loop(insights_engine, tg_app):
     """Send daily motivational advice at 9:00 and 20:00."""
     from datetime import datetime, timedelta
-    from app.bot.handlers import get_owner_chat_id
+    from app.bot.handlers import get_owner_chat_id_async
 
     while True:
         try:
@@ -320,7 +592,7 @@ async def _daily_advice_loop(insights_engine, tg_app):
             await asyncio.sleep(wait_seconds)
 
             # Generate and send advice
-            chat_id = get_owner_chat_id()
+            chat_id = await get_owner_chat_id_async()
             if chat_id and tg_app and insights_engine:
                 advice = await insights_engine.generate_daily_advice(time_of_day)
                 if advice:
@@ -332,6 +604,164 @@ async def _daily_advice_loop(insights_engine, tg_app):
         except Exception as e:
             logger.error(f"Daily advice error: {e}")
             await asyncio.sleep(3600)  # retry in 1 hour
+
+
+async def _note_processing_loop(note_agent, interval: int = 900):
+    """Process unprocessed notes periodically."""
+    await asyncio.sleep(30)  # initial delay
+    while True:
+        try:
+            processed = await note_agent.process_unprocessed()
+            if processed:
+                logger.info(f"Note agent processed {processed} notes")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Note processing error: {e}")
+        await asyncio.sleep(interval)
+
+
+async def _evening_checkin_loop(note_capture, db, tg_app, settings):
+    """Run evening check-in at configured hour."""
+    from datetime import datetime, timedelta
+    from app.bot.handlers import get_owner_chat_id_async
+    from app.notes.checkin import EveningCheckin
+
+    while True:
+        try:
+            now = datetime.now()
+            target_hour = settings.notes.checkin_hour
+            target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            wait_secs = (target - now).total_seconds()
+            logger.info(f"Evening check-in: next at {target.strftime('%H:%M')}, waiting {wait_secs/3600:.1f}h")
+            await asyncio.sleep(wait_secs)
+
+            if not tg_app:
+                continue
+
+            chat_id = await get_owner_chat_id_async(db)
+            if not chat_id:
+                continue
+
+            checkin = EveningCheckin(
+                db,
+                expected_categories=settings.notes.expected_daily_categories,
+                capture=note_capture,
+            )
+            await checkin.run_checkin(tg_app, chat_id)
+            logger.info("Evening check-in sent")
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Evening checkin error: {e}")
+            await asyncio.sleep(3600)
+
+
+async def _daily_summary_note_loop(note_agent, db, tg_app):
+    """Generate daily summary at 23:55 and send to Telegram."""
+    from datetime import datetime, timedelta
+    from app.bot.handlers import get_owner_chat_id_async
+
+    while True:
+        try:
+            now = datetime.now()
+            target = now.replace(hour=23, minute=55, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            wait_secs = (target - now).total_seconds()
+            await asyncio.sleep(wait_secs)
+
+            today = datetime.now().strftime("%Y-%m-%d")
+
+            # Generate daily MOC via vault
+            vault = get_state("note_vault")
+            if vault:
+                try:
+                    day_notes = await db.get_daily_notes(today)
+                    day_facts = await db.get_daily_facts(today)
+                    moc_metrics = {}
+                    if "calories" in day_facts:
+                        moc_metrics["calories_total"] = day_facts["calories"]["total"]
+                    if "mood_score" in day_facts:
+                        moc_metrics["mood_avg"] = round(day_facts["mood_score"]["avg"], 1)
+                    if "weight_kg" in day_facts:
+                        moc_metrics["weight"] = day_facts["weight_kg"]["avg"]
+                    vault.update_daily_moc(today, day_notes, moc_metrics)
+                except Exception as e:
+                    logger.debug(f"Daily MOC generation failed: {e}")
+
+            # Send Telegram summary
+            if tg_app:
+                chat_id = await get_owner_chat_id_async(db)
+                if chat_id:
+                    notes = await db.get_daily_notes(today)
+                    metrics = await db.get_daily_facts(today)
+                    streak = await db.get_streak()
+
+                    parts = [f"📊 Итоги дня ({today})", ""]
+                    parts.append(f"📝 Заметок: {len(notes)}")
+                    if metrics.get("calories"):
+                        parts.append(f"🍽 Калории: ~{int(metrics['calories']['total'])} kcal")
+                    if metrics.get("mood_score"):
+                        parts.append(f"💭 Настроение: {metrics['mood_score']['avg']:.1f}/10")
+                    if metrics.get("energy"):
+                        parts.append(f"⚡ Энергия: {metrics['energy']['avg']:.1f}/10")
+                    if metrics.get("weight_kg"):
+                        parts.append(f"⚖️ Вес: {metrics['weight_kg']['avg']:.1f} кг")
+                    if metrics.get("sleep_hours"):
+                        parts.append(f"😴 Сон: {metrics['sleep_hours']['total']:.1f}ч")
+                    if streak > 1:
+                        parts.append(f"🔥 Стрик: {streak} дней подряд!")
+                    parts.append("\nСпокойной ночи! 🌙")
+
+                    await tg_app.bot.send_message(chat_id=chat_id, text="\n".join(parts))
+                    logger.info(f"Daily summary sent for {today}")
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Daily summary error: {e}")
+            await asyncio.sleep(3600)
+
+
+async def _weekly_report_loop(note_agent, db, llm_router, tg_app):
+    """Generate weekly report every Sunday at 22:00."""
+    from datetime import datetime, timedelta
+    from app.bot.handlers import get_owner_chat_id_async
+    from app.notes.weekly import WeeklyAnalyzer
+
+    while True:
+        try:
+            now = datetime.now()
+            # Find next Sunday 22:00
+            days_until_sunday = (6 - now.weekday()) % 7
+            if days_until_sunday == 0 and now.hour >= 22:
+                days_until_sunday = 7
+            target = (now + timedelta(days=days_until_sunday)).replace(
+                hour=22, minute=0, second=0, microsecond=0
+            )
+            wait_secs = (target - now).total_seconds()
+            logger.info(f"Weekly report: next Sunday at 22:00, waiting {wait_secs/3600:.1f}h")
+            await asyncio.sleep(wait_secs)
+
+            vault = get_state("note_vault")
+            analyzer = WeeklyAnalyzer(db, llm_router, vault=vault)
+            summary = await analyzer.get_weekly_telegram_summary()
+
+            if tg_app and summary:
+                chat_id = await get_owner_chat_id_async(db)
+                if chat_id:
+                    await tg_app.bot.send_message(chat_id=chat_id, text=summary)
+                    logger.info("Weekly report sent")
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Weekly report error: {e}")
+            await asyncio.sleep(3600)
 
 
 app = FastAPI(title="AI File Intelligence Agent", version="0.1.0", lifespan=lifespan)
@@ -363,6 +793,13 @@ class SecurityHeadersMiddleware:
                     (b"x-content-type-options", b"nosniff"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+                    (b"content-security-policy",
+                     b"default-src 'self'; "
+                     b"script-src 'self' https://cdn.tailwindcss.com https://unpkg.com 'unsafe-inline'; "
+                     b"style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; "
+                     b"font-src 'self' https://fonts.gstatic.com; "
+                     b"img-src 'self' data:; "
+                     b"connect-src 'self'"),
                 ]
                 message["headers"] = list(message.get("headers", [])) + extra
             await send(message)
@@ -376,13 +813,18 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(AuthMiddleware)
 
 # Session middleware (must be added after AuthMiddleware — Starlette runs in reverse)
+if not _settings.web.session_secret:
+    logging.getLogger(__name__).warning(
+        "WEB__SESSION_SECRET not set — sessions will NOT persist across restarts. "
+        "Set WEB__SESSION_SECRET in .env for stable sessions."
+    )
 _session_secret = _settings.web.session_secret or _secrets.token_urlsafe(32)
 app.add_middleware(SessionMiddleware, secret_key=_session_secret, max_age=604800)
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://fag.n8nskorx.top"],
+    allow_origins=_settings.web.cors_origins,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
     allow_credentials=True,
@@ -391,7 +833,7 @@ app.add_middleware(
 # Rate limiting
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from app.web.routes import limiter as _limiter
+from app.web.limiter import limiter as _limiter
 app.state.limiter = _limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -403,10 +845,47 @@ app.include_router(web_router)
 from app.api.routes import router as api_router
 app.include_router(api_router)
 
+# Favicon (suppress 404)
+from fastapi.responses import Response as _Resp
+
+@app.get("/favicon.ico")
+async def favicon():
+    return _Resp(
+        content=(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+            '<text y=".9em" font-size="90">📁</text></svg>'
+        ),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
 # Mount MCP server (both transports)
 from app.mcp_server import mcp
 app.mount("/mcp/sse", mcp.sse_app())                # Legacy SSE transport
 app.mount("/mcp", mcp.streamable_http_app())         # Streamable HTTP (Codex, Claude Code)
+
+
+# Telegram webhook endpoint
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Receive Telegram updates via webhook."""
+    from fastapi import Header, HTTPException
+    tg_app = get_state("tg_app")
+    if not tg_app:
+        raise HTTPException(status_code=503, detail="Bot not running")
+
+    # Verify secret token if configured
+    secret = _settings.telegram.webhook_secret
+    if secret:
+        token = request.headers.get("x-telegram-bot-api-secret-token", "")
+        if token != secret:
+            raise HTTPException(status_code=403, detail="Invalid secret")
+
+    from telegram import Update as TgUpdate
+    data = await request.json()
+    update = TgUpdate.de_json(data, tg_app.bot)
+    await tg_app.process_update(update)
+    return {"ok": True}
 
 
 # Global exception handler — prevent stack trace leaks
@@ -433,24 +912,4 @@ async def health():
     }
 
 
-@app.get("/api/stats")
-async def api_stats():
-    db = get_state("db")
-    return await db.get_stats() if db else {"error": "not initialized"}
-
-
-@app.get("/api/files")
-async def api_files(category: str | None = None, limit: int = 50, offset: int = 0):
-    db = get_state("db")
-    if not db:
-        return {"error": "not initialized"}
-    return {"files": await db.list_files(category=category, limit=limit, offset=offset)}
-
-
-@app.get("/api/search")
-async def api_search(q: str, top_k: int = 5):
-    search = get_state("llm_search")
-    if not search:
-        return {"error": "not initialized"}
-    result = await search.answer(q, top_k=top_k)
-    return {"query": q, "answer": result.get("text", ""), "file_ids": list(result.get("file_ids", {}).keys())}
+# Legacy /api/* endpoints REMOVED — use authenticated /api/v1/* instead

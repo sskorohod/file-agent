@@ -14,13 +14,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ── Sub-models ──────────────────────────────────────────────────────────────
 
+class S3Config(BaseModel):
+    bucket: str = ""
+    prefix: str = "fileagent"
+    region: str = "us-east-1"
+    endpoint_url: str = ""       # For MinIO/Wasabi/Backblaze B2
+    access_key_id: str = ""
+    secret_access_key: str = ""
+
+
+class GDriveConfig(BaseModel):
+    credentials_json: str = ""   # Path to service account JSON
+    folder_id: str = ""          # Root folder ID in Google Drive
+
+
 class StorageConfig(BaseModel):
+    backend: str = "local"       # "local" | "s3" | "gdrive"
     base_path: str = "~/ai-agent-files"
     max_file_size_mb: int = 50
     allowed_extensions: list[str] = [
         ".pdf", ".png", ".jpg", ".jpeg", ".heic",
         ".docx", ".txt", ".csv", ".xlsx",
     ]
+    s3: S3Config = S3Config()
+    gdrive: GDriveConfig = GDriveConfig()
 
     @property
     def resolved_path(self) -> Path:
@@ -32,6 +49,10 @@ class TelegramConfig(BaseModel):
     owner_id: int = 0  # Telegram user ID — only this user can interact with the bot
     polling_timeout: int = 30
     max_file_size_mb: int = 20
+    webhook_url: str = ""  # e.g. https://fag.n8nskorx.top/telegram/webhook
+    webhook_secret: str = ""  # Secret token for webhook verification
+    auto_delete_seconds: int = 120  # Auto-delete bot replies after N seconds (0 = off)
+    pin_code: str = ""  # 4-6 digit PIN for critical ops (delete, unlock, export)
 
 
 class LLMModelConfig(BaseModel):
@@ -49,6 +70,9 @@ class LLMRetryConfig(BaseModel):
 
 class LLMConfig(BaseModel):
     default_provider: str = "anthropic"
+    oauth_proxy_url: str = ""       # OpenAI-compatible proxy URL
+    oauth_client_id: str = ""       # OAuth client ID for proxy auth
+    oauth_client_secret: str = ""   # OAuth client secret
     models: dict[str, LLMModelConfig] = Field(default_factory=lambda: {
         "classification": LLMModelConfig(
             model="anthropic/claude-3-haiku-20240307",
@@ -125,6 +149,7 @@ class WebConfig(BaseModel):
     session_secret: str = ""  # auto-generated if empty
     login: str = ""           # dashboard login (email)
     password_hash: str = ""   # bcrypt hash of dashboard password
+    cors_origins: list[str] = ["https://fag.n8nskorx.top"]
 
 
 class DatabaseConfig(BaseModel):
@@ -133,6 +158,27 @@ class DatabaseConfig(BaseModel):
     @property
     def resolved_path(self) -> Path:
         return Path(self.path).resolve()
+
+
+class EncryptionConfig(BaseModel):
+    files: bool = False        # Encrypt files on disk (AES-256-GCM)
+    database: bool = False     # Encrypt sensitive DB columns
+    qdrant_strip: bool = False  # Remove text from Qdrant payload
+
+
+class NotesConfig(BaseModel):
+    enabled: bool = True
+    processing_interval_seconds: int = 900  # 15 min
+    checkin_hour: int = 21  # 9 PM
+    checkin_enabled: bool = True
+    vault_path: str = ""  # defaults to {storage.base_path}/notes/
+    inbox_path: str = ""  # defaults to {vault_path}/_inbox/
+    archive_path: str = ""  # defaults to {vault_path}/_archive/
+    inbox_watch_enabled: bool = True
+    inbox_watch_interval: int = 10  # seconds
+    expected_daily_categories: list[str] = ["food", "personal", "fitness"]
+    auto_embed: bool = True
+    correlation_metrics: list[str] = ["mood_score", "calories", "sleep_hours", "weight_kg", "energy"]
 
 
 class LoggingConfig(BaseModel):
@@ -165,6 +211,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     google_api_key: str = ""
+    encryption_key: str = ""  # 64-char hex string (32 bytes), env: ENCRYPTION_KEY
 
     # Sections
     storage: StorageConfig = StorageConfig()
@@ -176,6 +223,8 @@ class Settings(BaseSettings):
     web: WebConfig = WebConfig()
     database: DatabaseConfig = DatabaseConfig()
     logging: LoggingConfig = LoggingConfig()
+    encryption: EncryptionConfig = EncryptionConfig()
+    notes: NotesConfig = NotesConfig()
 
     def __init__(self, config_path: str | Path = "config.yaml", **kwargs):
         yaml_data = _load_yaml(config_path)

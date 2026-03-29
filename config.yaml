@@ -1,6 +1,68 @@
+database:
+  path: data/agent.db
+embedding:
+  batch_size: 32
+  chunk_overlap_words: 50
+  chunk_size_words: 400
+  local_fallback_model: all-MiniLM-L6-v2
+  model: gemini-embedding-2-preview
+  provider: gemini
+  vector_size: 768
+llm:
+  classification_prompt: "You are a document classification system.\r\n\r\nRules:\r\
+    \n- summary: два коротких предложения на русском языке. Только ключевые факты.\r\
+    \n- tags: 2-4 relevant tags, lowercase\r\n- document_type: specific type (e.g.\
+    \ lab_result, invoice, passport)"
+  default_provider: openai
+  models:
+    analysis:
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
+      max_tokens: 4096
+      model: openai/gpt-5.1
+      temperature: 0.1
+    classification:
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
+      max_tokens: 1024
+      model: openai/gpt-5.4-mini
+      temperature: 0.1
+    extraction:
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
+      max_tokens: 4096
+      model: openai/gpt-5.4-mini
+      temperature: 0.2
+    search:
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
+      max_tokens: 4096
+      model: openai/gpt-5.1
+      temperature: 0.3
+  retry:
+    backoff_base: 2
+    max_attempts: 3
+  search_prompt: "You are a document search assistant for a personal archive.\r\n\r\
+    \nRules:\r\n- Find the ONE most relevant document that answers the question\r\n\
+    - Give a FULL, detailed answer about that document\r\n- Include specific details:\
+    \ dates, names, numbers, amounts\r\n- If the document has action items or deadlines\
+    \ — mention them\r\n- Respond in the same language as the question\r\n- Do NOT\
+    \ mention multiple documents — pick the best one"
+logging:
+  format: '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+  level: INFO
+qdrant:
+  collection_name: file_agent_v2
+  distance: Cosine
+  grpc_port: 6334
+  host: localhost
+  port: 6333
+  vector_size: 768
+skills:
+  auto_reload: true
+  directory: skills/
+  reload_interval_seconds: 30
 storage:
-  base_path: ~/ai-agent-files
-  max_file_size_mb: 50
   allowed_extensions:
   - .pdf
   - .png
@@ -11,73 +73,36 @@ storage:
   - .txt
   - .csv
   - .xlsx
+  - .md
+  backend: local
+  base_path: ~/ai-agent-files
+  max_file_size_mb: 50
 telegram:
-  polling_timeout: 30
   max_file_size_mb: 20
-llm:
-  default_provider: openai
-  models:
-    classification:
-      model: openai/gpt-5.4-mini
-      api_base: http://127.0.0.1:10531/v1
-      api_key: dummy
-      max_tokens: 1024
-      temperature: 0.1
-    extraction:
-      model: openai/gpt-5.4-mini
-      api_base: http://127.0.0.1:10531/v1
-      api_key: dummy
-      max_tokens: 4096
-      temperature: 0.2
-    search:
-      model: openai/gpt-5.1
-      api_base: http://127.0.0.1:10531/v1
-      api_key: dummy
-      max_tokens: 4096
-      temperature: 0.3
-    analysis:
-      model: openai/gpt-5.1
-      api_base: http://127.0.0.1:10531/v1
-      api_key: dummy
-      max_tokens: 4096
-      temperature: 0.1
-  retry:
-    max_attempts: 3
-    backoff_base: 2
-  search_prompt: "You are a document search assistant for a personal archive.\r\n\r\
-    \nRules:\r\n- Find the ONE most relevant document that answers the question\r\n\
-    - Give a FULL, detailed answer about that document\r\n- Include specific details:\
-    \ dates, names, numbers, amounts\r\n- If the document has action items or deadlines\
-    \ — mention them\r\n- Respond in the same language as the question\r\n- Do NOT\
-    \ mention multiple documents — pick the best one"
-  classification_prompt: "You are a document classification system.\r\n\r\nRules:\r\
-    \n- summary: два коротких предложения на русском языке. Только ключевые факты.\r\
-    \n- tags: 2-4 relevant tags, lowercase\r\n- document_type: specific type (e.g.\
-    \ lab_result, invoice, passport)"
-qdrant:
-  host: localhost
-  port: 6333
-  grpc_port: 6334
-  collection_name: file_agent_v2
-  vector_size: 768
-  distance: Cosine
-embedding:
-  provider: gemini
-  model: gemini-embedding-2-preview
-  local_fallback_model: all-MiniLM-L6-v2
-  vector_size: 768
-  chunk_size_words: 400
-  chunk_overlap_words: 50
-  batch_size: 32
-skills:
-  directory: skills/
-  auto_reload: true
-  reload_interval_seconds: 30
+  polling_timeout: 30
+  owner_id: 169108358
+  webhook_url: https://fag.n8nskorx.top/telegram/webhook
+  webhook_secret: pyPpUVTSA5lo39z0xvdPrw-W8pahKEyo2--WKUS4oqs
+  auto_delete_seconds: 120
+  pin_code: '2255'
 web:
   host: 0.0.0.0
   port: 8000
-database:
-  path: data/agent.db
-logging:
-  level: INFO
-  format: '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+notes:
+  enabled: true
+  processing_interval_seconds: 900
+  checkin_hour: 21
+  checkin_enabled: true
+  inbox_watch_enabled: true
+  inbox_watch_interval: 10
+  expected_daily_categories:
+    - food
+    - personal
+    - fitness
+  auto_embed: true
+  correlation_metrics:
+    - mood_score
+    - calories
+    - sleep_hours
+    - weight_kg
+    - energy

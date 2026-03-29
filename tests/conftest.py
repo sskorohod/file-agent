@@ -72,7 +72,13 @@ async def db(tmp_dir):
 @pytest.fixture
 def file_storage(tmp_dir):
     from app.storage.files import FileStorage
-    return FileStorage(base_path=tmp_dir / "files", allowed_extensions=[".pdf", ".txt", ".docx", ".jpg", ".png"])
+    from app.storage.backends.local import LocalBackend
+    local = LocalBackend(base_path=tmp_dir / "files")
+    return FileStorage(
+        active_backend="local",
+        backends={"local": local},
+        allowed_extensions=[".pdf", ".txt", ".docx", ".jpg", ".png"],
+    )
 
 
 @pytest.fixture

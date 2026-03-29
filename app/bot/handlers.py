@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
@@ -23,11 +24,19 @@ from app.pipeline import Pipeline
 
 logger = logging.getLogger(__name__)
 
+# ── Rate limiting ─────────────────────────────────────────────────────────
+_last_command: dict[int, float] = {}
+_MIN_COMMAND_INTERVAL = 1.0  # seconds
+
 
 def owner_only(func):
-    """Restrict handler to the configured owner_id only."""
+    """Restrict handler to the configured owner_id only. Block non-private chats."""
     @wraps(func)
     async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Block group/channel chats — only private allowed
+        if update.effective_chat and update.effective_chat.type != "private":
+            return
+
         owner_id = get_settings().telegram.owner_id
         user_id = update.effective_user.id if update.effective_user else 0
         if not owner_id or user_id != owner_id:
@@ -36,24 +45,94 @@ def owner_only(func):
             elif update.message:
                 await update.message.reply_text("🔒 Бот приватный.")
             return
+
+        # Rate limiting
+        now = time.monotonic()
+        if now - _last_command.get(user_id, 0) < _MIN_COMMAND_INTERVAL:
+            return
+        _last_command[user_id] = now
+
         return await func(self, update, context)
     return wrapper
 
-_CHAT_ID_FILE = Path("data/chat_id.txt")
+def _check_pin(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Check if PIN is required and extract it from args. Returns error msg or None."""
+    import secrets as _sec
+    pin = get_settings().telegram.pin_code
+    if not pin:
+        return None  # PIN not configured
+    args = context.args or []
+    if not args or not _sec.compare_digest(args[-1], pin):
+        return "🔑 Эта операция требует PIN-код.\nДобавьте PIN в конце команды."
+    # Remove PIN from args so handlers don't see it
+    context.args = args[:-1]
+    return None
+
+
+# ── Chat ID storage (encrypted in DB) ────────────────────────────────────
+_CHAT_ID_FILE = Path("data/chat_id.txt")  # Legacy — kept for migration
 
 
 def _save_chat_id(chat_id: int):
-    _CHAT_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _CHAT_ID_FILE.write_text(str(chat_id))
+    """Save chat_id to DB (encrypted) if available, fallback to file."""
+    from app.main import get_state
+    db = get_state("db")
+    if db:
+        import asyncio as _aio
+        try:
+            loop = _aio.get_running_loop()
+            loop.create_task(_save_chat_id_async(db, chat_id))
+        except RuntimeError:
+            # No event loop — fallback to file
+            _CHAT_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _CHAT_ID_FILE.write_text(str(chat_id))
+    else:
+        _CHAT_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CHAT_ID_FILE.write_text(str(chat_id))
+
+
+async def _save_chat_id_async(db, chat_id: int):
+    """Save chat_id to encrypted secrets table."""
+    from app.utils.crypto import encrypt
+    session_secret = get_settings().web.session_secret
+    if session_secret:
+        await db.set_secret("OWNER_CHAT_ID", encrypt(str(chat_id), session_secret))
+    else:
+        await db.set_secret("OWNER_CHAT_ID", str(chat_id))
 
 
 def get_owner_chat_id() -> int | None:
+    """Get owner chat_id — sync version for background tasks."""
+    # Try legacy file first (will be migrated)
     if _CHAT_ID_FILE.exists():
         try:
             return int(_CHAT_ID_FILE.read_text().strip())
         except ValueError:
-            return None
+            pass
     return None
+
+
+async def get_owner_chat_id_async(db=None) -> int | None:
+    """Get owner chat_id from DB (preferred) or file (fallback)."""
+    if db:
+        raw = await db.get_secret("OWNER_CHAT_ID")
+        if raw:
+            # Try to decrypt
+            session_secret = get_settings().web.session_secret
+            if session_secret:
+                from app.utils.crypto import decrypt
+                decrypted = decrypt(raw, session_secret)
+                if decrypted:
+                    try:
+                        return int(decrypted)
+                    except ValueError:
+                        pass
+            # Not encrypted or no session secret
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+    return get_owner_chat_id()
 
 # Max file size for Telegram download (20MB)
 MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024
@@ -74,6 +153,21 @@ class BotHandlers:
         self.analytics_fn = analytics_fn  # injected from LLM analytics module
         self._pending_files: dict[str, str] = {}  # short_key → full file_id
 
+    def _schedule_delete(self, message, context=None):
+        """Schedule auto-deletion of a bot message after configured delay."""
+        delay = get_settings().telegram.auto_delete_seconds
+        if delay <= 0 or not message:
+            return
+
+        async def _do_delete():
+            await asyncio.sleep(delay)
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+        asyncio.ensure_future(_do_delete())
+
     COMMANDS = [
         BotCommand("start", "Начать работу"),
         BotCommand("help", "Список команд"),
@@ -88,6 +182,11 @@ class BotHandlers:
         BotCommand("analytics", "Аналитика документов"),
         BotCommand("insights", "AI обзор и рекомендации"),
         BotCommand("notes", "Заметки"),
+        BotCommand("note", "Быстрая заметка"),
+        BotCommand("today", "Метрики дня"),
+        BotCommand("missing", "Что не заполнено"),
+        BotCommand("analyze", "Недельный анализ"),
+        BotCommand("unlock", "Разблокировать шифрование"),
     ]
 
     def register(self, app: Application):
@@ -105,6 +204,11 @@ class BotHandlers:
         app.add_handler(CommandHandler("skills", self.cmd_skills))
         app.add_handler(CommandHandler("insights", self.cmd_insights))
         app.add_handler(CommandHandler("notes", self.cmd_notes))
+        app.add_handler(CommandHandler("note", self.cmd_note))
+        app.add_handler(CommandHandler("today", self.cmd_today))
+        app.add_handler(CommandHandler("missing", self.cmd_missing))
+        app.add_handler(CommandHandler("analyze", self.cmd_analyze))
+        app.add_handler(CommandHandler("unlock", self.cmd_unlock))
 
         # File handlers (documents, photos)
         app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
@@ -117,7 +221,10 @@ class BotHandlers:
         app.add_handler(CallbackQueryHandler(self.handle_scan_confirm, pattern="^scan:"))
         app.add_handler(CallbackQueryHandler(self.handle_files_page, pattern="^fp:"))
         app.add_handler(CallbackQueryHandler(self.handle_voice_choice, pattern="^vc:"))
+        app.add_handler(CallbackQueryHandler(self.handle_text_choice, pattern="^tc:"))
         app.add_handler(CallbackQueryHandler(self.handle_reminder_action, pattern="^rem:"))
+        app.add_handler(CallbackQueryHandler(self.handle_note_action, pattern="^note:"))
+        app.add_handler(CallbackQueryHandler(self.handle_checkin_callback, pattern="^ci:"))
         app.add_handler(CallbackQueryHandler(self.handle_dedup_choice, pattern="^dedup:"))
         app.add_handler(CallbackQueryHandler(self.handle_file_send, pattern="^file:"))
 
@@ -438,15 +545,129 @@ class BotHandlers:
 
     @owner_only
     async def cmd_notes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        notes = await self.pipeline.db.list_notes(limit=10)
+        """Show today's note summary with category breakdown."""
+        from datetime import datetime
+        db = self.pipeline.db
+        today = datetime.now().strftime("%Y-%m-%d")
+        notes = await db.get_daily_notes(today)
+
         if not notes:
-            await update.message.reply_text("📝 Заметок пока нет.")
+            # Fall back to recent notes
+            notes = await db.list_notes(limit=10)
+            if not notes:
+                await update.message.reply_text("📝 Заметок пока нет. Отправь голосовое или /note <текст>")
+                return
+            lines = []
+            for n in notes:
+                cat_badge = f"[{n.get('category', '')}] " if n.get("category") else ""
+                lines.append(f"• {cat_badge}{n.get('title', '') or n['content'][:60]}\n  {n['created_at'][:16]}")
+            await update.message.reply_text(f"📝 Последние заметки:\n\n" + "\n\n".join(lines))
             return
-        lines = []
+
+        # Today's summary
+        cat_emoji = {"food": "🍽", "health": "🏥", "fitness": "💪", "business": "💼",
+                     "personal": "💭", "finance": "💰", "learning": "📚", "goals": "🎯"}
+        by_cat: dict[str, list[dict]] = {}
         for n in notes:
-            file_ref = f" (📎 к файлу)" if n.get("file_id") else ""
-            lines.append(f"• {n['content'][:80]}{file_ref}\n  {n['created_at'][:16]}")
-        await update.message.reply_text(f"📝 Заметки ({len(notes)}):\n\n" + "\n\n".join(lines))
+            cat = n.get("category", "other") or "other"
+            by_cat.setdefault(cat, []).append(n)
+
+        lines = [f"📊 Сегодня ({today}) — {len(notes)} заметок:", ""]
+        for cat, cat_notes in sorted(by_cat.items()):
+            emoji = cat_emoji.get(cat, "📝")
+            lines.append(f"{emoji} **{cat}** ({len(cat_notes)})")
+            for n in cat_notes[:3]:
+                title = n.get("title", "") or n.get("content", "")[:50]
+                lines.append(f"  • {title}")
+            if len(cat_notes) > 3:
+                lines.append(f"  ...и ещё {len(cat_notes) - 3}")
+
+        # Show metrics
+        metrics = await db.get_daily_facts(today) if hasattr(db, 'get_daily_facts') else await db.get_daily_metrics(today)
+        if metrics:
+            lines.append("")
+            if "calories" in metrics:
+                lines.append(f"🔥 Калории: ~{int(metrics['calories']['total'])} kcal")
+            if "mood_score" in metrics:
+                lines.append(f"💭 Настроение: {metrics['mood_score']['avg']:.1f}/10")
+            if "weight_kg" in metrics:
+                lines.append(f"⚖️ Вес: {metrics['weight_kg']['avg']:.1f} кг")
+
+        await update.message.reply_text("\n".join(lines))
+
+    @owner_only
+    async def cmd_unlock(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Unlock encryption via Telegram: /unlock <password> [PIN]"""
+        from app.utils.crypto import is_encryption_configured, unlock_with_password
+        from app.main import _state
+        import os
+
+        # PIN check for critical operation
+        pin_err = _check_pin(context)
+        if pin_err:
+            await update.message.reply_text(pin_err)
+            return
+
+        if not is_encryption_configured():
+            await update.message.reply_text(
+                "🔓 Шифрование не настроено.\n"
+                "Настройте через Settings → Encryption в веб-панели."
+            )
+            return
+
+        if _state.get("_encryption_key"):
+            await update.message.reply_text("🔓 Уже разблокировано.")
+            return
+
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                "🔐 Использование: /unlock <мастер-пароль>\n\n"
+                "⚠️ Пароль будет виден в чате — после разблокировки "
+                "удалите сообщение."
+            )
+            return
+
+        password = " ".join(args)
+
+        # Delete the message with password immediately
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        key_file_data = None
+        kf_path = os.environ.get("KEY_FILE", "")
+        if kf_path:
+            from pathlib import Path as _P
+            kf = _P(kf_path)
+            if kf.exists():
+                key_file_data = kf.read_bytes()
+
+        try:
+            key = unlock_with_password(password, "data/encryption.key", key_file_data)
+        except ValueError as e:
+            await update.message.chat.send_message(f"❌ {e}")
+            return
+
+        # Apply key to ALL running services
+        _state["_encryption_key"] = key
+        db = self.pipeline.db
+        if db:
+            db._enc_key = key
+        fs = self.pipeline.file_storage
+        if fs:
+            for backend in fs._backends.values():
+                if hasattr(backend, "_encryption_key"):
+                    backend._encryption_key = key
+        vs = self.pipeline.vector_store
+        if vs:
+            vs._strip_text = True
+
+        await update.message.chat.send_message(
+            "🔓 Шифрование разблокировано!\n"
+            "Ключ в памяти — при перезапуске потребуется снова."
+        )
 
     @owner_only
     async def cmd_skills(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -572,6 +793,8 @@ class BotHandlers:
                     "images": [],
                     "chat_id": update.message.chat_id,
                 }
+            if len(context.bot_data[key]["images"]) >= 20:
+                return  # Limit: max 20 photos per media group
             context.bot_data[key]["images"].append(buf.getvalue())
 
             if is_new:
@@ -629,13 +852,63 @@ class BotHandlers:
 
     @owner_only
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle text messages — analytics or semantic search."""
-        query = update.message.text.strip()
-        if not query:
+        """Handle text messages — show choice: search or note."""
+        text = update.message.text.strip()
+        if not text:
             return
 
-        # All free text goes to search. Use /analytics for analytics.
-        await self._do_search(update, query, context)
+        # Store text for callback
+        import hashlib
+        text_key = hashlib.md5(text.encode()).hexdigest()[:8]
+        self._pending_files[f"tc:{text_key}"] = text
+
+        preview = text[:100] + ("..." if len(text) > 100 else "")
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔍 Вопрос", callback_data=f"tc:s:{text_key}"),
+                InlineKeyboardButton("📝 Заметка", callback_data=f"tc:n:{text_key}"),
+            ]
+        ])
+        await update.message.reply_text(f"«{preview}»", reply_markup=keyboard)
+
+    @owner_only
+    async def handle_text_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle text message choice: search or save as note."""
+        query = update.callback_query
+        await query.answer()
+
+        parts = query.data.split(":")  # "tc:s:abcd1234" or "tc:n:abcd1234"
+        if len(parts) < 3:
+            return
+
+        action = parts[1]
+        text_key = parts[2]
+        text = self._pending_files.pop(f"tc:{text_key}", None)
+
+        if not text:
+            await query.edit_message_text("❌ Данные устарели. Отправьте сообщение заново.")
+            return
+
+        if action == "s":
+            await query.edit_message_text(f"«{text[:100]}»\n\n🔍 Ищу...")
+            # Create a fake Update to reuse _do_search
+            class _FakeUpdate:
+                def __init__(self, message, chat):
+                    self.message = message
+                    self.effective_chat = chat
+            class _FakeMessage:
+                def __init__(self, reply_fn, chat_id):
+                    self.reply_text = reply_fn
+                    self.chat_id = chat_id
+            chat = query.message.chat
+            async def _reply(text_msg, **kwargs):
+                return await context.bot.send_message(chat_id=chat.id, text=text_msg, **kwargs)
+            fake_update = _FakeUpdate(_FakeMessage(_reply, chat.id), chat)
+            await self._do_search(fake_update, text, context)
+
+        elif action == "n":
+            await query.edit_message_text(f"«{text[:100]}»\n\n⏳ Сохраняю заметку...")
+            await self._save_smart_note(text, query.message.chat_id, query, source="text")
 
     @owner_only
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -770,134 +1043,213 @@ class BotHandlers:
             await query.edit_message_text(f"🎤 «{text}»\n\n⏳ Обрабатываю заметку...")
             await self._save_smart_note(text, query.message.chat_id, query)
 
-    async def _save_smart_note(self, text: str, chat_id: int, callback_query):
-        """Process note with LLM, find links, save as Obsidian .md."""
-        import json as json_mod
-        import re
+    async def _save_smart_note(self, text: str, chat_id: int, callback_query, source: str = "voice"):
+        """Capture note instantly, enqueue async enrichment. Never blocks on LLM."""
+        from app.main import get_state
+
+        capture = get_state("note_capture")
+        if capture:
+            note_id = await capture.capture(text, source=source)
+            await callback_query.edit_message_text(f"📝 Сохранено (#{note_id}). Обработка в фоне...")
+        else:
+            # Fallback: direct DB save
+            db = self.pipeline.db
+            note_id = await db.save_note(content=text, source=source)
+            await callback_query.edit_message_text(f"📝 Сохранено (#{note_id})")
+
+    @owner_only
+    async def cmd_note(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Quick text note via /note command — instant capture."""
+        text = " ".join(context.args) if context.args else ""
+        if not text:
+            await update.message.reply_text("Использование: /note <текст заметки>")
+            return
+
+        from app.main import get_state
+        capture = get_state("note_capture")
+        if capture:
+            note_id = await capture.capture(text, source="command")
+            await update.message.reply_text(f"📝 Сохранено (#{note_id}). Обработка в фоне...")
+        else:
+            note_id = await self.pipeline.db.save_note(content=text, source="command")
+            await update.message.reply_text(f"📝 Сохранено (#{note_id})")
+
+    @owner_only
+    async def cmd_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show today's metrics summary."""
         from datetime import datetime
+        db = self.pipeline.db
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        notes = await db.get_daily_notes(today)
+        metrics = await db.get_daily_facts(today) if hasattr(db, 'get_daily_facts') else await db.get_daily_metrics(today)
+        streak = await db.get_streak()
+
+        # Count by category
+        by_cat: dict[str, int] = {}
+        for n in notes:
+            cat = n.get("category", "other") or "other"
+            by_cat[cat] = by_cat.get(cat, 0) + 1
+        cat_str = ", ".join(f"{k}:{v}" for k, v in sorted(by_cat.items())) if by_cat else "нет"
+
+        parts = [f"📊 Сегодня ({today}):", ""]
+        # Calories with meal breakdown
+        if metrics.get("calories"):
+            parts.append(f"🍽 Калории: ~{int(metrics['calories']['total'])} kcal")
+        else:
+            parts.append("🍽 Калории: — (нет данных)")
+        # Sleep
+        if metrics.get("sleep_hours"):
+            sleep_str = f"😴 Сон: {metrics['sleep_hours']['total']:.1f}ч"
+            if metrics.get("sleep_quality"):
+                sleep_str += f" (качество: {metrics['sleep_quality']['avg']:.0f}/10)"
+            parts.append(sleep_str)
+        # Mood & Energy
+        mood_str = ""
+        if metrics.get("mood_score"):
+            mood_str += f"💭 Настроение: {metrics['mood_score']['avg']:.1f}/10"
+        if metrics.get("energy"):
+            mood_str += f" | Энергия: {metrics['energy']['avg']:.0f}/10"
+        if mood_str:
+            parts.append(mood_str)
+        # Weight
+        if metrics.get("weight_kg"):
+            parts.append(f"⚖️ Вес: {metrics['weight_kg']['avg']:.1f} кг")
+        # Notes
+        parts.append(f"📝 Заметок: {len(notes)} ({cat_str})")
+        # Streak
+        if streak > 1:
+            parts.append(f"🔥 Стрик: {streak} дней подряд!")
+
+        await update.message.reply_text("\n".join(parts))
+
+    @owner_only
+    async def cmd_missing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show what data is missing for today."""
+        from datetime import datetime
+        db = self.pipeline.db
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        metrics = await db.get_daily_facts(today) if hasattr(db, 'get_daily_facts') else await db.get_daily_metrics(today)
+        notes = await db.get_daily_notes(today)
+        categories_today = set(n.get("category", "") for n in notes)
+
+        parts = [f"📋 Данные за сегодня ({today}):", ""]
+
+        checks = [
+            ("food" in categories_today, "Еда", metrics.get("calories")),
+            (metrics.get("mood_score") is not None, "Настроение", metrics.get("mood_score")),
+            (metrics.get("sleep_hours") is not None, "Сон", metrics.get("sleep_hours")),
+            (metrics.get("weight_kg") is not None, "Вес", metrics.get("weight_kg")),
+            (metrics.get("energy") is not None, "Энергия", metrics.get("energy")),
+        ]
+
+        for filled, label, data in checks:
+            if filled and data:
+                if label == "Еда":
+                    parts.append(f"✅ {label} — {int(data['total'])} kcal")
+                elif label in ("Настроение", "Энергия"):
+                    parts.append(f"✅ {label} — {data['avg']:.1f}/10")
+                elif label == "Сон":
+                    parts.append(f"✅ {label} — {data['total']:.1f}ч")
+                elif label == "Вес":
+                    parts.append(f"✅ {label} — {data['avg']:.1f} кг")
+            else:
+                parts.append(f"❌ {label} — не записано")
+
+        await update.message.reply_text("\n".join(parts))
+
+    @owner_only
+    async def cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Run weekly analysis on demand."""
+        ack = await update.message.reply_text("📊 Генерирую недельный отчёт...")
+
+        from app.main import get_state
+        note_agent = get_state("note_agent")
+        if not note_agent:
+            await ack.edit_text("❌ Note Agent не инициализирован")
+            return
+
+        try:
+            from app.notes.weekly import WeeklyAnalyzer
+            analyzer = WeeklyAnalyzer(
+                self.pipeline.db, self.pipeline.llm,
+                vault=note_agent.vault,
+            )
+            summary = await analyzer.get_weekly_telegram_summary()
+            await ack.edit_text(summary or "Недостаточно данных для анализа")
+        except Exception as e:
+            await ack.edit_text(f"❌ Ошибка: {e}")
+
+    @owner_only
+    async def handle_note_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle note action buttons: note:ok:ID, note:edit:ID, note:archive:ID."""
+        query = update.callback_query
+        await query.answer()
+
+        parts = query.data.split(":")
+        if len(parts) < 3:
+            return
+
+        action = parts[1]
+        try:
+            note_id = int(parts[2])
+        except ValueError:
+            return
 
         db = self.pipeline.db
-        llm = self.pipeline.llm
 
-        # 1. LLM: extract title, tags, action items
-        note_data = {"title": text[:50], "summary": text, "tags": [], "action_items": []}
-        try:
-            response = await llm.extract(
-                text=text,
-                system=(
-                    "Обработай голосовую заметку. Ответь ТОЛЬКО JSON:\n"
-                    '{"title": "краткий заголовок на русском (3-5 слов)", '
-                    '"summary": "суть в 1-2 предложениях", '
-                    '"tags": ["тег1", "тег2"], '
-                    '"action_items": ["задача если есть"]}'
-                ),
-            )
-            parsed = response.text.strip()
-            if parsed.startswith("```"):
-                parsed = parsed.split("\n", 1)[1].rsplit("```", 1)[0]
-            note_data = json_mod.loads(parsed)
-        except Exception as e:
-            logger.debug(f"Note LLM extraction failed: {e}")
-
-        title = note_data.get("title", text[:50])
-        summary = note_data.get("summary", text)
-        tags = note_data.get("tags", [])
-        action_items = note_data.get("action_items", [])
-
-        # 2. Find linked file from chat history
-        linked_file_id = ""
-        linked_file_name = ""
-        try:
-            history = await db.get_chat_history(chat_id, limit=5)
-            for h in reversed(history):
-                if h.get("file_id"):
-                    linked_file_id = h["file_id"]
-                    f = await db.get_file(linked_file_id)
-                    if f:
-                        linked_file_name = f.get("original_name", "")
-                    break
-        except Exception:
-            pass
-
-        # 3. Find related notes by tag overlap
-        related_notes = []
-        try:
+        if action == "ok":
+            await query.edit_message_reply_markup(reply_markup=None)
+        elif action == "archive":
+            await db.set_note_status(note_id, "archived")
+            await query.edit_message_text(f"📦 Заметка #{note_id} архивирована")
+        elif action == "edit":
+            # v1: Edit metadata only — redirect to web detail page
             from app.config import get_settings
-            notes_dir = get_settings().storage.resolved_path / "notes"
-            if notes_dir.exists():
-                for md_file in notes_dir.glob("*.md"):
-                    content = md_file.read_text()
-                    # Check if any tag appears in existing note
-                    for tag in tags:
-                        if tag.lower() in content.lower():
-                            related_notes.append(md_file.stem)
-                            break
-        except Exception:
-            pass
+            s = get_settings()
+            host = s.web.host if s.web.host != "0.0.0.0" else "localhost"
+            url = f"http://{host}:{s.web.port}/notes/{note_id}"
+            await query.edit_message_text(
+                f"✏️ Редактировать заметку #{note_id}:\n{url}",
+            )
 
-        # 4. Generate .md file
-        now = datetime.now()
-        slug = re.sub(r'[^\w\s-]', '', title.lower()).strip()
-        slug = re.sub(r'[\s]+', '-', slug)[:40]
-        filename = f"{now.strftime('%Y-%m-%d')}_{slug}.md"
+    @owner_only
+    async def handle_checkin_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle evening check-in callbacks: ci:score:N:cat, ci:skip:cat, ci:done."""
+        query = update.callback_query
+        await query.answer()
 
+        parts = query.data.split(":")
+        if len(parts) < 2:
+            return
+
+        from app.main import get_state
+
+        from app.notes.checkin import EveningCheckin
         from app.config import get_settings
-        notes_dir = get_settings().storage.resolved_path / "notes"
-        notes_dir.mkdir(parents=True, exist_ok=True)
-        md_path = notes_dir / filename
-
-        # Build Obsidian markdown
-        lines = [
-            "---",
-            f"date: {now.strftime('%Y-%m-%d')}",
-            f"source: voice",
-            f"tags: [{', '.join(tags)}]",
-        ]
-        if linked_file_id:
-            lines.append(f"linked_files: [{linked_file_id}]")
-        lines.extend(["---", "", f"# {title}", "", summary, ""])
-
-        if text != summary:
-            lines.extend(["## Оригинал", "", text, ""])
-
-        if action_items:
-            lines.append("## Задачи")
-            for item in action_items:
-                lines.append(f"- [ ] {item}")
-            lines.append("")
-
-        if related_notes or linked_file_name:
-            lines.append("## Связи")
-            for rn in related_notes[:5]:
-                lines.append(f"- [[{rn}]]")
-            if linked_file_name:
-                lines.append(f"- Документ: {linked_file_name}")
-            lines.append("")
-
-        md_path.write_text("\n".join(lines), encoding="utf-8")
-
-        # 5. Save to SQLite
-        await db.save_note(
-            content=summary,
-            title=title,
-            file_id=linked_file_id,
-            md_path=str(md_path),
-            source="voice",
-            tags=json_mod.dumps(tags),
+        checkin = EveningCheckin(
+            self.pipeline.db,
+            expected_categories=get_settings().notes.expected_daily_categories,
+            capture=get_state("note_capture"),
         )
 
-        # 6. Reply
-        reply_parts = [f"📝 **{title}**", "", summary]
-        if tags:
-            reply_parts.append(f"🏷 {', '.join(tags)}")
-        if related_notes:
-            reply_parts.append(f"🔗 Связи: {', '.join(related_notes[:3])}")
-        if linked_file_name:
-            reply_parts.append(f"📎 Документ: {linked_file_name}")
-        if action_items:
-            reply_parts.append("✅ " + "; ".join(action_items))
+        action = parts[1]
+        tg_app = get_state("tg_app")
+        chat_id = query.message.chat_id
 
-        await callback_query.edit_message_text("\n".join(reply_parts))
+        if action == "score" and len(parts) >= 4:
+            score = int(parts[2])
+            category = parts[3]
+            await query.edit_message_text(f"💭 Настроение: {score}/10 ✓")
+            await checkin.handle_mood_score(score, chat_id, tg_app, category)
+        elif action == "skip" and len(parts) >= 3:
+            category = parts[2]
+            await query.edit_message_text(f"⏭ Пропущено")
+            await checkin.handle_skip(chat_id, tg_app, category)
+        elif action == "done":
+            await query.edit_message_text("✅ Check-in завершён")
+            await checkin.handle_done(chat_id, tg_app)
 
     @owner_only
     async def handle_reminder_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -982,46 +1334,66 @@ class BotHandlers:
             await query.answer("❌ Файл не найден", show_alert=True)
             return
 
-        file_path = Path(file["stored_path"])
-        if not file_path.exists():
-            await query.answer("❌ Файл удалён с диска", show_alert=True)
+        stored_uri = file["stored_path"]
+        if not await self.pipeline.file_storage.exists(stored_uri):
+            await query.answer("❌ Файл удалён", show_alert=True)
             return
 
+        import io
+        data = await self.pipeline.file_storage.read_file(stored_uri)
         await context.bot.send_document(
             chat_id=query.message.chat_id,
-            document=open(file_path, "rb"),
-            filename=file.get("original_name", file_path.name),
+            document=io.BytesIO(data),
+            filename=file.get("original_name", "file"),
         )
 
     async def _cascade_delete(self, file_id: str):
-        """Delete file from disk + Qdrant + SQLite."""
-        db = self.pipeline.db
-        file = await db.get_file(file_id)
-
-        # 1. Delete vectors
-        try:
-            await self.pipeline.vector_store.delete_document(file_id)
-        except Exception as e:
-            logger.warning(f"Failed to delete vectors for {file_id}: {e}")
-
-        # 2. Delete file from disk
-        if file and file.get("stored_path"):
+        """Delete file via lifecycle service (disk + Qdrant + SQLite + cache)."""
+        from app.main import get_state
+        lifecycle = get_state("lifecycle")
+        if lifecycle:
+            await lifecycle.delete(file_id)
+        else:
+            # Fallback if lifecycle not initialized
+            db = self.pipeline.db
+            file = await db.get_file(file_id)
+            if file and file.get("stored_path"):
+                try:
+                    await self.pipeline.file_storage.delete(file["stored_path"])
+                except Exception:
+                    pass
             try:
-                p = Path(file["stored_path"])
-                if p.exists():
-                    p.unlink()
-            except Exception as e:
-                logger.warning(f"Failed to delete file from disk: {e}")
-
-        # 3. Delete from DB
-        await db.delete_file(file_id)
-        logger.info(f"Cascade deleted file {file_id}")
+                await self.pipeline.vector_store.delete_document(file_id)
+            except Exception:
+                pass
+            await db.delete_file(file_id)
+            logger.info(f"Cascade deleted file {file_id} (fallback)")
 
     # ── Helpers ─────────────────────────────────────────────────────────
+
+    def _is_encryption_locked(self) -> bool:
+        """Check if encryption is configured but not yet unlocked."""
+        from app.utils.crypto import is_encryption_configured
+        from app.main import _state
+        from app.config import get_settings
+        s = get_settings()
+        if not (s.encryption.files or s.encryption.database):
+            return False
+        return is_encryption_configured() and _state.get("_encryption_key") is None
 
     async def _process_and_reply(self, ack_message, file_data: bytes, filename: str, context: ContextTypes.DEFAULT_TYPE):
         """Run pipeline and edit the ack message with results."""
         try:
+            # Warn if encryption is locked
+            if self._is_encryption_locked():
+                await ack_message.edit_text(
+                    "🔒 Шифрование заблокировано!\n\n"
+                    "Файл НЕ будет зашифрован. Разблокируйте:\n"
+                    "• Коман��а /unlock <пароль>\n"
+                    "• Или через Settings → Encryption в веб-панели"
+                )
+                return
+
             result = await self.pipeline.process(file_data, filename)
 
             # If semantic duplicate found — show inline keyboard
@@ -1053,8 +1425,10 @@ class BotHandlers:
                     ],
                 ]
                 await ack_message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+                self._schedule_delete(ack_message, context)
             else:
                 await ack_message.edit_text(result.summary_text())
+                self._schedule_delete(ack_message, context)
         except Exception as e:
             logger.error(f"Pipeline error for {filename}: {e}", exc_info=True)
             try:
@@ -1161,10 +1535,11 @@ class BotHandlers:
                 MAX_TG = 4000
                 async def _send(txt, markup=None):
                     try:
-                        await update.message.reply_text(txt, reply_markup=markup, parse_mode="HTML")
+                        msg = await update.message.reply_text(txt, reply_markup=markup, parse_mode="HTML")
                     except Exception:
-                        # Fallback without formatting if HTML fails
-                        await update.message.reply_text(txt, reply_markup=markup)
+                        msg = await update.message.reply_text(txt, reply_markup=markup)
+                    self._schedule_delete(msg)
+                    return msg
 
                 if len(text) <= MAX_TG:
                     await _send(text, reply_markup)

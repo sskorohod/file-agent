@@ -1,0 +1,63 @@
+{% extends "layout.html" %}
+{% block title %}Review Queue — FileAgent{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-lg font-bold text-txt">Review Queue</h1>
+    <p class="text-xs text-txt-3 mt-0.5">{{ notes|length }} note{{ 's' if notes|length != 1 }} need review</p>
+  </div>
+  <a href="/notes" class="btn-secondary btn-sm">Back to Inbox</a>
+</div>
+
+{% if notes %}
+<div class="space-y-3">
+  {% for n in notes %}
+  <div class="card !p-4 animate-fade-in">
+    <div class="flex items-start justify-between gap-3">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-xs px-2 py-0.5 rounded-full
+            {% if n.status == 'needs_review' %}bg-orange-500/10 text-orange-400
+            {% elif n.status == 'failed' %}bg-err-bg text-err-text{% endif %}">
+            {{ n.status }}
+          </span>
+          {% if n.category %}
+          <span class="text-xs text-txt-3">{{ n.category }}</span>
+          {% endif %}
+        </div>
+        {% if n.user_title or n.title %}
+        <h3 class="text-sm font-semibold text-txt mb-1">{{ n.user_title or n.title }}</h3>
+        {% endif %}
+        <p class="text-sm text-txt-2 line-clamp-3">{{ (n.raw_content or n.content)[:300] }}</p>
+        <div class="flex items-center gap-3 mt-2 text-xs text-txt-3">
+          <span>{{ n.created_at[:16] }}</span>
+          <span class="px-1.5 py-0.5 rounded bg-surface-2">{{ n.source }}</span>
+        </div>
+      </div>
+      <div class="shrink-0 flex flex-col gap-1">
+        <a href="/notes/{{ n.id }}" class="btn-secondary btn-sm text-center">Detail</a>
+        {% if n.status == 'needs_review' %}
+        <form method="POST" action="/notes/{{ n.id }}/approve" class="inline">
+          <button class="btn-primary btn-sm w-full">Approve</button>
+        </form>
+        {% endif %}
+        <form method="POST" action="/notes/{{ n.id }}/reprocess" class="inline">
+          <button class="btn-secondary btn-sm w-full">Reprocess</button>
+        </form>
+        <form method="POST" action="/notes/{{ n.id }}/archive" class="inline">
+          <button class="btn-secondary btn-sm w-full text-txt-3">Archive</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card flex flex-col items-center justify-center py-16 text-center">
+  <p class="text-sm font-medium text-txt mb-1">All clear!</p>
+  <p class="text-xs text-txt-3">No notes need review</p>
+</div>
+{% endif %}
+
+{% endblock %}

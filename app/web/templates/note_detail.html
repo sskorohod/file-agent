@@ -1,0 +1,153 @@
+{% extends "layout.html" %}
+{% block title %}Note #{{ note.id }} — FileAgent{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between mb-4">
+  <div class="flex items-center gap-3">
+    <a href="/notes" class="text-txt-3 hover:text-txt transition-colors">
+      <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+    </a>
+    <div>
+      <h1 class="text-lg font-bold text-txt">
+        {% if enrichment and enrichment.suggested_title %}{{ enrichment.suggested_title }}{% elif note.user_title %}{{ note.user_title }}{% else %}Note #{{ note.id }}{% endif %}
+      </h1>
+      <div class="flex items-center gap-2 mt-1">
+        {% set status_colors = {'captured': 'bg-surface-2 text-txt-3', 'processing': 'bg-warn-bg text-warn-text', 'enriched': 'bg-ok-bg text-ok-text', 'needs_review': 'bg-orange-500/10 text-orange-400', 'failed': 'bg-err-bg text-err-text', 'archived': 'bg-surface-2 text-txt-3'} %}
+        <span class="text-xs px-2 py-0.5 rounded-full {{ status_colors.get(note.status, 'bg-surface-2 text-txt-3') }}">{{ note.status }}</span>
+        <span class="text-xs text-txt-3">{{ note.source }} | {{ note.created_at[:16] }}</span>
+      </div>
+    </div>
+  </div>
+  <div class="flex gap-2">
+    {% if note.status == 'needs_review' %}
+    <form method="POST" action="/notes/{{ note.id }}/approve" class="inline">
+      <button class="btn-primary btn-sm">Approve</button>
+    </form>
+    {% endif %}
+    <form method="POST" action="/notes/{{ note.id }}/reprocess" class="inline">
+      <button class="btn-secondary btn-sm">Reprocess</button>
+    </form>
+    <form method="POST" action="/notes/{{ note.id }}/archive" class="inline">
+      <button class="btn-secondary btn-sm">Archive</button>
+    </form>
+  </div>
+</div>
+
+{# ── Raw Content (source of truth) ── #}
+<div class="card !p-4 mb-4">
+  <h2 class="text-xs font-semibold text-txt-3 uppercase tracking-wider mb-2">Raw Content</h2>
+  <p class="text-sm text-txt whitespace-pre-wrap">{{ note.raw_content or note.content }}</p>
+</div>
+
+{% if enrichment %}
+{# ── AI Enrichment ── #}
+<div class="card !p-4 mb-4">
+  <h2 class="text-xs font-semibold text-txt-3 uppercase tracking-wider mb-2">AI Enrichment</h2>
+  {% if enrichment.summary %}
+  <p class="text-sm text-txt-2 mb-3">{{ enrichment.summary }}</p>
+  {% endif %}
+  <div class="flex flex-wrap gap-2 mb-3">
+    {% if enrichment.category %}
+    <span class="text-xs px-2 py-1 rounded bg-accent-bg text-accent-2">{{ enrichment.category }}{% if enrichment.subcategory %}/{{ enrichment.subcategory }}{% endif %}</span>
+    {% endif %}
+    {% if enrichment.confidence %}
+    <span class="text-xs px-2 py-1 rounded bg-surface-2 text-txt-3">confidence: {{ '%.0f'|format(enrichment.confidence * 100) }}%</span>
+    {% endif %}
+    {% if enrichment.sentiment is not none %}
+    <span class="text-xs px-2 py-1 rounded {% if enrichment.sentiment > 0.3 %}bg-ok-bg text-ok-text{% elif enrichment.sentiment < -0.3 %}bg-err-bg text-err-text{% else %}bg-surface-2 text-txt-3{% endif %}">sentiment: {{ '%.2f'|format(enrichment.sentiment) }}</span>
+    {% endif %}
+    {% if enrichment.mood_score %}
+    <span class="text-xs px-2 py-1 rounded bg-purple-500/10 text-purple-400">mood: {{ enrichment.mood_score }}/10</span>
+    {% endif %}
+    {% if enrichment.energy %}
+    <span class="text-xs px-2 py-1 rounded bg-blue-500/10 text-blue-400">energy: {{ enrichment.energy }}/10</span>
+    {% endif %}
+  </div>
+  {% set etags = enrichment.tags %}
+  {% if etags %}
+    <div class="flex flex-wrap gap-1">
+      {% for tag in etags %}
+      <span class="text-xs px-1.5 py-0.5 rounded bg-accent-bg text-accent-2">#{{ tag }}</span>
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ── Entities ── #}
+{% if entities %}
+<div class="card !p-4 mb-4">
+  <h2 class="text-xs font-semibold text-txt-3 uppercase tracking-wider mb-2">Entities</h2>
+  <div class="space-y-1">
+    {% set ent_icons = {'person': '👤', 'company': '🏢', 'place': '📍', 'project': '📁'} %}
+    {% for e in entities %}
+    <div class="flex items-center gap-2 text-sm">
+      <span>{{ ent_icons.get(e.entity_type, '📎') }}</span>
+      <span class="text-txt">{{ e.entity_value }}</span>
+      {% if e.role %}<span class="text-xs text-txt-3">({{ e.role }})</span>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Facts ── #}
+{% if facts %}
+<div class="card !p-4 mb-4">
+  <h2 class="text-xs font-semibold text-txt-3 uppercase tracking-wider mb-2">Facts</h2>
+  <div class="space-y-1">
+    {% for f in facts %}
+    <div class="flex items-center justify-between text-sm">
+      <span class="text-txt-2">{{ f.key }}{% if f.fact_type != 'metric' %} ({{ f.fact_type }}){% endif %}</span>
+      <span class="text-txt font-mono">{% if f.value_num is not none %}{{ f.value_num }}{% if f.unit %} {{ f.unit }}{% endif %}{% else %}{{ f.value_text }}{% endif %}</span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Tasks ── #}
+{% if tasks %}
+<div class="card !p-4 mb-4">
+  <h2 class="text-xs font-semibold text-txt-3 uppercase tracking-wider mb-2">Tasks</h2>
+  <div class="space-y-2">
+    {% for t in tasks %}
+    <div class="flex items-center gap-3">
+      <form method="POST" action="/notes/tasks/{{ t.id }}/toggle" class="inline">
+        <button class="w-5 h-5 rounded border {% if t.status == 'done' %}bg-ok border-ok-text{% else %}border-border-2 hover:border-accent{% endif %} flex items-center justify-center">
+          {% if t.status == 'done' %}<svg class="w-3 h-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>{% endif %}
+        </button>
+      </form>
+      <div class="flex-1">
+        <p class="text-sm {% if t.status == 'done' %}line-through text-txt-3{% else %}text-txt{% endif %}">{{ t.description }}</p>
+        <div class="flex gap-2 text-xs text-txt-3">
+          {% set pri_colors = {'high': 'text-err-text', 'medium': 'text-warn-text', 'low': 'text-ok-text'} %}
+          <span class="{{ pri_colors.get(t.priority, 'text-txt-3') }}">{{ t.priority }}</span>
+          {% if t.due_date %}<span>due: {{ t.due_date }}</span>{% endif %}
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Related Notes ── #}
+{% if relations %}
+<div class="card !p-4 mb-4">
+  <h2 class="text-xs font-semibold text-txt-3 uppercase tracking-wider mb-2">Related Notes</h2>
+  <div class="space-y-2">
+    {% for r in relations %}
+    <a href="/notes/{{ r.target_note_id or r.source_note_id }}" class="flex items-center justify-between p-2 rounded hover:bg-surface-hover transition-colors">
+      <div>
+        <span class="text-sm text-txt">{{ r.user_title or 'Note #' ~ (r.target_note_id or r.source_note_id) }}</span>
+        {% if r.reason %}<span class="text-xs text-txt-3 ml-2">{{ r.reason }}</span>{% endif %}
+      </div>
+      <span class="text-xs text-txt-3">{{ '%.0f'|format(r.score * 100) }}%</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

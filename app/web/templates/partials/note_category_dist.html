@@ -1,0 +1,23 @@
+{# Category distribution partial #}
+{% if not distribution %}
+<p class="text-xs text-txt-3">Нет данных</p>
+{% else %}
+{% set cat_colors = {
+  'food': 'progress-orange', 'health': 'bg-red-500', 'fitness': 'bg-green-500',
+  'business': 'bg-blue-500', 'personal': 'progress-purple', 'finance': 'bg-yellow-500',
+  'learning': 'bg-cyan-500', 'goals': 'bg-pink-500'
+} %}
+{% set cat_emoji = {'food':'🍽','health':'🏥','fitness':'💪','business':'💼','personal':'💭','finance':'💰','learning':'📚','goals':'🎯'} %}
+<div class="space-y-2">
+  {% for cat, cnt in distribution.items() %}
+  <div class="flex items-center gap-2 text-xs">
+    <span class="w-20 shrink-0 text-txt-2">{{ cat_emoji.get(cat, '📝') }} {{ cat }}</span>
+    <div class="flex-1 bg-surface-2 rounded-full h-3 overflow-hidden">
+      {% set pct = (cnt / total * 100) if total else 0 %}
+      <div class="h-full rounded-full {{ cat_colors.get(cat, 'progress-purple') }}" style="width: {{ pct|round }}%"></div>
+    </div>
+    <span class="text-txt-3 w-8 text-right">{{ cnt }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

@@ -5,13 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, Request, Form
-from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, JSONResponse
+from fastapi import APIRouter, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
-limiter = Limiter(key_func=get_remote_address)
+from app.web.limiter import limiter
 router = APIRouter()
 
 _templates_dir = Path(__file__).parent / "templates"
@@ -21,6 +19,12 @@ templates = Jinja2Templates(directory=str(_templates_dir))
 def _get(key: str):
     from app.main import get_state
     return get_state(key)
+
+
+def _safe_filename(name: str) -> str:
+    """Escape filename for Content-Disposition header (RFC 5987)."""
+    from urllib.parse import quote
+    return quote(name, safe="")
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -44,6 +48,7 @@ async def login(request: Request, login: str = Form(...), password: str = Form(.
     )
     _log.info(f"Login attempt: success={login_ok and password_ok}")
     if login_ok and password_ok:
+        request.session.clear()  # Prevent session fixation
         request.session["authenticated"] = True
         return RedirectResponse("/", status_code=303)
     return templates.TemplateResponse(
@@ -170,13 +175,12 @@ async def reclassify_uncategorized(request: Request):
     import logging
     log = logging.getLogger(__name__)
     db = _get("db")
-    classifier = _get("classifier")
-    skill_engine = _get("skill_engine")
-    if not db or not classifier:
+    lifecycle = _get("lifecycle")
+    if not db or not lifecycle:
         return RedirectResponse("/files", status_code=303)
 
     cursor = await db.db.execute(
-        "SELECT id, original_name, extracted_text, mime_type FROM files "
+        "SELECT id, extracted_text FROM files "
         "WHERE category='uncategorized' OR category='' OR category IS NULL"
     )
     files = [dict(r) for r in await cursor.fetchall()]
@@ -186,14 +190,10 @@ async def reclassify_uncategorized(request: Request):
         if not text.strip():
             continue
         try:
-            result = await classifier.classify(
-                text=text[:3000], filename=f["original_name"],
-                mime_type=f.get("mime_type", ""), language="",
-            )
-            updates = {"category": result.category, "tags": result.tags, "summary": result.summary}
-            await db.update_file(f["id"], **updates)
-            count += 1
-            log.info(f"Reclassified {f['id'][:8]} → {result.category}")
+            result = await lifecycle.reclassify(f["id"])
+            if result:
+                count += 1
+                log.info(f"Reclassified {f['id'][:8]} → {result['category']}")
         except Exception as e:
             log.warning(f"Reclassify failed for {f['id'][:8]}: {e}")
 
@@ -205,26 +205,16 @@ async def reclassify_file(file_id: str):
     """Reclassify a single file via LLM."""
     import logging
     log = logging.getLogger(__name__)
-    db = _get("db")
-    classifier = _get("classifier")
-    if not db or not classifier:
+    lifecycle = _get("lifecycle")
+    if not lifecycle:
         return RedirectResponse(f"/files/{file_id}", status_code=303)
 
-    file = await db.get_file(file_id)
-    if not file:
-        return RedirectResponse("/files", status_code=303)
-
-    text = file.get("extracted_text", "") or ""
-    if text.strip():
-        try:
-            result = await classifier.classify(
-                text=text[:3000], filename=file["original_name"],
-                mime_type=file.get("mime_type", ""), language="",
-            )
-            await db.update_file(file_id, category=result.category, tags=result.tags, summary=result.summary)
-            log.info(f"Reclassified {file_id[:8]} → {result.category}")
-        except Exception as e:
-            log.warning(f"Reclassify failed: {e}")
+    try:
+        result = await lifecycle.reclassify(file_id)
+        if result:
+            log.info(f"Reclassified {file_id[:8]} → {result['category']}")
+    except Exception as e:
+        log.warning(f"Reclassify failed: {e}")
 
     return RedirectResponse(f"/files/{file_id}", status_code=303)
 
@@ -236,65 +226,64 @@ async def file_download(file_id: str, inline: bool = False):
     file = await db.get_file(file_id) if db else None
     if not file:
         return HTMLResponse("File not found", status_code=404)
-    file_path = Path(file["stored_path"]).resolve()
-    # Path traversal guard
-    from app.config import get_settings as _gs
-    base = _gs().storage.resolved_path
-    if not file_path.is_relative_to(base):
-        return HTMLResponse("Access denied", status_code=403)
-    if not file_path.exists():
+    stored_uri = file["stored_path"]
+    file_storage = _get("file_storage")
+    if not file_storage or not await file_storage.exists(stored_uri):
         return HTMLResponse("File not found on disk", status_code=404)
     mime = file.get("mime_type", "application/octet-stream")
-    # For PDF and images: serve inline (in-browser view) by default
     previewable = mime in ("application/pdf",) or mime.startswith("image/")
-    if previewable or inline:
-        from starlette.responses import Response
-        return Response(
-            content=file_path.read_bytes(),
-            media_type=mime,
-            headers={"Content-Disposition": f'inline; filename="{file["original_name"]}"'},
-        )
-    return FileResponse(
-        path=file_path,
-        filename=file["original_name"],
+    from starlette.responses import Response
+    data = await file_storage.read_file(stored_uri)
+    disposition = "inline" if (previewable or inline) else "attachment"
+    return Response(
+        content=data,
         media_type=mime,
+        headers={"Content-Disposition": f"{disposition}; filename*=UTF-8''{_safe_filename(file['original_name'])}"},
     )
 
 
 @router.post("/files/{file_id}/delete")
 async def file_delete(request: Request, file_id: str):
-    """Cascading delete: file from disk + vectors from Qdrant + metadata from SQLite."""
-    import logging
-    logger = logging.getLogger(__name__)
-
-    db = _get("db")
-    file = await db.get_file(file_id) if db else None
-    if not file:
-        return RedirectResponse("/files", status_code=303)
-
-    # 1. Delete vectors from Qdrant
-    vector_store = _get("vector_store")
-    if vector_store:
-        try:
-            await vector_store.delete_document(file_id)
-            logger.info(f"Deleted vectors for {file_id}")
-        except Exception as e:
-            logger.warning(f"Failed to delete vectors for {file_id}: {e}")
-
-    # 2. Delete file from disk
-    file_storage = _get("file_storage")
-    if file_storage and file.get("stored_path"):
-        try:
-            await file_storage.delete(Path(file["stored_path"]))
-            logger.info(f"Deleted file from disk: {file['stored_path']}")
-        except Exception as e:
-            logger.warning(f"Failed to delete file from disk: {e}")
-
-    # 3. Delete from SQLite (file record + processing logs + FTS)
-    await db.delete_file(file_id)
-    logger.info(f"Deleted file record from DB: {file_id}")
-
+    """Cascading delete via lifecycle service."""
+    lifecycle = _get("lifecycle")
+    if lifecycle:
+        await lifecycle.delete(file_id)
     return RedirectResponse("/files", status_code=303)
+
+
+@router.post("/files/upload")
+@limiter.limit("10/minute")
+async def file_upload(request: Request):
+    """Upload file via web interface and process through pipeline."""
+    import logging
+    _log = logging.getLogger(__name__)
+
+    form = await request.form()
+    uploaded = form.get("file")
+    if not uploaded or not hasattr(uploaded, "read"):
+        return RedirectResponse("/files?error=no_file", status_code=303)
+
+    filename = uploaded.filename or "upload"
+    data = await uploaded.read()
+
+    if not data:
+        return RedirectResponse("/files?error=empty", status_code=303)
+
+    pipeline = _get("pipeline")
+    if not pipeline:
+        return RedirectResponse("/files?error=unavailable", status_code=303)
+
+    try:
+        result = await pipeline.process(data, filename, source="web")
+        if result.error:
+            _log.warning(f"Web upload pipeline error: {result.error}")
+            return RedirectResponse(f"/files?error={result.error[:100]}", status_code=303)
+        if result.is_duplicate and result.duplicate_of:
+            return RedirectResponse(f"/files/{result.duplicate_of.get('id', '')}", status_code=303)
+        return RedirectResponse(f"/files/{result.file_id}", status_code=303)
+    except Exception as e:
+        _log.error(f"Web upload failed: {e}")
+        return RedirectResponse("/files?error=upload_failed", status_code=303)
 
 
 def _detect_category(query: str) -> str | None:
@@ -444,28 +433,331 @@ async def skill_save(request: Request, skill_name: str, yaml_content: str = Form
     })
 
 
-@router.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request):
+def _settings_ctx(request: Request, tab: str, **extra) -> dict:
+    """Common context for all settings tabs."""
     from app.config import get_settings
+    settings = get_settings()
+    saved = request.query_params.get("saved") or request.query_params.get("storage") == "saved"
+    error = request.query_params.get("error")
+    return {"request": request, "page": "settings", "tab": tab,
+            "settings": settings, "saved": saved, "error": error, **extra}
+
+
+@router.get("/settings", response_class=HTMLResponse)
+async def settings_redirect(request: Request):
+    return RedirectResponse("/settings/keys", status_code=303)
+
+
+@router.get("/settings/keys", response_class=HTMLResponse)
+async def settings_keys(request: Request):
     from app.utils.crypto import mask_key
     import os
-    settings = get_settings()
-    vs = _get("vector_store")
+    settings = _settings_ctx(request, "keys")["settings"]
     db = _get("db")
-    qdrant_health = await vs.health_check() if vs else {}
     api_keys = await db.list_api_keys() if db else []
-    # Get masked provider keys from env
     provider_keys = {
         "anthropic": mask_key(os.environ.get("ANTHROPIC_API_KEY", "")),
         "openai": mask_key(os.environ.get("OPENAI_API_KEY", "")),
         "google": mask_key(os.environ.get("GOOGLE_API_KEY", "")),
         "qdrant": mask_key(os.environ.get("QDRANT__API_KEY", settings.qdrant.api_key or "")),
     }
-    return templates.TemplateResponse("settings.html", {
-        "request": request, "page": "settings", "settings": settings,
-        "qdrant_health": qdrant_health, "api_keys": api_keys, "new_key": None,
-        "provider_keys": provider_keys,
+    new_key = request.query_params.get("new_key")
+    return templates.TemplateResponse("settings_keys.html", {
+        **_settings_ctx(request, "keys"),
+        "api_keys": api_keys, "provider_keys": provider_keys, "new_key": new_key,
     })
+
+
+@router.get("/settings/llm", response_class=HTMLResponse)
+async def settings_llm_page(request: Request):
+    from app.config import get_settings
+    settings = get_settings()
+    # Determine provider mode from first model's api_base
+    first_model = next(iter(settings.llm.models.values()), None)
+    oauth_base = first_model.api_base if first_model and first_model.api_base else ""
+    provider_mode = "oauth" if oauth_base else "api"
+    model_configs = {
+        role: {"model": mc.model, "max_tokens": mc.max_tokens, "temperature": mc.temperature}
+        for role, mc in settings.llm.models.items()
+    }
+    # Fetch available models (from proxy or presets)
+    available_models = [
+        "anthropic/claude-sonnet-4-20250514",
+        "anthropic/claude-3-haiku-20240307",
+        "openai/gpt-4.1",
+        "openai/gpt-4.1-mini",
+        "gemini/gemini-2.0-flash",
+    ]
+    if oauth_base:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3) as client:
+                resp = await client.get(f"{oauth_base}/models")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    available_models = [m["id"] for m in data.get("data", [])]
+        except Exception:
+            pass
+    return templates.TemplateResponse("settings_llm.html", {
+        **_settings_ctx(request, "llm"),
+        "provider_mode": provider_mode, "oauth_base": oauth_base,
+        "model_configs": model_configs,
+        "available_models": available_models,
+    })
+
+
+@router.get("/settings/storage", response_class=HTMLResponse)
+async def settings_storage_page(request: Request):
+    return templates.TemplateResponse("settings_storage.html",
+                                      _settings_ctx(request, "storage"))
+
+
+@router.get("/settings/security", response_class=HTMLResponse)
+async def settings_security_page(request: Request):
+    from app.utils.crypto import is_encryption_configured
+    from app.main import _state
+    vs = _get("vector_store")
+    qdrant_health = await vs.health_check() if vs else {}
+    return templates.TemplateResponse("settings_security.html", {
+        **_settings_ctx(request, "security"),
+        "enc_configured": is_encryption_configured(),
+        "enc_unlocked": _state.get("_encryption_key") is not None,
+        "recovery_exists": Path("data/RECOVERY_KEY.txt").exists(),
+        "qdrant_health": qdrant_health,
+    })
+
+
+@router.get("/settings/advanced", response_class=HTMLResponse)
+async def settings_advanced_page(request: Request):
+    from app.config import get_settings
+    settings = get_settings()
+    skill_engine = _get("skill_engine")
+    tg_app = _get("tg_app")
+    # Extract domain from webhook URL or CORS for display
+    wh_url = settings.telegram.webhook_url
+    webhook_domain = ""
+    if wh_url:
+        webhook_domain = wh_url.replace("https://", "").replace("http://", "").split("/")[0]
+    # Default domain from CORS origins (first HTTPS origin)
+    default_domain = ""
+    for origin in settings.web.cors_origins:
+        d = origin.replace("https://", "").replace("http://", "").split("/")[0]
+        if d and d != "localhost":
+            default_domain = d
+            break
+    # Determine active mode (what's actually running now)
+    tg_active_mode = "polling"
+    tg_active_webhook = ""
+    if tg_app and tg_app.updater and not tg_app.updater.running:
+        # Updater not running = webhook mode
+        tg_active_mode = "webhook"
+        tg_active_webhook = wh_url
+    elif wh_url and tg_app:
+        # Check if webhook was set at startup
+        try:
+            info = await tg_app.bot.get_webhook_info()
+            if info and info.url:
+                tg_active_mode = "webhook"
+                tg_active_webhook = info.url
+        except Exception:
+            pass
+
+    # Config mode (what's in config.yaml — may differ if not restarted)
+    tg_config_mode = "webhook" if wh_url else "polling"
+
+    return templates.TemplateResponse("settings_advanced.html", {
+        **_settings_ctx(request, "advanced"),
+        "tg_running": tg_app is not None,
+        "skills_count": len(skill_engine.list_skills()) if skill_engine else 0,
+        "webhook_domain": webhook_domain,
+        "default_domain": default_domain,
+        "tg_active_mode": tg_active_mode,
+        "tg_active_webhook": tg_active_webhook,
+        "tg_config_mode": tg_config_mode,
+    })
+
+
+# ── Advanced Settings POST routes ─────────────────────────────────────────
+
+@router.post("/settings/advanced/restart")
+async def restart_server(request: Request):
+    """Restart uvicorn by touching a watched file (triggers --reload)."""
+    import asyncio
+
+    async def _do_restart():
+        await asyncio.sleep(0.5)
+        # Touch main.py to trigger uvicorn --reload file watcher
+        Path("app/main.py").touch()
+
+    asyncio.ensure_future(_do_restart())
+    return HTMLResponse(
+        '<html><head><meta http-equiv="refresh" content="5;url=/settings/advanced">'
+        '</head><body style="background:#09090b;color:#fafafa;font-family:sans-serif;'
+        'display:flex;align-items:center;justify-content:center;height:100vh">'
+        '<div style="text-align:center"><h2>Restarting...</h2>'
+        '<p style="color:#71717a">Redirecting in 5 seconds</p></div>'
+        '</body></html>'
+    )
+
+
+def _save_yaml_config(updates: dict):
+    """Merge updates into config.yaml and write."""
+    import yaml as yaml_lib
+    from app.config import reload_settings
+    config_path = Path("config.yaml")
+    config = yaml_lib.safe_load(config_path.read_text()) if config_path.exists() else {}
+
+    for section, values in updates.items():
+        config.setdefault(section, {})
+        config[section].update(values)
+
+    config_path.write_text(yaml_lib.dump(
+        config, default_flow_style=False, allow_unicode=True, sort_keys=False,
+    ))
+    reload_settings()
+
+
+@router.post("/settings/advanced/telegram")
+async def save_telegram_settings(request: Request):
+    """Save Telegram bot settings to config.yaml."""
+    form = await request.form()
+    updates = {}
+
+    from app.config import get_settings as _gs_tg
+    current = _gs_tg().telegram
+
+    owner_id = form.get("owner_id", "")
+    if owner_id:
+        updates["owner_id"] = int(owner_id)
+
+    # Webhook: only change if tg_mode radio is present in form
+    tg_mode = form.get("tg_mode")
+    if tg_mode == "webhook":
+        domain = form.get("webhook_domain", "").strip().rstrip("/")
+        if domain:
+            import secrets as _sec
+            updates["webhook_url"] = f"https://{domain}/telegram/webhook"
+            if not current.webhook_secret:
+                updates["webhook_secret"] = _sec.token_urlsafe(32)
+            else:
+                updates["webhook_secret"] = current.webhook_secret
+    elif tg_mode == "polling":
+        updates["webhook_url"] = ""
+        updates["webhook_secret"] = ""
+    # If tg_mode is None (not in form) — don't touch webhook settings
+
+    auto_del = form.get("auto_delete_seconds", "")
+    if auto_del:
+        updates["auto_delete_seconds"] = int(auto_del)
+    pin = form.get("pin_code")
+    if pin is not None:
+        updates["pin_code"] = pin
+    tg_max = form.get("tg_max_file_size", "")
+    if tg_max:
+        updates["max_file_size_mb"] = int(tg_max)
+
+    # Bot token → encrypted in DB (not config.yaml)
+    bot_token = form.get("bot_token", "").strip()
+    if bot_token:
+        db = _get("db")
+        from app.config import get_settings
+        session_secret = get_settings().web.session_secret
+        if db and session_secret:
+            from app.utils.crypto import encrypt
+            await db.set_secret("TELEGRAM_BOT_TOKEN", encrypt(bot_token, session_secret))
+
+    if updates:
+        _save_yaml_config({"telegram": updates})
+
+    return RedirectResponse("/settings/advanced?saved=true", status_code=303)
+
+
+@router.post("/settings/advanced/embedding")
+async def save_embedding_settings(request: Request):
+    """Save embedding & Qdrant settings to config.yaml."""
+    form = await request.form()
+
+    embedding_updates = {}
+    for key, field in [
+        ("provider", "embedding_provider"),
+        ("model", "embedding_model"),
+    ]:
+        val = form.get(field, "")
+        if val:
+            embedding_updates[key] = val
+    for key, field in [
+        ("vector_size", "vector_size"),
+        ("chunk_size_words", "chunk_size"),
+        ("chunk_overlap_words", "chunk_overlap"),
+    ]:
+        val = form.get(field, "")
+        if val:
+            embedding_updates[key] = int(val)
+
+    qdrant_updates = {}
+    for key, field in [
+        ("host", "qdrant_host"),
+        ("collection_name", "qdrant_collection"),
+    ]:
+        val = form.get(field, "")
+        if val:
+            qdrant_updates[key] = val
+    port = form.get("qdrant_port", "")
+    if port:
+        qdrant_updates["port"] = int(port)
+
+    # Qdrant API key → encrypted in DB
+    qdrant_key = form.get("qdrant_api_key", "").strip()
+    if qdrant_key:
+        db = _get("db")
+        from app.config import get_settings
+        session_secret = get_settings().web.session_secret
+        if db and session_secret:
+            from app.utils.crypto import encrypt
+            await db.set_secret("QDRANT_API_KEY", encrypt(qdrant_key, session_secret))
+
+    updates = {}
+    if embedding_updates:
+        updates["embedding"] = embedding_updates
+    if qdrant_updates:
+        updates["qdrant"] = qdrant_updates
+    if updates:
+        _save_yaml_config(updates)
+
+    return RedirectResponse("/settings/advanced?saved=true", status_code=303)
+
+
+@router.post("/settings/advanced/system")
+async def save_system_settings(request: Request):
+    """Save system settings to config.yaml."""
+    form = await request.form()
+
+    updates = {}
+
+    log_level = form.get("log_level", "")
+    if log_level:
+        updates["logging"] = {"level": log_level}
+
+    max_size = form.get("max_file_size", "")
+    ext_str = form.get("allowed_extensions", "")
+    skills_dir = form.get("skills_dir", "")
+
+    storage_updates = {}
+    if max_size:
+        storage_updates["max_file_size_mb"] = int(max_size)
+    if ext_str:
+        exts = [e.strip() for e in ext_str.split(",") if e.strip()]
+        storage_updates["allowed_extensions"] = exts
+    if storage_updates:
+        updates["storage"] = storage_updates
+
+    if skills_dir:
+        updates["skills"] = {"directory": skills_dir}
+
+    if updates:
+        _save_yaml_config(updates)
+
+    return RedirectResponse("/settings/advanced?saved=true", status_code=303)
 
 
 @router.post("/settings/keys/save")
@@ -477,7 +769,7 @@ async def save_provider_keys(request: Request):
     db = _get("db")
     session_secret = get_settings().web.session_secret
     if not session_secret:
-        return RedirectResponse("/settings", status_code=303)  # Can't encrypt without secret
+        return RedirectResponse("/settings/keys", status_code=303)
 
     form = await request.form()
     KEY_MAP = {
@@ -509,7 +801,7 @@ async def save_provider_keys(request: Request):
         from app.config import reload_settings
         reload_settings()
 
-    return RedirectResponse("/settings", status_code=303)
+    return RedirectResponse("/settings/keys?saved=true", status_code=303)
 
 
 @router.post("/settings/prompts/save", response_class=HTMLResponse)
@@ -530,17 +822,7 @@ async def save_prompts(
     config_path.write_text(yaml_lib.dump(config, default_flow_style=False, allow_unicode=True, sort_keys=False))
 
     reload_settings()
-
-    settings = reload_settings()
-    db = _get("db")
-    vs = _get("vector_store")
-    qdrant_health = await vs.health_check() if vs else {}
-    api_keys = await db.list_api_keys() if db else []
-    return templates.TemplateResponse("settings.html", {
-        "request": request, "page": "settings", "settings": settings,
-        "qdrant_health": qdrant_health, "api_keys": api_keys, "new_key": None,
-        "prompt_saved": True,
-    })
+    return RedirectResponse("/settings/llm?saved=true", status_code=303)
 
 
 @router.get("/settings/llm/models", response_class=JSONResponse)
@@ -590,59 +872,52 @@ async def save_llm_settings(request: Request):
     config["llm"]["default_provider"] = "openai" if provider_mode == "oauth" else form.get("api_provider", "anthropic")
     config["llm"].setdefault("models", {})
 
-    # Presets per provider mode
+    # Save OAuth proxy config
+    oauth_base = ""
     if provider_mode == "oauth":
         oauth_base = form.get("oauth_base", "http://127.0.0.1:10531/v1")
-        for role in ("classification", "extraction", "search", "analysis"):
-            model = form.get(f"model_{role}", "")
-            if model:
-                config["llm"]["models"][role] = {
-                    "model": f"openai/{model}",
-                    "api_base": oauth_base,
-                    "api_key": "dummy",
-                    "max_tokens": int(form.get(f"max_tokens_{role}", 1024)),
-                    "temperature": float(form.get(f"temperature_{role}", 0.1)),
-                }
-    else:
-        # API mode — use provider prefix, no api_base
-        provider = form.get("api_provider", "anthropic")
-        for role in ("classification", "extraction", "search", "analysis"):
-            model = form.get(f"model_{role}", "")
-            if model:
-                entry = {
-                    "model": model if "/" in model else f"{provider}/{model}",
-                    "max_tokens": int(form.get(f"max_tokens_{role}", 1024)),
-                    "temperature": float(form.get(f"temperature_{role}", 0.1)),
-                }
-                config["llm"]["models"][role] = entry
+        config["llm"]["oauth_proxy_url"] = oauth_base
+
+        oauth_client_id = form.get("oauth_client_id", "").strip()
+        if oauth_client_id:
+            config["llm"]["oauth_client_id"] = oauth_client_id
+
+        # OAuth secret → encrypted in DB
+        oauth_secret = form.get("oauth_client_secret", "").strip()
+        if oauth_secret:
+            db = _get("db")
+            from app.config import get_settings as _gs3
+            session_secret = _gs3().web.session_secret
+            if db and session_secret:
+                from app.utils.crypto import encrypt as _enc
+                await db.set_secret("OAUTH_CLIENT_SECRET", _enc(oauth_secret, session_secret))
+
+    # Save per-role model config
+    for role in ("classification", "extraction", "search", "analysis"):
+        model = form.get(f"{role}_model", "")
+        if not model:
+            continue
+        entry = {
+            "model": f"openai/{model}" if provider_mode == "oauth" and "/" not in model else model,
+            "max_tokens": int(form.get(f"{role}_max_tokens", 1024)),
+            "temperature": float(form.get(f"{role}_temperature", 0.1)),
+        }
+        if provider_mode == "oauth":
+            entry["api_base"] = oauth_base
+            entry["api_key"] = "dummy"
+        config["llm"]["models"][role] = entry
 
     config_path.write_text(yaml_lib.dump(config, default_flow_style=False, allow_unicode=True, sort_keys=False))
-    settings = reload_settings()
-
-    db = _get("db")
-    vs = _get("vector_store")
-    qdrant_health = await vs.health_check() if vs else {}
-    api_keys = await db.list_api_keys() if db else []
-    return templates.TemplateResponse("settings.html", {
-        "request": request, "page": "settings", "settings": settings,
-        "qdrant_health": qdrant_health, "api_keys": api_keys, "new_key": None,
-        "llm_saved": True,
-    })
+    reload_settings()
+    return RedirectResponse("/settings/llm?saved=true", status_code=303)
 
 
-@router.post("/settings/api-keys/create", response_class=HTMLResponse)
+@router.post("/settings/api-keys/create")
 async def create_api_key(request: Request, name: str = Form("default"), mode: str = Form("lite")):
-    from app.config import get_settings
-    settings = get_settings()
     db = _get("db")
-    vs = _get("vector_store")
     new_key = await db.create_api_key(name, mode=mode) if db else ""
-    qdrant_health = await vs.health_check() if vs else {}
-    api_keys = await db.list_api_keys() if db else []
-    return templates.TemplateResponse("settings.html", {
-        "request": request, "page": "settings", "settings": settings,
-        "qdrant_health": qdrant_health, "api_keys": api_keys, "new_key": new_key,
-    })
+    # Pass new_key via query param so it shows on the redirected page
+    return RedirectResponse(f"/settings/keys?new_key={new_key}", status_code=303)
 
 
 @router.post("/settings/api-keys/{key}/delete")
@@ -650,7 +925,266 @@ async def delete_api_key(key: str):
     db = _get("db")
     if db:
         await db.delete_api_key(key)
-    return RedirectResponse("/settings", status_code=303)
+    return RedirectResponse("/settings/keys", status_code=303)
+
+
+
+_SESSION_KEY_PATH = Path("data/.session_key")
+
+
+def _save_session_key(key: bytes):
+    """Save encryption key to temp file so it survives uvicorn reload.
+    The key is encrypted with Fernet using the web session secret as password."""
+    from cryptography.fernet import Fernet
+    import hashlib, base64
+    from app.config import get_settings
+    secret = get_settings().web.session_secret or "fallback-secret-key"
+    fernet_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+    f = Fernet(fernet_key)
+    _SESSION_KEY_PATH.write_bytes(f.encrypt(key))
+    _SESSION_KEY_PATH.chmod(0o600)
+
+
+def load_session_key() -> bytes | None:
+    """Load encryption key from session file if it exists."""
+    if not _SESSION_KEY_PATH.exists():
+        return None
+    from cryptography.fernet import Fernet, InvalidToken
+    import hashlib, base64
+    from app.config import get_settings
+    secret = get_settings().web.session_secret or "fallback-secret-key"
+    fernet_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+    try:
+        f = Fernet(fernet_key)
+        return f.decrypt(_SESSION_KEY_PATH.read_bytes())
+    except (InvalidToken, Exception):
+        _SESSION_KEY_PATH.unlink(missing_ok=True)
+        return None
+
+
+def clear_session_key():
+    """Remove session key file (on lock)."""
+    _SESSION_KEY_PATH.unlink(missing_ok=True)
+
+
+def _apply_encryption_key(key: bytes):
+    """Apply encryption key to all running storage layers (DB, files, vectors)."""
+    db = _get("db")
+    if db:
+        db._enc_key = key
+    fs = _get("file_storage")
+    if fs:
+        for backend in fs._backends.values():
+            if hasattr(backend, "_encryption_key"):
+                backend._encryption_key = key
+    vs = _get("vector_store")
+    if vs:
+        vs._strip_text = True
+    # Update vault encryption key
+    vault = _get("note_vault")
+    if vault:
+        vault._enc_key = key
+    # Also update via legacy note_agent.vault compat
+    note_agent = _get("note_agent")
+    if note_agent and hasattr(note_agent, "vault") and note_agent.vault:
+        note_agent.vault._enc_key = key
+
+
+# ── Encryption Settings ──────────────────────────────────────────────────
+
+@router.post("/settings/encryption/setup")
+@limiter.limit("3/minute")
+async def encryption_setup(
+    request: Request,
+    master_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    """Set up master password for encryption (first time)."""
+    from app.utils.crypto import (
+        is_encryption_configured,
+        setup_master_password,
+        generate_recovery_key,
+    )
+
+    if is_encryption_configured():
+        return RedirectResponse("/settings/security?error=already_configured", status_code=303)
+
+    if master_password != confirm_password:
+        return RedirectResponse("/settings/security?error=passwords_mismatch", status_code=303)
+
+    if len(master_password) < 8:
+        return RedirectResponse("/settings/security?error=password_too_short", status_code=303)
+
+    # Load optional key file
+    key_file_data = None
+    import os
+    kf_path = os.environ.get("KEY_FILE", "")
+    if kf_path and Path(kf_path).exists():
+        key_file_data = Path(kf_path).read_bytes()
+
+    key = setup_master_password(master_password, "data/encryption.key", key_file_data)
+
+    # Generate recovery key
+    recovery = generate_recovery_key(key)
+    recovery_file = Path("data/RECOVERY_KEY.txt")
+    recovery_file.parent.mkdir(parents=True, exist_ok=True)
+    recovery_file.write_text(
+        "КЛЮЧ ВОССТАНОВЛЕНИЯ (RECOVERY KEY)\n"
+        "====================================\n"
+        f"{recovery}\n\n"
+        "Сохраните этот ключ в менеджере паролей и УДАЛИТЕ этот файл.\n"
+        "Без этого ключа расшифровать данные НЕВОЗМОЖНО.\n"
+    )
+
+    # Store key in app state and apply to ALL storage layers
+    from app.main import _state
+    _state["_encryption_key"] = key
+    _apply_encryption_key(key)
+
+    return RedirectResponse("/settings/security?saved=true", status_code=303)
+
+
+@router.post("/settings/encryption/unlock")
+@limiter.limit("5/minute")
+async def encryption_unlock(
+    request: Request,
+    master_password: str = Form(...),
+):
+    """Unlock encryption with master password."""
+    from app.utils.crypto import is_encryption_configured, unlock_with_password
+    import os
+
+    if not is_encryption_configured():
+        return RedirectResponse("/settings/security?error=not_configured", status_code=303)
+
+    key_file_data = None
+    kf_path = os.environ.get("KEY_FILE", "")
+    if kf_path and Path(kf_path).exists():
+        key_file_data = Path(kf_path).read_bytes()
+
+    try:
+        key = unlock_with_password(master_password, "data/encryption.key", key_file_data)
+    except ValueError as e:
+        return RedirectResponse(f"/settings?error={e}", status_code=303)
+
+    # Apply key to ALL storage layers
+    from app.main import _state
+    _state["_encryption_key"] = key
+    _apply_encryption_key(key)
+
+    # Persist session key so it survives uvicorn reload
+    _save_session_key(key)
+
+    return RedirectResponse("/settings/security?saved=true", status_code=303)
+
+
+@router.post("/settings/encryption/lock")
+async def encryption_lock(request: Request):
+    """Lock encryption — clear key from memory and session."""
+    from app.main import _state
+    _state["_encryption_key"] = None
+    db = _get("db")
+    if db:
+        db._enc_key = None
+    fs = _get("file_storage")
+    if fs:
+        for backend in fs._backends.values():
+            if hasattr(backend, "_encryption_key"):
+                backend._encryption_key = None
+    clear_session_key()
+    return RedirectResponse("/settings/security?locked=true", status_code=303)
+
+
+@router.get("/settings/encryption/recovery")
+async def encryption_recovery(request: Request):
+    """Download recovery key if file exists."""
+    recovery_file = Path("data/RECOVERY_KEY.txt")
+    if not recovery_file.exists():
+        return RedirectResponse("/settings/security?error=no_recovery", status_code=303)
+    from starlette.responses import Response
+    return Response(
+        content=recovery_file.read_text(),
+        media_type="text/plain",
+        headers={"Content-Disposition": 'attachment; filename="RECOVERY_KEY.txt"'},
+    )
+
+
+# ── Storage Backend Settings ─────────────────────────────────────────────
+
+@router.post("/settings/storage/save")
+async def storage_save(request: Request):
+    """Save storage backend configuration to config.yaml."""
+    import yaml as yaml_lib
+    form = await request.form()
+    backend = form.get("backend", "local")
+
+    config_path = Path("config.yaml")
+    config = yaml_lib.safe_load(config_path.read_text()) if config_path.exists() else {}
+    config.setdefault("storage", {})
+    config["storage"]["backend"] = backend
+
+    if backend == "s3":
+        config["storage"]["s3"] = {
+            "bucket": form.get("s3_bucket", ""),
+            "region": form.get("s3_region", "us-east-1"),
+            "prefix": form.get("s3_prefix", "fileagent"),
+            "endpoint_url": form.get("s3_endpoint", ""),
+            "access_key_id": form.get("s3_access_key", ""),
+            "secret_access_key": form.get("s3_secret_key", ""),
+        }
+    elif backend == "gdrive":
+        config["storage"]["gdrive"] = {
+            "credentials_json": form.get("gdrive_credentials", ""),
+            "folder_id": form.get("gdrive_folder_id", ""),
+        }
+
+    config_path.write_text(yaml_lib.dump(config, default_flow_style=False, allow_unicode=True))
+    return RedirectResponse("/settings/storage?saved=true", status_code=303)
+
+
+@router.post("/settings/storage/test")
+async def storage_test(request: Request):
+    """Test connection to selected storage backend."""
+    form = await request.form()
+    backend = form.get("backend", "local")
+
+    if backend == "local":
+        return HTMLResponse('<span class="text-ok-text text-xs">Local disk OK</span>')
+
+    if backend == "s3":
+        try:
+            from app.storage.backends.s3 import S3Backend
+            s3 = S3Backend(
+                bucket=form.get("s3_bucket", ""),
+                region=form.get("s3_region", "us-east-1"),
+                access_key_id=form.get("s3_access_key", ""),
+                secret_access_key=form.get("s3_secret_key", ""),
+                endpoint_url=form.get("s3_endpoint", ""),
+            )
+            result = await s3.test_connection()
+            if result["status"] == "ok":
+                return HTMLResponse(f'<span class="text-ok-text text-xs">S3 OK: {result["bucket"]}</span>')
+            return HTMLResponse(f'<span class="text-err-text text-xs">Error: {result["error"]}</span>')
+        except Exception as e:
+            return HTMLResponse(f'<span class="text-err-text text-xs">Error: {e}</span>')
+
+    if backend == "gdrive":
+        try:
+            from app.storage.backends.gdrive import GDriveBackend
+            gd = GDriveBackend(
+                credentials_json=form.get("gdrive_credentials", ""),
+                folder_id=form.get("gdrive_folder_id", ""),
+            )
+            result = await gd.test_connection()
+            if result["status"] == "ok":
+                return HTMLResponse(f'<span class="text-ok-text text-xs">GDrive OK: {result["folder"]}</span>')
+            return HTMLResponse(f'<span class="text-err-text text-xs">Error: {result["error"]}</span>')
+        except Exception as e:
+            return HTMLResponse(f'<span class="text-err-text text-xs">Error: {e}</span>')
+
+    return HTMLResponse('<span class="text-txt-3 text-xs">Unknown backend</span>')
+
+
 
 
 @router.get("/folders", response_class=HTMLResponse)
@@ -736,6 +1270,207 @@ async def reminders_page(request: Request):
             r["document_type"] = ""
     return templates.TemplateResponse("reminders.html", {
         "request": request, "page": "reminders", "reminders": reminders,
+    })
+
+
+# ── Notes ──────────────────────────────────────────────────────────────────
+
+@router.get("/notes", response_class=HTMLResponse)
+async def notes_page(request: Request, category: str = ""):
+    from datetime import datetime
+    db = _get("db")
+    if not db:
+        return templates.TemplateResponse("notes_dashboard.html", {
+            "request": request, "page": "notes", "notes": [],
+            "today": "", "today_data": {}, "correlations": [],
+            "categories": [], "current_category": "",
+        })
+
+    notes = await db.list_notes(limit=100, category=category)
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Today's summary
+    from app.notes.analytics import NoteAnalytics
+    analytics = NoteAnalytics(db)
+    today_data = await analytics.get_daily_summary_data(today)
+    correlations = await analytics.get_all_correlations(days=60)
+    cat_dist = await db.get_category_distribution(days=30)
+    categories = list(cat_dist.keys())
+
+    return templates.TemplateResponse("notes_dashboard.html", {
+        "request": request, "page": "notes", "notes": notes,
+        "today": today, "today_data": today_data,
+        "correlations": correlations[:5],
+        "categories": categories, "current_category": category,
+    })
+
+
+@router.post("/notes/create")
+async def notes_create(request: Request, content: str = Form(...), title: str = Form("")):
+    capture = _get("note_capture")
+    if capture and content.strip():
+        await capture.capture(content.strip(), source="web", title=title.strip())
+    elif content.strip():
+        db = _get("db")
+        if db:
+            await db.save_note(content=content.strip(), title=title.strip(), source="web")
+    return RedirectResponse("/notes", status_code=303)
+
+
+@router.post("/notes/{note_id}/delete")
+async def notes_delete(request: Request, note_id: int):
+    db = _get("db")
+    if db:
+        await db.delete_note(note_id)
+    return RedirectResponse("/notes", status_code=303)
+
+
+@router.post("/notes/{note_id}/reprocess")
+async def notes_reprocess(request: Request, note_id: int):
+    """Enqueue note for re-enrichment. Don't change status here — processor does it."""
+    capture = _get("note_capture")
+    if capture:
+        await capture.enqueue_enrichment(note_id)
+    return RedirectResponse("/notes", status_code=303)
+
+
+@router.post("/notes/{note_id}/approve")
+async def notes_approve(request: Request, note_id: int):
+    """Approve a needs_review note → enriched."""
+    db = _get("db")
+    if db:
+        await db.set_note_status(note_id, "enriched")
+    return RedirectResponse(f"/notes/{note_id}", status_code=303)
+
+
+@router.post("/notes/{note_id}/archive")
+async def notes_archive(request: Request, note_id: int):
+    db = _get("db")
+    if db:
+        await db.set_note_status(note_id, "archived")
+    return RedirectResponse("/notes", status_code=303)
+
+
+# ── Note Chart Partials ───────────────────────────────────────────────────
+
+@router.get("/notes/review", response_class=HTMLResponse)
+async def notes_review(request: Request):
+    """Review queue — needs_review + failed notes."""
+    db = _get("db")
+    if not db:
+        return templates.TemplateResponse("notes_review.html", {
+            "request": request, "page": "notes", "notes": [],
+        })
+    review = await db.get_notes_by_status("needs_review", limit=50)
+    failed = await db.get_notes_by_status("failed", limit=50)
+    notes = review + failed
+    return templates.TemplateResponse("notes_review.html", {
+        "request": request, "page": "notes", "notes": notes,
+    })
+
+
+@router.get("/notes/{note_id}", response_class=HTMLResponse)
+async def note_detail(request: Request, note_id: int):
+    """Note detail page — raw text, enrichment, entities, facts, tasks, relations."""
+    db = _get("db")
+    if not db:
+        return RedirectResponse("/notes", status_code=303)
+
+    note = await db.get_note(note_id)
+    if not note:
+        return RedirectResponse("/notes", status_code=303)
+
+    enrichment = await db.get_latest_enrichment(note_id)
+    entities = await db.get_entities_by_note(note_id)
+    facts = await db.get_facts_by_note(note_id)
+    tasks = await db.get_tasks_by_note(note_id)
+    relations = await db.get_note_relations_v2(note_id)
+
+    return templates.TemplateResponse("note_detail.html", {
+        "request": request, "page": "notes",
+        "note": note, "enrichment": enrichment,
+        "entities": entities, "facts": facts,
+        "tasks": tasks, "relations": relations,
+    })
+
+
+@router.post("/notes/tasks/{task_id}/toggle")
+async def toggle_task(request: Request, task_id: int):
+    """Toggle task status between open and done."""
+    db = _get("db")
+    if db:
+        cursor = await db.db.execute("SELECT status, note_id FROM note_tasks WHERE id=?", (task_id,))
+        row = await cursor.fetchone()
+        if row:
+            new_status = "done" if row[0] == "open" else "open"
+            await db.update_task_status(task_id, new_status)
+            return RedirectResponse(f"/notes/{row[1]}", status_code=303)
+    return RedirectResponse("/notes", status_code=303)
+
+
+@router.get("/partials/note-mood-chart", response_class=HTMLResponse)
+async def note_mood_chart(request: Request):
+    db = _get("db")
+    from app.notes.analytics import NoteAnalytics
+    data = await NoteAnalytics(db).get_mood_trend(30) if db else []
+    max_val = 10  # mood is always 1-10
+    return templates.TemplateResponse("partials/note_charts.html", {
+        "request": request, "data": data, "max_val": max_val,
+        "bar_color": "progress-purple", "unit": "",
+    })
+
+
+@router.get("/partials/note-calories-chart", response_class=HTMLResponse)
+async def note_calories_chart(request: Request):
+    db = _get("db")
+    from app.notes.analytics import NoteAnalytics
+    data = await NoteAnalytics(db).get_calorie_trend(30) if db else []
+    max_val = max((d.get("total", 0) for d in data), default=2500) or 2500
+    # Use total for calories (sum per day)
+    for d in data:
+        d["avg"] = d.get("total", d.get("avg", 0))
+    return templates.TemplateResponse("partials/note_charts.html", {
+        "request": request, "data": data, "max_val": max_val,
+        "bar_color": "progress-orange", "unit": "",
+    })
+
+
+@router.get("/partials/note-weight-chart", response_class=HTMLResponse)
+async def note_weight_chart(request: Request):
+    db = _get("db")
+    from app.notes.analytics import NoteAnalytics
+    data = await NoteAnalytics(db).get_weight_trend(90) if db else []
+    max_val = max((d.get("avg", 0) for d in data), default=100) or 100
+    return templates.TemplateResponse("partials/note_charts.html", {
+        "request": request, "data": data, "max_val": max_val,
+        "bar_color": "progress-green", "unit": "кг",
+    })
+
+
+@router.get("/partials/note-category-dist", response_class=HTMLResponse)
+async def note_category_dist(request: Request):
+    db = _get("db")
+    distribution = await db.get_category_distribution(30) if db else {}
+    total = sum(distribution.values()) if distribution else 0
+    return templates.TemplateResponse("partials/note_category_dist.html", {
+        "request": request, "distribution": distribution, "total": total,
+    })
+
+
+@router.get("/partials/note-search", response_class=HTMLResponse)
+async def note_search_partial(request: Request, q: str = ""):
+    db = _get("db")
+    notes = []
+    if db and q.strip():
+        try:
+            notes = await db.search_notes(q.strip(), limit=20)
+        except Exception:
+            notes = await db.list_notes(limit=20)
+    elif db:
+        notes = await db.list_notes(limit=50)
+    # Return just the notes list HTML
+    return templates.TemplateResponse("partials/note_list.html", {
+        "request": request, "notes": notes,
     })
 
 
@@ -841,11 +1576,10 @@ async def duplicates_resolve(request: Request):
             except Exception as e:
                 log.warning(f"Failed to delete vectors for {fid}: {e}")
         # Delete from disk
-        if file and file.get("stored_path"):
+        fs = _get("file_storage")
+        if file and file.get("stored_path") and fs:
             try:
-                p = Path(file["stored_path"])
-                if p.exists():
-                    p.unlink()
+                await fs.delete(file["stored_path"])
             except Exception as e:
                 log.warning(f"Failed to delete file from disk: {e}")
         # Delete from DB
