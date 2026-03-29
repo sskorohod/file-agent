@@ -1,0 +1,38 @@
+{# Calendar Heatmap — activity rhythm visualization
+   Expects: cells (list of {date, count, weekday, week}), max_count (int), weeks (int) #}
+{% if not cells %}
+<p class="text-xs text-txt-3 text-center py-4">Недостаточно данных</p>
+{% else %}
+{% set day_labels = ['Пн', '', 'Ср', '', 'Пт', '', ''] %}
+
+<div class="overflow-x-auto scrollbar-hide">
+  <svg viewBox="0 0 {{ (weeks + 1) * 14 + 20 }} {{ 7 * 14 + 20 }}" class="w-full" style="min-width: {{ (weeks + 1) * 14 + 20 }}px; max-height: 130px;" preserveAspectRatio="xMidYMid meet">
+    {# Day labels #}
+    {% for i in range(7) %}
+      {% if day_labels[i] %}
+      <text x="8" y="{{ i * 14 + 18 }}" text-anchor="end" class="chart-label" style="font-size: 8px;">{{ day_labels[i] }}</text>
+      {% endif %}
+    {% endfor %}
+
+    {# Cells #}
+    {% for cell in cells %}
+      {% set opacity = (cell.count / max_count * 0.85 + 0.15)|round(2) if cell.count > 0 else 0.04 %}
+      {% set x = 18 + cell.week * 14 %}
+      {% set y = 8 + cell.weekday * 14 %}
+      <g class="chart-point">
+        <rect x="{{ x }}" y="{{ y }}" width="11" height="11" rx="2.5"
+              fill="#7c3aed" opacity="{{ opacity }}"
+              style="cursor: pointer;"/>
+        {# Tooltip #}
+        <g class="chart-tooltip">
+          {% set tx = x + 5 %}
+          {% set ty = y - 6 %}
+          {% if ty < 5 %}{% set ty = y + 20 %}{% endif %}
+          <rect x="{{ tx - 30 }}" y="{{ ty - 9 }}" width="60" height="18" rx="4" fill="#232329" stroke="#3f3f46" stroke-width="0.5"/>
+          <text x="{{ tx }}" y="{{ ty + 3 }}" text-anchor="middle" fill="#fafafa" font-size="8" font-family="Inter">{{ cell.date[5:] }} · {{ cell.count }}</text>
+        </g>
+      </g>
+    {% endfor %}
+  </svg>
+</div>
+{% endif %}

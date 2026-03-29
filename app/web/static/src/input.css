@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base ── */
+body { background: #09090b; color: #fafafa; font-family: Inter, system-ui, -apple-system, sans-serif; margin: 0; }
+
+/* ── Utility classes ── */
+.glass-card { background: rgba(18,18,18,0.7); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.05); border-radius: 0.75rem; }
+.progress-purple { background: linear-gradient(90deg, #6366f1, #a855f7); }
+.progress-green { background: linear-gradient(90deg, #10b981, #22c55e); }
+.progress-blue { background: linear-gradient(90deg, #3b82f6, #06b6d4); }
+.progress-orange { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.glow-red { box-shadow: 0 0 8px rgba(239,68,68,0.8); }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2d2d2d; border-radius: 10px; }
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* HTMX indicator */
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline-flex; }
+
+/* ── SVG Charts ── */
+.chart-line { stroke-linecap: round; stroke-linejoin: round; }
+.chart-area { opacity: 0.12; }
+.chart-grid { stroke: #27272a; stroke-width: 0.5; }
+.chart-label { fill: #71717a; font-size: 9px; font-family: Inter, sans-serif; }
+.chart-point circle.dot { transition: r 0.15s ease; }
+.chart-point:hover circle.dot { r: 5; }
+.chart-tooltip { opacity: 0; transition: opacity 0.15s; pointer-events: none; }
+.chart-point:hover .chart-tooltip { opacity: 1; }
+.target-zone { opacity: 0.06; }
+@keyframes chartDraw { from { stroke-dashoffset: 2000; } to { stroke-dashoffset: 0; } }
+.chart-animate { stroke-dasharray: 2000; animation: chartDraw 1.5s ease-out forwards; }
+.donut-seg { transition: stroke-width 0.2s, filter 0.2s; cursor: pointer; }
+.donut-seg:hover { stroke-width: 24; filter: brightness(1.2); }
+
+/* ── Life OS surfaces ── */
+.hero-gradient { background: linear-gradient(135deg, rgba(124,58,237,0.08) 0%, rgba(21,21,24,0.9) 50%, rgba(34,197,94,0.05) 100%); }
+.glass-surface { background: rgba(21,21,24,0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.06); }
+@keyframes staggerIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.stagger-1 { animation: staggerIn .4s ease-out .05s both; }
+.stagger-2 { animation: staggerIn .4s ease-out .1s both; }
+.stagger-3 { animation: staggerIn .4s ease-out .15s both; }
+.stagger-4 { animation: staggerIn .4s ease-out .2s both; }
+
+/* ── Component layer ── */
+@layer components {
+  .card { @apply bg-surface rounded-xl border border-border p-4 sm:p-5 }
+  .card-header { @apply text-xs font-semibold text-txt-3 uppercase tracking-wider mb-3 sm:mb-4 }
+  .badge { @apply inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold }
+  .badge-ok { @apply bg-ok-bg text-ok-text }
+  .badge-err { @apply bg-err-bg text-err-text }
+  .badge-warn { @apply bg-warn-bg text-warn-text }
+  .badge-info { @apply bg-info-bg text-info-text }
+  .badge-accent { @apply bg-accent-bg text-accent-2 }
+  .btn { @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 sm:py-2 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed active:scale-[.97] }
+  .btn-primary { @apply btn bg-accent text-white hover:bg-accent-hover }
+  .btn-secondary { @apply btn bg-surface-2 text-txt border border-border hover:bg-surface-3 hover:border-border-2 }
+  .btn-ghost { @apply btn bg-transparent text-txt-2 hover:bg-surface-2 hover:text-txt }
+  .btn-danger { @apply btn bg-err text-white hover:bg-red-700 }
+  .btn-sm { @apply text-xs px-3 py-1.5 }
+  .input { @apply w-full bg-surface-2 border border-border rounded-lg px-3.5 py-3 sm:py-2.5 text-base sm:text-sm text-txt placeholder:text-txt-3 focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-colors }
+  .input-sm { @apply input text-xs px-3 py-2 }
+  .stat-value { @apply text-xl sm:text-2xl font-bold text-txt }
+  .nav-link { @apply flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-txt-2 hover:bg-surface-2 hover:text-txt transition-colors }
+  .nav-link-active { @apply bg-accent-bg text-accent-2 font-medium }
+  .table-header { @apply px-3 sm:px-4 py-2.5 sm:py-3 text-left text-[11px] font-semibold text-txt-3 uppercase tracking-wider whitespace-nowrap }
+  .table-cell { @apply px-3 sm:px-4 py-2.5 sm:py-3 text-sm text-txt-2 }
+  .table-row { @apply border-b border-border hover:bg-surface-hover transition-colors }
+  .table-scroll { @apply overflow-x-auto -mx-4 sm:mx-0 px-4 sm:px-0 }
+  .table-scroll::-webkit-scrollbar { @apply h-0 }
+  .touch-target { @apply min-h-[44px] min-w-[44px] }
+}

@@ -1,17 +1,138 @@
-{# Generic chart partial for note metrics — used by mood, calories, weight endpoints #}
-{% if not data %}
-<p class="text-xs text-txt-3">Нет данных</p>
-{% else %}
-<div class="space-y-1">
-  {% for point in data[-14:] %}
-  <div class="flex items-center gap-2 text-xs">
-    <span class="text-txt-3 w-16 shrink-0">{{ point.date[5:] }}</span>
-    <div class="flex-1 bg-surface-2 rounded-full h-4 overflow-hidden">
-      {% set pct = (point.avg / max_val * 100) if max_val else 0 %}
-      <div class="h-full rounded-full {{ bar_color }}" style="width: {{ pct|round }}%"></div>
-    </div>
-    <span class="text-txt-2 w-12 text-right">{{ '%.1f'|format(point.avg) }}{{ unit }}</span>
-  </div>
-  {% endfor %}
+{# SVG Area/Line Chart — SaaS-grade visualization
+   Expects: data (list of dicts with .date, .avg), max_val, min_val,
+            chart_color, chart_color_light, chart_label,
+            target_min, target_max, empty_mode, value_key #}
+{% if empty_mode == 'empty' or not data %}
+<div class="flex flex-col items-center justify-center py-8 text-center">
+  <svg class="w-8 h-8 text-txt-3 mb-2 opacity-40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18"/><path d="M7 16l4-4 4 4 5-5"/></svg>
+  <p class="text-xs text-txt-3">Нет данных</p>
+  <p class="text-[10px] text-txt-3 mt-1 opacity-60">Отправьте заметку в Telegram</p>
 </div>
+{% elif empty_mode == 'single' %}
+{# Single data point — centered dot #}
+{% set val = data[0].avg if data[0].avg is defined else data[0].get(value_key|default('avg'), 0) %}
+<div class="flex items-center justify-center py-6">
+  <div class="text-center">
+    <p class="text-2xl font-bold" style="color: {{ chart_color }}">{{ '%.1f'|format(val) }}</p>
+    <p class="text-[10px] text-txt-3 mt-1">{{ data[0].date }} · {{ chart_label }}</p>
+  </div>
+</div>
+{% else %}
+{# ── Compute coordinates ── #}
+{% set vk = value_key|default('avg') %}
+{% set n = data|length %}
+{% set range_val = (max_val - min_val) if max_val != min_val else 1 %}
+{% set W = 400 %}
+{% set H = 160 %}
+{% set PAD_L = 40 %}
+{% set PAD_R = 10 %}
+{% set PAD_T = 15 %}
+{% set PAD_B = 25 %}
+{% set CW = W - PAD_L - PAD_R %}
+{% set CH = H - PAD_T - PAD_B %}
+
+{# Build coordinate arrays #}
+{% set coords = [] %}
+{% for p in data %}
+  {% set val = p.get(vk, p.get('avg', 0)) or 0 %}
+  {% set x = PAD_L + (loop.index0 * CW / (n - 1)) if n > 1 else PAD_L + CW / 2 %}
+  {% set y = PAD_T + CH - ((val - min_val) / range_val * CH) %}
+  {% set _ = coords.append({"x": x|round(1), "y": y|round(1), "val": val, "date": p.date}) %}
+{% endfor %}
+
+{# Build smooth path (cubic bezier) #}
+{% set tension = 0.3 %}
+{% set line_path = namespace(d="M " ~ coords[0].x ~ "," ~ coords[0].y) %}
+{% for i in range(1, coords|length) %}
+  {% set prev = coords[i-1] %}
+  {% set curr = coords[i] %}
+  {% set dx = curr.x - prev.x %}
+  {% set cp1x = (prev.x + dx * tension)|round(1) %}
+  {% set cp2x = (curr.x - dx * tension)|round(1) %}
+  {% set line_path.d = line_path.d ~ " C " ~ cp1x ~ "," ~ prev.y ~ " " ~ cp2x ~ "," ~ curr.y ~ " " ~ curr.x ~ "," ~ curr.y %}
+{% endfor %}
+
+{# Area path (close to bottom) #}
+{% set area_path = line_path.d ~ " L " ~ coords[-1].x ~ "," ~ (PAD_T + CH) ~ " L " ~ coords[0].x ~ "," ~ (PAD_T + CH) ~ " Z" %}
+
+<svg viewBox="0 0 {{ W }} {{ H }}" class="w-full" preserveAspectRatio="xMidYMid meet" style="max-height: 180px;">
+  <defs>
+    <linearGradient id="area-{{ chart_color[1:] }}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="{{ chart_color }}" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="{{ chart_color }}" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  {# ── Target zone band ── #}
+  {% if target_min is not none and target_max is not none %}
+  {% set tz_y1 = PAD_T + CH - ((target_max - min_val) / range_val * CH) %}
+  {% set tz_y2 = PAD_T + CH - ((target_min - min_val) / range_val * CH) %}
+  <rect x="{{ PAD_L }}" y="{{ tz_y1|round }}" width="{{ CW }}" height="{{ (tz_y2 - tz_y1)|round|abs }}"
+        fill="{{ chart_color }}" class="target-zone" rx="2"/>
+  {% endif %}
+
+  {# ── Grid lines ── #}
+  {% for i in range(5) %}
+    {% set gy = PAD_T + (i * CH / 4) %}
+    {% set gval = max_val - (i * (max_val - min_val) / 4) %}
+    <line x1="{{ PAD_L }}" y1="{{ gy|round }}" x2="{{ W - PAD_R }}" y2="{{ gy|round }}" class="chart-grid"/>
+    <text x="{{ PAD_L - 4 }}" y="{{ gy|round + 3 }}" text-anchor="end" class="chart-label">
+      {{ '%g'|format(gval|round(1)) }}
+    </text>
+  {% endfor %}
+
+  {# ── X-axis labels ── #}
+  {% set label_step = (n / 6)|round|int if n > 6 else 1 %}
+  {% for c in coords %}
+    {% if loop.index0 % label_step == 0 or loop.last %}
+    <text x="{{ c.x }}" y="{{ H - 4 }}" text-anchor="middle" class="chart-label" style="font-size: 8px;">
+      {{ c.date[5:] }}
+    </text>
+    {% endif %}
+  {% endfor %}
+
+  {# ── Area fill ── #}
+  <path d="{{ area_path }}" fill="url(#area-{{ chart_color[1:] }})" class="chart-area" style="opacity: 0.15;"/>
+
+  {# ── Line ── #}
+  <path d="{{ line_path.d }}" fill="none" stroke="{{ chart_color }}" stroke-width="2"
+        class="chart-line chart-animate"/>
+
+  {# ── Data points with tooltips ── #}
+  {% for c in coords %}
+  <g class="chart-point">
+    {# Invisible hitbox #}
+    <circle cx="{{ c.x }}" cy="{{ c.y }}" r="12" fill="transparent" style="cursor: pointer;"/>
+    {# Visible dot #}
+    <circle cx="{{ c.x }}" cy="{{ c.y }}" r="{{ 4 if loop.last else 2.5 }}" fill="{{ chart_color }}" class="dot"
+            {% if loop.last %}style="filter: drop-shadow(0 0 4px {{ chart_color }});"{% endif %}/>
+    {# Tooltip #}
+    <g class="chart-tooltip">
+      {% set tx = c.x %}
+      {% set ty = c.y - 28 %}
+      {% if tx < 60 %}{% set tx = 60 %}{% endif %}
+      {% if tx > W - 60 %}{% set tx = W - 60 %}{% endif %}
+      {% if ty < 8 %}{% set ty = c.y + 20 %}{% endif %}
+      <rect x="{{ tx - 36 }}" y="{{ ty - 10 }}" width="72" height="22" rx="6"
+            fill="#232329" stroke="#3f3f46" stroke-width="0.5"/>
+      <text x="{{ tx }}" y="{{ ty + 4 }}" text-anchor="middle" fill="#fafafa" font-size="10" font-family="Inter, sans-serif">
+        {{ '%.1f'|format(c.val) }}{{ chart_label }} · {{ c.date[5:] }}
+      </text>
+    </g>
+  </g>
+  {% endfor %}
+
+  {# ── Min/Max labels ── #}
+  {% set vals = coords|map(attribute='val')|list %}
+  {% set min_idx = namespace(i=0, v=coords[0].val) %}
+  {% set max_idx = namespace(i=0, v=coords[0].val) %}
+  {% for c in coords %}
+    {% if c.val < min_idx.v %}{% set min_idx.i = loop.index0 %}{% set min_idx.v = c.val %}{% endif %}
+    {% if c.val > max_idx.v %}{% set max_idx.i = loop.index0 %}{% set max_idx.v = c.val %}{% endif %}
+  {% endfor %}
+  {% if max_idx.i != (coords|length - 1) and max_idx.v != min_idx.v %}
+  <text x="{{ coords[max_idx.i].x }}" y="{{ coords[max_idx.i].y - 8 }}" text-anchor="middle"
+        fill="{{ chart_color }}" font-size="8" font-family="Inter" opacity="0.7">{{ '%.1f'|format(max_idx.v) }}</text>
+  {% endif %}
+</svg>
 {% endif %}

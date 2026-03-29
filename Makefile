@@ -1,4 +1,4 @@
-.PHONY: install dev test lint clean
+.PHONY: install dev test lint clean css css-watch
 
 install:
 	pip install -r requirements.txt
@@ -16,6 +16,12 @@ lint:
 format:
 	ruff check --fix app/ tests/
 	ruff format app/ tests/
+
+css:
+	npx tailwindcss -i app/web/static/src/input.css -o app/web/static/css/styles.css --minify
+
+css-watch:
+	npx tailwindcss -i app/web/static/src/input.css -o app/web/static/css/styles.css --watch
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +

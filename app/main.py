@@ -903,19 +903,26 @@ class SecurityHeadersMiddleware:
 
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
+                # Skip CSP for file download responses (PDF viewer needs full permissions)
+                path = scope.get("path", "")
+                if "/download" in path:
+                    await send(message)
+                    return
                 headers = dict(message.get("headers", []))
                 extra = [
-                    (b"x-frame-options", b"DENY"),
+                    (b"x-frame-options", b"SAMEORIGIN"),
                     (b"x-content-type-options", b"nosniff"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
                     (b"content-security-policy",
                      b"default-src 'self'; "
-                     b"script-src 'self' https://cdn.tailwindcss.com https://unpkg.com 'unsafe-inline'; "
+                     b"script-src 'self' https://unpkg.com 'unsafe-inline' 'unsafe-eval'; "
                      b"style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; "
                      b"font-src 'self' https://fonts.gstatic.com; "
                      b"img-src 'self' data:; "
-                     b"connect-src 'self'"),
+                     b"connect-src 'self' https://unpkg.com; "
+                     b"frame-src 'self'; "
+                     b"object-src 'self'"),
                 ]
                 message["headers"] = list(message.get("headers", [])) + extra
             await send(message)
@@ -980,6 +987,12 @@ async def favicon():
 
 # Mount MCP server (both transports)
 from app.mcp_server import mcp
+# Static files (CSS, JS)
+from starlette.staticfiles import StaticFiles as _StaticFiles
+_static_dir = Path(__file__).parent / "web" / "static"
+if _static_dir.exists():
+    app.mount("/static", _StaticFiles(directory=str(_static_dir)), name="static")
+
 app.mount("/mcp/sse", mcp.sse_app())                # Legacy SSE transport
 app.mount("/mcp", mcp.streamable_http_app())         # Streamable HTTP (Codex, Claude Code)
 

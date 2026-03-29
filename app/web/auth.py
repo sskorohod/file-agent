@@ -9,7 +9,7 @@ from starlette.responses import RedirectResponse, Response
 # Exact paths that don't require auth
 _EXEMPT_EXACT = {"/health", "/login", "/telegram/webhook", "/favicon.ico"}
 # Prefixes that don't require auth (must end with /)
-_EXEMPT_PREFIXES = ("/api/v1/", "/mcp/", "/mcp")
+_EXEMPT_PREFIXES = ("/api/v1/", "/mcp/", "/mcp", "/static/")
 
 
 def _is_exempt(path: str) -> bool:

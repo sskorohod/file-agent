@@ -3,43 +3,21 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#09090b">
 <title>Login — FileAgent</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📁</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-tailwind.config = {
-  darkMode: 'class',
-  theme: {
-    extend: {
-      colors: {
-        bg: '#09090b',
-        surface: { DEFAULT: '#151518', 2: '#1c1c21' },
-        border: '#27272a',
-        txt: { DEFAULT: '#fafafa', 2: '#a1a1aa', 3: '#71717a' },
-        accent: { DEFAULT: '#7c3aed', hover: '#6d28d9' },
-        err: { DEFAULT: '#ef4444', bg: 'rgba(239,68,68,0.1)' },
-      },
-      fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
-      animation: {
-        'shake': 'shake 0.5s ease-in-out',
-        'fade-in': 'fadeIn 0.4s ease-out',
-      },
-      keyframes: {
-        shake: {
-          '0%, 100%': { transform: 'translateX(0)' },
-          '20%, 60%': { transform: 'translateX(-6px)' },
-          '40%, 80%': { transform: 'translateX(6px)' },
-        },
-        fadeIn: { '0%': { opacity: '0', transform: 'translateY(8px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
-      },
-    }
+<link rel="stylesheet" href="/static/css/styles.css">
+<style>
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20%, 60% { transform: translateX(-6px); }
+    40%, 80% { transform: translateX(6px); }
   }
-}
-</script>
+  .animate-shake { animation: shake 0.5s ease-in-out; }
+</style>
 </head>
 <body class="bg-bg font-sans antialiased min-h-screen flex items-center justify-center p-4">
 

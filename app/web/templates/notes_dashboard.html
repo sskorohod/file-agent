@@ -1,59 +1,136 @@
 {% extends "layout.html" %}
-{% block title %}Smart Notes — FileAgent{% endblock %}
+{% block title %}Life OS — FileAgent{% endblock %}
 {% block content %}
 
-<div class="flex items-center justify-between mb-4">
+{# ── Nav Bar ── #}
+<div class="flex items-center justify-between mb-5">
   <div>
-    <h1 class="text-lg sm:text-xl font-bold text-txt">Smart Notes</h1>
-    <p class="text-xs sm:text-sm text-txt-3 mt-0.5">{{ notes|length }} note{{ 's' if notes|length != 1 }}</p>
+    <h1 class="text-lg sm:text-xl font-bold text-txt">Life OS</h1>
+    <p class="text-xs text-txt-3 mt-0.5">{{ today }}</p>
   </div>
   <div class="flex gap-2">
-    <a href="/notes/graph" class="btn-secondary btn-sm touch-target" title="Knowledge Graph">Graph</a>
+    <a href="/notes/graph" class="btn-secondary btn-sm touch-target" title="Graph">Graph</a>
     <a href="/notes/habits" class="btn-secondary btn-sm touch-target" title="Habits">Habits</a>
-    <a href="/notes/export?format=json" class="btn-secondary btn-sm touch-target" title="Export JSON">Export</a>
+    <a href="/notes/export?format=json" class="btn-secondary btn-sm touch-target" title="Export">Export</a>
     <a href="/notes/review" class="btn-secondary btn-sm touch-target">Review</a>
     <button type="button" onclick="document.getElementById('new-note-dialog').showModal()"
             class="btn-primary btn-sm touch-target">
       <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-      <span class="hidden sm:inline">New note</span>
+      <span class="hidden sm:inline">New</span>
     </button>
   </div>
 </div>
 
-{# ── Today's Summary Card ── #}
-<div class="card !p-4 mb-4 bg-gradient-to-r from-accent-bg to-surface">
-  <h2 class="text-sm font-semibold text-txt mb-2">Сегодня ({{ today }})</h2>
-  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-    <div class="text-center">
-      <p class="text-2xl font-bold text-txt">{{ today_data.notes_count or 0 }}</p>
-      <p class="text-xs text-txt-3">заметок</p>
-    </div>
-    <div class="text-center">
-      {% set mood = today_data.metrics.get('mood_score', {}).get('avg') if today_data.metrics else None %}
-      <p class="text-2xl font-bold {% if mood and mood >= 7 %}text-ok-text{% elif mood and mood <= 4 %}text-err-text{% else %}text-txt{% endif %}">
-        {{ '%.1f'|format(mood) if mood else '—' }}
-      </p>
-      <p class="text-xs text-txt-3">настроение</p>
-    </div>
-    <div class="text-center">
-      {% set cal = today_data.metrics.get('calories', {}).get('total') if today_data.metrics else None %}
-      <p class="text-2xl font-bold text-txt">{{ '%d'|format(cal) if cal else '—' }}</p>
-      <p class="text-xs text-txt-3">kcal</p>
-    </div>
-    <div class="text-center">
-      {% set weight = today_data.metrics.get('weight_kg', {}).get('avg') if today_data.metrics else None %}
-      <p class="text-2xl font-bold text-txt">{{ '%.1f'|format(weight) if weight else '—' }}</p>
-      <p class="text-xs text-txt-3">кг</p>
-    </div>
+{# ════════════════ LAYER 1: STATE ════════════════ #}
+
+{% if dashboard.maturity == 'empty' %}
+{# ── Empty state: onboarding ── #}
+<div class="card hero-gradient !p-8 mb-6 text-center stagger-1">
+  <div class="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center mx-auto mb-4">
+    <svg class="w-6 h-6 text-accent-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
   </div>
+  <h2 class="text-xl font-bold text-txt mb-2">{{ dashboard.hero.state_label }}</h2>
+  <p class="text-sm text-txt-2 mb-4">{{ dashboard.hero.recommendation or 'Отправьте голосовую или текстовую заметку в Telegram' }}</p>
+  <button onclick="document.getElementById('new-note-dialog').showModal()" class="btn-primary">Создать первую заметку</button>
 </div>
 
-{# ── Food Today ── #}
-<div hx-get="/partials/food-today" hx-trigger="load" hx-swap="innerHTML"></div>
+{% else %}
+{# ── Hero State Panel ── #}
+{% set orb_colors = {"green": "bg-ok/80 shadow-[0_0_8px_rgba(34,197,94,0.4)]", "blue": "bg-info/80 shadow-[0_0_8px_rgba(59,130,246,0.4)]", "orange": "bg-warn/80 shadow-[0_0_8px_rgba(245,158,11,0.4)]", "red": "bg-err/80 shadow-[0_0_8px_rgba(239,68,68,0.4)]"} %}
+<div class="card hero-gradient !p-5 sm:!p-6 mb-4 stagger-1">
+  <div class="flex items-center gap-3 mb-1.5">
+    <div class="w-2.5 h-2.5 rounded-full {{ orb_colors.get(dashboard.hero.orb_tone, orb_colors.blue) }}"></div>
+    <h2 class="text-lg sm:text-xl font-bold text-txt">{{ dashboard.hero.state_label }}</h2>
+  </div>
+  {% if dashboard.hero.warning %}
+  <p class="text-sm text-warn-text mb-1">{{ dashboard.hero.warning }}</p>
+  {% endif %}
+  {% if dashboard.hero.recommendation %}
+  <p class="text-sm text-txt-2">{{ dashboard.hero.recommendation }}</p>
+  {% endif %}
+  {% if dashboard.hero.supporting_line %}
+  <p class="text-xs text-txt-3 mt-2">{{ dashboard.hero.supporting_line }}</p>
+  {% endif %}
+</div>
 
-{# ── Charts Section ── #}
-<div class="flex items-center justify-between mb-3">
-  <h3 class="text-sm font-semibold text-txt">Графики</h3>
+{# ── KPI Row ── #}
+{% if dashboard.kpis %}
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4 stagger-2">
+  {% set state_colors = {"On track": "text-ok-text", "Below baseline": "text-warn-text", "Needs attention": "text-err-text", "Stable": "text-txt-3"} %}
+  {% for kpi in dashboard.kpis %}
+  <div class="card !p-3.5 glass-surface">
+    <div class="flex items-baseline justify-between mb-0.5">
+      <span class="text-xl sm:text-2xl font-bold text-txt">
+        {% if kpi.current is not none %}{{ '%.1f'|format(kpi.current) }}{% else %}—{% endif %}
+      </span>
+      {% if kpi.delta_vs_yesterday is not none and kpi.current is not none %}
+      <span class="text-[11px] font-medium {% if kpi.trend_good %}text-ok-text{% elif not kpi.trend_good %}text-err-text{% else %}text-txt-3{% endif %}">
+        {% if kpi.trend_direction == 'up' %}&#9650;{% elif kpi.trend_direction == 'down' %}&#9660;{% else %}&#8594;{% endif %}
+        {{ '%+.1f'|format(kpi.delta_vs_yesterday) }}
+      </span>
+      {% endif %}
+    </div>
+    {% if kpi.current is not none and dashboard.maturity == 'mature' %}
+    <p class="text-[10px] font-medium {{ state_colors.get(kpi.state_label, 'text-txt-3') }} mb-1">{{ kpi.state_label }}{% if kpi.delta_vs_yesterday is not none %} <span class="font-normal text-txt-3">{{ kpi.delta_label }}</span>{% endif %}</p>
+    {% endif %}
+    {# Sparkline #}
+    {% if kpi.points and kpi.points|length > 1 and dashboard.maturity == 'mature' %}
+    {% set sp = kpi.points %}
+    {% set sp_min = sp|select('number')|min if sp|select('number')|list else 0 %}
+    {% set sp_max = sp|select('number')|max if sp|select('number')|list else 1 %}
+    {% set sp_range = sp_max - sp_min if sp_max != sp_min else 1 %}
+    {% set kpi_colors = {"mood": "#a78bfa", "sleep": "#4ade80", "calories": "#fb923c", "weight": "#60a5fa"} %}
+    {% set sp_color = kpi_colors.get(kpi.key, "#a78bfa") %}
+    <svg viewBox="0 0 60 18" class="w-full h-4 mt-1" preserveAspectRatio="none">
+      <defs><linearGradient id="sp-{{ kpi.key }}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="{{ sp_color }}" stop-opacity="0.2"/><stop offset="100%" stop-color="{{ sp_color }}" stop-opacity="0"/></linearGradient></defs>
+      {% set sp_pts = namespace(line="", area="") %}
+      {% for v in sp %}
+        {% if v is number %}
+          {% set sx = (loop.index0 * 60 / (sp|length - 1))|round(1) %}
+          {% set sy = (16 - ((v - sp_min) / sp_range * 14))|round(1) %}
+          {% if sp_pts.line %}{% set sp_pts.line = sp_pts.line ~ " L" ~ sx ~ "," ~ sy %}{% else %}{% set sp_pts.line = "M" ~ sx ~ "," ~ sy %}{% endif %}
+          {% if loop.last %}{% set sp_pts.area = sp_pts.line ~ " L" ~ sx ~ ",17 L0,17 Z" %}{% endif %}
+        {% endif %}
+      {% endfor %}
+      {% if sp_pts.area %}<path d="{{ sp_pts.area }}" fill="url(#sp-{{ kpi.key }})" />{% endif %}
+      {% if sp_pts.line %}<path d="{{ sp_pts.line }}" fill="none" stroke="{{ sp_color }}" stroke-width="1.5" class="chart-line"/>{% endif %}
+    </svg>
+    {% endif %}
+    <p class="text-[11px] text-txt-3 {% if kpi.points and dashboard.maturity == 'mature' %}mt-1{% else %}mt-2{% endif %}">{{ kpi.label }} <span class="text-txt-3/60">{{ kpi.unit }}</span></p>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ── Early mode: encouragement ── #}
+{% if dashboard.maturity == 'early' %}
+<div class="card !p-4 mb-4 border-accent/20 bg-accent-bg/30 stagger-3">
+  <p class="text-sm text-txt-2">Собираем данные для аналитики. Ещё {{ [7 - dashboard.days_active, 1]|max }} дней до полного dashboard.</p>
+  <p class="text-xs text-txt-3 mt-1">Продолжайте логировать настроение, сон и еду.</p>
+</div>
+{% endif %}
+
+{# ════════════════ LAYER 2: INSIGHTS ════════════════ #}
+
+{% if dashboard.insights and dashboard.maturity == 'mature' %}
+<div class="flex gap-3 mb-4 overflow-x-auto pb-1 scrollbar-hide stagger-3">
+  {% set insight_styles = {"warning": "border-l-2 border-warn bg-warn-bg/30", "win": "border-l-2 border-ok bg-ok-bg/30", "pattern": "border-l-2 border-info bg-info-bg/30", "action": "border-l-2 border-accent bg-accent-bg/30"} %}
+  {% set insight_icons = {"warning": "&#9888;&#65039;", "win": "&#127942;", "pattern": "&#128161;", "action": "&#9889;"} %}
+  {% for ins in dashboard.insights %}
+  <div class="shrink-0 w-56 sm:w-auto sm:flex-1 card !p-3.5 {{ insight_styles.get(ins.type, 'border-l-2 border-border') }}">
+    <p class="text-sm font-semibold text-txt mb-0.5">{{ ins.headline }}</p>
+    <p class="text-xs text-txt-3 mb-1">{{ ins.why }}</p>
+    <p class="text-xs text-txt-2">{{ ins.action }}</p>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ════════════════ LAYER 3: STORY (Domain Charts) ════════════════ #}
+
+{% if dashboard.maturity == 'mature' %}
+<div class="flex items-center justify-between mb-3 stagger-3">
+  <h3 class="text-sm font-semibold text-txt">Тренды</h3>
   <select id="chart-period" class="text-xs bg-surface border border-border rounded-lg px-2 py-1 text-txt-2"
           onchange="window._updateCharts(this.value)">
     <option value="7">7 дней</option>
@@ -62,36 +139,40 @@
     <option value="90">90 дней</option>
   </select>
 </div>
-<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-  {# Mood Chart #}
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4 stagger-4">
+  {# Mind: Mood #}
   <div class="card !p-4">
-    <h3 class="text-sm font-semibold text-txt mb-2" data-chart-label="Настроение">Настроение (30 дней)</h3>
+    <div class="flex items-center gap-2 mb-2">
+      <span class="w-1.5 h-4 rounded-full bg-[#a78bfa]"></span>
+      <h3 class="text-sm font-semibold text-txt" data-chart-label="Настроение">Настроение (30 дней)</h3>
+    </div>
     <div id="mood-chart-container" hx-get="/partials/note-mood-chart?days=30" hx-trigger="load" hx-swap="innerHTML">
-      <p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p>
+      <div class="h-32 flex items-center justify-center"><p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p></div>
     </div>
   </div>
-  {# Calories Chart #}
+  {# Body: Weight #}
   <div class="card !p-4">
-    <h3 class="text-sm font-semibold text-txt mb-2" data-chart-label="Калории">Калории (30 дней)</h3>
-    <div id="cal-chart-container" hx-get="/partials/note-calories-chart?days=30" hx-trigger="load" hx-swap="innerHTML">
-      <p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p>
+    <div class="flex items-center gap-2 mb-2">
+      <span class="w-1.5 h-4 rounded-full bg-[#4ade80]"></span>
+      <h3 class="text-sm font-semibold text-txt" data-chart-label="Вес">Вес (90 дней)</h3>
     </div>
-  </div>
-  {# Weight Chart #}
-  <div class="card !p-4">
-    <h3 class="text-sm font-semibold text-txt mb-2" data-chart-label="Вес">Вес (90 дней)</h3>
     <div id="weight-chart-container" hx-get="/partials/note-weight-chart?days=90" hx-trigger="load" hx-swap="innerHTML">
-      <p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p>
+      <div class="h-32 flex items-center justify-center"><p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p></div>
     </div>
   </div>
-  {# Category Distribution #}
-  <div class="card !p-4">
-    <h3 class="text-sm font-semibold text-txt mb-2" data-chart-label="Категории">Категории (30 дней)</h3>
-    <div id="cat-chart-container" hx-get="/partials/note-category-dist?days=30" hx-trigger="load" hx-swap="innerHTML">
-      <p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p>
+  {# Fuel: Calories #}
+  <div class="card !p-4 md:col-span-2">
+    <div class="flex items-center gap-2 mb-2">
+      <span class="w-1.5 h-4 rounded-full bg-[#fb923c]"></span>
+      <h3 class="text-sm font-semibold text-txt" data-chart-label="Калории">Калории (30 дней)</h3>
+    </div>
+    <div id="cal-chart-container" hx-get="/partials/note-calories-chart?days=30" hx-trigger="load" hx-swap="innerHTML">
+      <div class="h-32 flex items-center justify-center"><p class="text-xs text-txt-3 animate-pulse-soft">Загрузка...</p></div>
     </div>
   </div>
 </div>
+
 <script>
 window._updateCharts = function(days) {
   var charts = [
@@ -102,174 +183,219 @@ window._updateCharts = function(days) {
   ];
   charts.forEach(function(c) {
     var el = document.getElementById(c.id);
-    if (el) {
-      el.setAttribute('hx-get', c.url + '?days=' + days);
-      htmx.trigger(el, 'htmx:load');
-      htmx.ajax('GET', c.url + '?days=' + days, {target: '#' + c.id, swap: 'innerHTML'});
-    }
+    if (el) htmx.ajax('GET', c.url + '?days=' + days, {target: '#' + c.id, swap: 'innerHTML'});
     var label = el && el.closest('.card') && el.closest('.card').querySelector('[data-chart-label]');
     if (label) label.textContent = label.dataset.chartLabel + ' (' + days + ' дней)';
   });
 };
 </script>
 
-{# ── Correlations ── #}
-{% if correlations %}
-<div class="card !p-4 mb-4">
-  <h3 class="text-sm font-semibold text-txt mb-2">Корреляции</h3>
-  <div class="space-y-2">
-    {% for c in correlations %}
-    <div class="flex items-center gap-2 text-sm">
-      <span class="inline-block w-12 text-center font-mono text-xs px-1.5 py-0.5 rounded
-        {% if c.correlation and c.correlation > 0.3 %}bg-ok-bg text-ok-text
-        {% elif c.correlation and c.correlation < -0.3 %}bg-err-bg text-err-text
-        {% else %}bg-surface-2 text-txt-3{% endif %}">
-        {{ '%.2f'|format(c.correlation) if c.correlation else '—' }}
-      </span>
-      <span class="text-txt-2">{{ c.interpretation }}</span>
+{# ── Fuel + Focus row ── #}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+  {# Fuel: Food Today #}
+  <div class="card !p-4">
+    <div class="flex items-center gap-2 mb-3">
+      <span class="w-1.5 h-4 rounded-full bg-[#fb923c]"></span>
+      <h3 class="text-sm font-semibold text-txt">Fuel</h3>
     </div>
-    {% endfor %}
+    <div hx-get="/partials/food-today" hx-trigger="load" hx-swap="innerHTML">
+      <p class="text-xs text-txt-3 animate-pulse-soft py-4 text-center">Загрузка...</p>
+    </div>
   </div>
+  {# Focus: Category Distribution #}
+  <div class="card !p-4">
+    <div class="flex items-center gap-2 mb-3">
+      <span class="w-1.5 h-4 rounded-full bg-[#60a5fa]"></span>
+      <h3 class="text-sm font-semibold text-txt" data-chart-label="Категории">Категории</h3>
+    </div>
+    <div id="cat-chart-container" hx-get="/partials/note-category-dist?days=30" hx-trigger="load" hx-swap="innerHTML">
+      <p class="text-xs text-txt-3 animate-pulse-soft py-4 text-center">Загрузка...</p>
+    </div>
+  </div>
+</div>
+
+{# ── Correlations — rich cards ── #}
+{% if dashboard.correlations %}
+<div class="grid grid-cols-1 sm:grid-cols-{{ [dashboard.correlations|length, 3]|min }} gap-3 mb-4">
+  {% set metric_labels = {"mood_score": "Настроение", "sleep_hours": "Сон", "calories": "Калории", "weight_kg": "Вес", "exercise_min": "Активность", "energy": "Энергия", "water_ml": "Вода"} %}
+  {% for c in dashboard.correlations %}
+  {% set strength = (c.correlation|abs * 100)|round|int %}
+  {% set is_pos = c.correlation > 0 %}
+  <div class="card !p-4 {{ 'border-l-2 border-ok/40' if is_pos else 'border-l-2 border-err/40' }}">
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-xs font-semibold text-txt">{{ metric_labels.get(c.metric_a, c.metric_a) }} → {{ metric_labels.get(c.metric_b, c.metric_b) }}</span>
+      <span class="text-xs font-mono font-bold {{ 'text-ok-text' if is_pos else 'text-err-text' }}">{{ '%+.2f'|format(c.correlation) }}</span>
+    </div>
+    {# Strength bar #}
+    <div class="flex gap-0.5 mb-2">
+      {% for i in range(10) %}
+      <div class="h-1.5 flex-1 rounded-full {{ ('bg-ok/60' if is_pos else 'bg-err/60') if i < (strength / 10)|round|int else 'bg-surface-3' }}"></div>
+      {% endfor %}
+    </div>
+    <p class="text-xs text-txt-2">{{ c.interpretation }}</p>
+    {% if c.data_points is defined %}
+    <p class="text-[10px] text-txt-3 mt-1">{{ c.data_points }} дней данных</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% elif dashboard.maturity == 'mature' %}
+<div class="card !p-3 mb-4">
+  <p class="text-xs text-txt-3 text-center">Пока мало данных для выявления связей</p>
 </div>
 {% endif %}
 
-{# ── Search & Filters ── #}
-<div class="mb-4 space-y-3">
-
-  {# Search bar #}
-  <div class="relative group">
-    <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-      <svg class="w-4 h-4 text-txt-3 group-focus-within:text-accent-2 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+{# ── Activity Heatmap ── #}
+<div class="card !p-4 mb-4">
+  <div class="flex items-center justify-between mb-3">
+    <div class="flex items-center gap-2">
+      <span class="w-1.5 h-4 rounded-full bg-accent"></span>
+      <h3 class="text-sm font-semibold text-txt">Ритм</h3>
     </div>
-    <input type="search" name="q" id="note-search-q"
-           placeholder="Поиск по заметкам..."
-           class="w-full bg-surface-2 border border-border rounded-xl pl-10 pr-36 py-3 text-sm text-txt placeholder:text-txt-3 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all"
-           hx-get="/partials/note-search"
-           hx-trigger="keyup changed delay:300ms"
-           hx-target="#notes-list"
-           hx-swap="innerHTML"
-           hx-include=".note-filter"
-           hx-indicator="#search-spinner"
-           autocomplete="off">
-    {# Mode toggle inside search bar #}
-    <div class="absolute inset-y-0 right-1.5 flex items-center gap-1">
-      <div id="search-spinner" class="htmx-indicator">
-        <svg class="animate-spin w-4 h-4 text-accent-2" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"/></svg>
+    <div class="flex items-center gap-1.5 text-[10px] text-txt-3">
+      <span>меньше</span>
+      <div class="flex gap-0.5">
+        {% for op in [0.1, 0.3, 0.5, 0.7, 0.9] %}
+        <div class="w-2.5 h-2.5 rounded-sm bg-accent" style="opacity:{{ op }}"></div>
+        {% endfor %}
       </div>
-      <div class="flex bg-surface-3 rounded-lg p-0.5">
-        <label class="search-mode-label">
-          <input type="radio" name="mode" value="keyword" class="note-filter sr-only peer" checked
-                 hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
-          <span class="block text-[11px] font-medium px-2 py-1 rounded-md cursor-pointer transition-all text-txt-3 peer-checked:bg-accent peer-checked:text-white peer-checked:shadow-sm">
-            Text
-          </span>
-        </label>
-        <label class="search-mode-label">
-          <input type="radio" name="mode" value="hybrid" class="note-filter sr-only peer"
-                 hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
-          <span class="block text-[11px] font-medium px-2 py-1 rounded-md cursor-pointer transition-all text-txt-3 peer-checked:bg-accent peer-checked:text-white peer-checked:shadow-sm">
-            Hybrid
-          </span>
-        </label>
-        <label class="search-mode-label">
-          <input type="radio" name="mode" value="semantic" class="note-filter sr-only peer"
-                 hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
-          <span class="block text-[11px] font-medium px-2 py-1 rounded-md cursor-pointer transition-all text-txt-3 peer-checked:bg-accent peer-checked:text-white peer-checked:shadow-sm">
-            AI
-          </span>
-        </label>
-      </div>
+      <span>больше</span>
     </div>
   </div>
-
-  {# Filter row: categories + status + source #}
-  <div class="flex items-center gap-2 overflow-x-auto pb-0.5 scrollbar-hide">
-    {# Category pills #}
-    <a href="/notes" class="shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-lg whitespace-nowrap transition-all
-      {% if not current_category %}bg-accent/15 text-accent-2 ring-1 ring-accent/30{% else %}bg-surface-2 text-txt-3 hover:text-txt hover:bg-surface-3{% endif %}">
-      Все
-    </a>
-    {% set cat_emoji = {'food':'🍽','health':'🏥','fitness':'💪','business':'💼','personal':'💭','finance':'💰','learning':'📚','goals':'🎯'} %}
-    {% for cat in categories %}
-    <a href="/notes?category={{ cat }}" class="shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-lg whitespace-nowrap transition-all
-      {% if current_category == cat %}bg-accent/15 text-accent-2 ring-1 ring-accent/30{% else %}bg-surface-2 text-txt-3 hover:text-txt hover:bg-surface-3{% endif %}">
-      {{ cat_emoji.get(cat, '📝') }} {{ cat }}
-    </a>
-    {% endfor %}
-
-    {# Divider #}
-    <div class="shrink-0 w-px h-5 bg-border mx-0.5"></div>
-
-    {# Status filter #}
-    <select name="status" class="note-filter shrink-0 bg-surface-2 border border-border rounded-lg text-[11px] font-medium text-txt-3 pl-2.5 pr-6 py-1.5 appearance-none cursor-pointer hover:text-txt hover:bg-surface-3 focus:outline-none focus:ring-1 focus:ring-accent/30 transition-all"
-            style="background-image:url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 fill=%27%2371717a%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 11L3 6h10z%27/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 6px center;"
-            hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
-      <option value="">Status</option>
-      <option value="enriched">Enriched</option>
-      <option value="needs_review">Needs review</option>
-      <option value="captured">Captured</option>
-      <option value="failed">Failed</option>
-      <option value="archived">Archived</option>
-    </select>
-
-    {# Source filter #}
-    <select name="source" class="note-filter shrink-0 bg-surface-2 border border-border rounded-lg text-[11px] font-medium text-txt-3 pl-2.5 pr-6 py-1.5 appearance-none cursor-pointer hover:text-txt hover:bg-surface-3 focus:outline-none focus:ring-1 focus:ring-accent/30 transition-all"
-            style="background-image:url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 fill=%27%2371717a%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 11L3 6h10z%27/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 6px center;"
-            hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
-      <option value="">Source</option>
-      <option value="voice">Voice</option>
-      <option value="web">Web</option>
-      <option value="telegram">Telegram</option>
-    </select>
+  <div hx-get="/partials/note-heatmap?days=90" hx-trigger="load" hx-swap="innerHTML">
+    <p class="text-xs text-txt-3 animate-pulse-soft py-4 text-center">Загрузка...</p>
   </div>
 </div>
 
-{# ── Results header + Bulk toolbar ── #}
-<div class="flex items-center justify-between mb-3">
-  <div class="flex items-center gap-3">
-    <label class="flex items-center gap-1.5 text-xs text-txt-3 cursor-pointer select-none">
-      <input type="checkbox" id="select-all" class="accent-accent" onchange="window._toggleAll(this.checked)">
-      Select all
-    </label>
-    <p class="text-xs text-txt-3">
-      <span class="font-medium text-txt-2">{{ notes|length }}</span> заметок
-      {% if current_category %}<span class="text-accent-2 ml-1">in {{ current_category }}</span>{% endif %}
+{% endif %}{# end mature #}
+
+{# ════════════════ LAYER 4: ACTION ════════════════ #}
+
+{% if dashboard.actions and (dashboard.actions.due_tasks or dashboard.actions.review_count or dashboard.actions.reminders_count) %}
+<div class="card !p-4 mb-4">
+  <h3 class="text-sm font-semibold text-txt mb-3">Требует внимания</h3>
+  <div class="flex flex-wrap gap-3">
+    {% if dashboard.actions.due_tasks %}
+    <a href="/notes?status=open" class="flex items-center gap-2 px-3 py-2 rounded-lg bg-warn-bg/50 hover:bg-warn-bg transition-colors">
+      <span class="text-sm font-bold text-warn-text">{{ dashboard.actions.due_tasks }}</span>
+      <span class="text-xs text-warn-text/80">задач на сегодня</span>
+    </a>
+    {% endif %}
+    {% if dashboard.actions.review_count %}
+    <a href="/notes/review" class="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-500/10 hover:bg-orange-500/15 transition-colors">
+      <span class="text-sm font-bold text-orange-400">{{ dashboard.actions.review_count }}</span>
+      <span class="text-xs text-orange-400/80">на review</span>
+    </a>
+    {% endif %}
+    {% if dashboard.actions.reminders_count %}
+    <a href="/notes/reminders" class="flex items-center gap-2 px-3 py-2 rounded-lg bg-info-bg/50 hover:bg-info-bg transition-colors">
+      <span class="text-sm font-bold text-info-text">{{ dashboard.actions.reminders_count }}</span>
+      <span class="text-xs text-info-text/80">напоминаний</span>
+    </a>
+    {% endif %}
+  </div>
+  {% if dashboard.actions.top_items %}
+  <div class="mt-3 space-y-1.5">
+    {% for item in dashboard.actions.top_items %}
+    <p class="text-xs text-txt-2 flex items-center gap-2">
+      <span class="w-1.5 h-1.5 rounded-full bg-warn shrink-0"></span>{{ item }}
     </p>
-  </div>
-  <div id="bulk-toolbar" class="hidden flex items-center gap-2">
-    <span id="bulk-count" class="text-xs text-txt-3"></span>
-    <form method="POST" action="/notes/bulk/archive" class="inline">
-      <input type="hidden" name="note_ids" id="bulk-ids-archive">
-      <button class="btn-secondary btn-sm" onclick="document.getElementById('bulk-ids-archive').value=window._getSelected()">Archive</button>
-    </form>
-    <form method="POST" action="/notes/bulk/delete" class="inline">
-      <input type="hidden" name="note_ids" id="bulk-ids-delete">
-      <button class="btn-secondary btn-sm text-err-text" onclick="if(!confirm('Удалить выбранные?'))event.preventDefault(); document.getElementById('bulk-ids-delete').value=window._getSelected()">Delete</button>
-    </form>
-  </div>
-</div>
-
-{# ── Notes List ── #}
-<div id="notes-list" class="space-y-2">
-  {% if notes %}
-    {% for n in notes %}
-    <div class="flex items-start gap-2">
-      <input type="checkbox" class="note-cb accent-accent mt-4 shrink-0" value="{{ n.id }}"
-             onchange="window._updateBulk()" onclick="event.stopPropagation()">
-      <div class="flex-1">
-        {% include "partials/_note_card.html" %}
-      </div>
-    </div>
     {% endfor %}
-  {% else %}
-  <div class="flex flex-col items-center justify-center py-20 text-center">
-    <div class="w-12 h-12 rounded-2xl bg-surface-2 flex items-center justify-center mb-4">
-      <svg class="w-6 h-6 text-txt-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-    </div>
-    <p class="text-sm font-medium text-txt mb-1">Заметок пока нет</p>
-    <p class="text-xs text-txt-3 max-w-[260px]">Отправьте голосовое или текст в Telegram, либо создайте заметку здесь</p>
   </div>
   {% endif %}
+</div>
+{% endif %}
+
+{# ════════════════ LAYER 5: JOURNAL STREAM ════════════════ #}
+
+<div class="border-t border-border/50 pt-4 mt-2">
+  <div class="flex items-center gap-2 mb-3">
+    <h3 class="text-sm font-semibold text-txt-2">Journal</h3>
+    <span class="text-xs text-txt-3">{{ notes|length }} заметок</span>
+  </div>
+
+  {# ── Search & Filters ── #}
+  <div class="mb-4 space-y-3">
+    <div class="relative group">
+      <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+        <svg class="w-4 h-4 text-txt-3 group-focus-within:text-accent-2 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      </div>
+      <input type="search" name="q" id="note-search-q"
+             placeholder="Поиск по заметкам..."
+             class="w-full bg-surface-2 border border-border rounded-xl pl-10 pr-36 py-3 text-sm text-txt placeholder:text-txt-3 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/50 transition-all"
+             hx-get="/partials/note-search" hx-trigger="keyup changed delay:300ms"
+             hx-target="#notes-list" hx-swap="innerHTML" hx-include=".note-filter"
+             hx-indicator="#search-spinner" autocomplete="off">
+      <div class="absolute inset-y-0 right-1.5 flex items-center gap-1">
+        <div id="search-spinner" class="htmx-indicator">
+          <svg class="animate-spin w-4 h-4 text-accent-2" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"/></svg>
+        </div>
+        <div class="flex bg-surface-3 rounded-lg p-0.5">
+          {% for mode_val, mode_label in [("keyword", "Text"), ("hybrid", "Hybrid"), ("semantic", "AI")] %}
+          <label>
+            <input type="radio" name="mode" value="{{ mode_val }}" class="note-filter sr-only peer" {% if mode_val == "keyword" %}checked{% endif %}
+                   hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
+            <span class="block text-[11px] font-medium px-2 py-1 rounded-md cursor-pointer transition-all text-txt-3 peer-checked:bg-accent peer-checked:text-white peer-checked:shadow-sm">{{ mode_label }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2 overflow-x-auto pb-0.5 scrollbar-hide">
+      <a href="/notes" class="shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-lg whitespace-nowrap transition-all
+        {% if not current_category %}bg-accent/15 text-accent-2 ring-1 ring-accent/30{% else %}bg-surface-2 text-txt-3 hover:text-txt hover:bg-surface-3{% endif %}">Все</a>
+      {% set cat_emoji = {'food':'🍽','health':'🏥','fitness':'💪','business':'💼','personal':'💭','finance':'💰','learning':'📚','goals':'🎯'} %}
+      {% for cat in categories %}
+      <a href="/notes?category={{ cat }}" class="shrink-0 text-[11px] font-medium px-2.5 py-1.5 rounded-lg whitespace-nowrap transition-all
+        {% if current_category == cat %}bg-accent/15 text-accent-2 ring-1 ring-accent/30{% else %}bg-surface-2 text-txt-3 hover:text-txt hover:bg-surface-3{% endif %}">{{ cat_emoji.get(cat, '📝') }} {{ cat }}</a>
+      {% endfor %}
+      <div class="shrink-0 w-px h-5 bg-border mx-0.5"></div>
+      <select name="status" class="note-filter shrink-0 bg-surface-2 border border-border rounded-lg text-[11px] font-medium text-txt-3 pl-2.5 pr-6 py-1.5 appearance-none cursor-pointer hover:text-txt hover:bg-surface-3 focus:outline-none focus:ring-1 focus:ring-accent/30 transition-all"
+              style="background-image:url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 fill=%27%2371717a%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 11L3 6h10z%27/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 6px center;"
+              hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
+        <option value="">Status</option><option value="enriched">Enriched</option><option value="needs_review">Needs review</option><option value="captured">Captured</option><option value="failed">Failed</option><option value="archived">Archived</option>
+      </select>
+      <select name="source" class="note-filter shrink-0 bg-surface-2 border border-border rounded-lg text-[11px] font-medium text-txt-3 pl-2.5 pr-6 py-1.5 appearance-none cursor-pointer hover:text-txt hover:bg-surface-3 focus:outline-none focus:ring-1 focus:ring-accent/30 transition-all"
+              style="background-image:url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 fill=%27%2371717a%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 11L3 6h10z%27/%3E%3C/svg%3E');background-repeat:no-repeat;background-position:right 6px center;"
+              hx-get="/partials/note-search" hx-trigger="change" hx-target="#notes-list" hx-swap="innerHTML" hx-include="#note-search-q, .note-filter">
+        <option value="">Source</option><option value="voice">Voice</option><option value="web">Web</option><option value="telegram">Telegram</option>
+      </select>
+    </div>
+  </div>
+
+  {# ── Bulk toolbar ── #}
+  <div class="flex items-center justify-between mb-3">
+    <div class="flex items-center gap-3">
+      <label class="flex items-center gap-1.5 text-xs text-txt-3 cursor-pointer select-none">
+        <input type="checkbox" id="select-all" class="accent-accent" onchange="window._toggleAll(this.checked)"> Select all
+      </label>
+      <p class="text-xs text-txt-3"><span class="font-medium text-txt-2">{{ notes|length }}</span> заметок{% if current_category %} <span class="text-accent-2">in {{ current_category }}</span>{% endif %}</p>
+    </div>
+    <div id="bulk-toolbar" class="hidden flex items-center gap-2">
+      <span id="bulk-count" class="text-xs text-txt-3"></span>
+      <form method="POST" action="/notes/bulk/archive" class="inline"><input type="hidden" name="note_ids" id="bulk-ids-archive"><button class="btn-secondary btn-sm" onclick="document.getElementById('bulk-ids-archive').value=window._getSelected()">Archive</button></form>
+      <form method="POST" action="/notes/bulk/delete" class="inline"><input type="hidden" name="note_ids" id="bulk-ids-delete"><button class="btn-secondary btn-sm text-err-text" onclick="if(!confirm('Удалить?'))event.preventDefault();document.getElementById('bulk-ids-delete').value=window._getSelected()">Delete</button></form>
+    </div>
+  </div>
+
+  {# ── Notes List ── #}
+  <div id="notes-list" class="space-y-2">
+    {% if notes %}
+      {% for n in notes %}
+      <div class="flex items-start gap-2">
+        <input type="checkbox" class="note-cb accent-accent mt-4 shrink-0" value="{{ n.id }}" onchange="window._updateBulk()" onclick="event.stopPropagation()">
+        <div class="flex-1">{% include "partials/_note_card.html" %}</div>
+      </div>
+      {% endfor %}
+    {% else %}
+    <div class="flex flex-col items-center justify-center py-16 text-center">
+      <svg class="w-8 h-8 text-txt-3 mb-3 opacity-40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+      <p class="text-sm font-medium text-txt mb-1">Заметок пока нет</p>
+      <p class="text-xs text-txt-3 max-w-[240px]">Отправьте голосовое или текст в Telegram</p>
+    </div>
+    {% endif %}
+  </div>
 </div>
 
 {# ── New Note Dialog ── #}
@@ -286,24 +412,10 @@ window._updateCharts = function(days) {
 </dialog>
 
 <script>
-window._getSelected = function() {
-  return Array.from(document.querySelectorAll('.note-cb:checked')).map(function(c){return c.value}).join(',');
-};
-window._updateBulk = function() {
-  var checked = document.querySelectorAll('.note-cb:checked');
-  var toolbar = document.getElementById('bulk-toolbar');
-  var cnt = document.getElementById('bulk-count');
-  if (checked.length > 0) {
-    toolbar.classList.remove('hidden');
-    cnt.textContent = checked.length + ' selected';
-  } else {
-    toolbar.classList.add('hidden');
-  }
-};
-window._toggleAll = function(on) {
-  document.querySelectorAll('.note-cb').forEach(function(c){c.checked = on});
-  window._updateBulk();
-};
+window._getSelected = function() { return Array.from(document.querySelectorAll('.note-cb:checked')).map(function(c){return c.value}).join(','); };
+window._updateBulk = function() { var c=document.querySelectorAll('.note-cb:checked'),t=document.getElementById('bulk-toolbar'),n=document.getElementById('bulk-count'); if(c.length>0){t.classList.remove('hidden');n.textContent=c.length+' selected'}else{t.classList.add('hidden')} };
+window._toggleAll = function(on) { document.querySelectorAll('.note-cb').forEach(function(c){c.checked=on}); window._updateBulk(); };
 </script>
 
+{% endif %}{# end not empty #}
 {% endblock %}

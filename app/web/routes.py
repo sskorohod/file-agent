@@ -1294,32 +1294,289 @@ async def reminders_page(request: Request):
 
 # ── Notes ──────────────────────────────────────────────────────────────────
 
+async def _build_dashboard_vm(today_data: dict, analytics, yesterday_data: dict,
+                              sparklines: dict, correlations: list,
+                              notes_count: int, days_active: int,
+                              due_tasks: int, review_count: int, reminders_count: int,
+                              top_actions: list) -> dict:
+    """Build the complete dashboard view-model."""
+    from datetime import datetime
+
+    metrics = today_data.get("metrics", {})
+    y_metrics = yesterday_data.get("metrics", {})
+
+    # ── Maturity ──
+    if notes_count <= 2:
+        maturity = "empty"
+    elif notes_count <= 20 or days_active < 7:
+        maturity = "early"
+    else:
+        maturity = "mature"
+
+    # ── Helper: get metric value ──
+    def _mv(m, key="avg"):
+        v = m.get(key, {})
+        if isinstance(v, dict):
+            return v.get(key) or v.get("total")
+        return None
+
+    mood_val = _mv(metrics, "mood_score")
+    sleep_val = _mv(metrics, "sleep_hours")
+    cal_val = None
+    cal_data = metrics.get("calories", {})
+    if isinstance(cal_data, dict):
+        cal_val = cal_data.get("total") or cal_data.get("avg")
+    weight_val = _mv(metrics, "weight_kg")
+
+    y_mood = _mv(y_metrics, "mood_score")
+    y_sleep = _mv(y_metrics, "sleep_hours")
+    y_cal_data = y_metrics.get("calories", {})
+    y_cal = y_cal_data.get("total") or y_cal_data.get("avg") if isinstance(y_cal_data, dict) else None
+    y_weight = _mv(y_metrics, "weight_kg")
+
+    # ── Hero scoring ──
+    score = 0
+    if sleep_val is not None:
+        score += 2 if sleep_val >= 7 else (-2 if sleep_val < 6 else 0)
+    if mood_val is not None:
+        score += 2 if mood_val >= 7 else (-2 if mood_val <= 4 else 0)
+    if due_tasks > 3:
+        score -= 1
+    if reminders_count > 0:
+        score -= 0.5
+
+    if score >= 3:
+        state_label, orb_tone = "Хороший ритм", "green"
+    elif score >= 0:
+        state_label, orb_tone = "Стабильный день", "blue"
+    elif score >= -2:
+        state_label, orb_tone = "Нужен фокус", "orange"
+    else:
+        state_label, orb_tone = "Режим восстановления", "red"
+
+    warning = None
+    recommendation = None
+    if sleep_val is not None and sleep_val < 6:
+        warning = f"Сон {sleep_val:.1f}ч — ниже нормы"
+        recommendation = "Сегодня не ставь тяжёлую тренировку"
+    elif due_tasks > 0:
+        recommendation = f"{due_tasks} задач требуют внимания"
+
+    # Supporting line
+    parts = []
+    if today_data.get("notes_count"):
+        parts.append(f"{today_data['notes_count']} заметок")
+    if cal_val:
+        parts.append(f"{int(cal_val)} kcal")
+    if sleep_val:
+        parts.append(f"{sleep_val:.1f}ч сна")
+    supporting = " · ".join(parts) if parts else None
+
+    hero = {
+        "state_label": state_label, "orb_tone": orb_tone,
+        "warning": warning, "recommendation": recommendation,
+        "supporting_line": supporting,
+    }
+
+    # ── KPI cards ──
+    def _kpi(key, label, unit, current, yesterday, target_min, target_max,
+             higher_is_better, points):
+        if current is None:
+            delta = None
+            trend_dir = "stable"
+            trend_good = True
+            state = "Stable"
+        else:
+            delta = (current - yesterday) if yesterday is not None else None
+            if delta is not None:
+                if abs(delta) < 0.1:
+                    trend_dir = "stable"
+                elif delta > 0:
+                    trend_dir = "up"
+                else:
+                    trend_dir = "down"
+                trend_good = (delta > 0) == higher_is_better if delta != 0 else True
+            else:
+                trend_dir = "stable"
+                trend_good = True
+
+            if key == "weight":
+                # Weight: trend-oriented stability
+                state = "Stable"
+                if points and len(points) >= 3:
+                    recent = [p for p in points[-7:] if p is not None]
+                    if len(recent) >= 2 and abs(recent[-1] - recent[0]) > 1.5:
+                        state = "Needs attention"
+            elif target_min is not None and target_max is not None:
+                if target_min <= (current or 0) <= target_max:
+                    state = "On track"
+                elif (current or 0) < target_min:
+                    state = "Below baseline" if (current or 0) >= target_min * 0.7 else "Needs attention"
+                else:
+                    state = "On track"  # above target is fine for most metrics
+            else:
+                state = "Stable"
+
+        return {
+            "key": key, "label": label, "unit": unit,
+            "current": current,
+            "delta_vs_yesterday": delta,
+            "delta_label": "vs вчера",
+            "trend_direction": trend_dir,
+            "trend_good": trend_good,
+            "state_label": state,
+            "target_min": target_min, "target_max": target_max,
+            "points": points or [],
+        }
+
+    sp_mood = [p.get("avg") for p in sparklines.get("mood", [])]
+    sp_sleep = [p.get("avg") for p in sparklines.get("sleep", [])]
+    sp_cal = [p.get("total", p.get("avg", 0)) for p in sparklines.get("cal", [])]
+    sp_weight = [p.get("avg") for p in sparklines.get("weight", [])]
+
+    kpis = [
+        _kpi("mood", "Настроение", "/10", mood_val, y_mood, 6, 8, True, sp_mood),
+        _kpi("sleep", "Сон", "ч", sleep_val, y_sleep, 7, 9, True, sp_sleep),
+        _kpi("calories", "Калории", "kcal", cal_val, y_cal, None, None, True, sp_cal),
+        _kpi("weight", "Вес", "кг", weight_val, y_weight, None, None, False, sp_weight),
+    ]
+
+    # ── Insights (max 3) ──
+    insights = []
+    if sleep_val is not None and sleep_val < 6:
+        insights.append({
+            "type": "warning", "headline": "Недосып",
+            "why": f"Сон {sleep_val:.1f}ч — ниже 7ч нормы",
+            "action": "Ложись раньше, не ставь тяжёлую тренировку",
+        })
+    if mood_val is not None and y_mood is not None and y_mood - mood_val >= 3:
+        insights.append({
+            "type": "warning", "headline": "Резкое падение настроения",
+            "why": f"Настроение упало с {y_mood:.0f} до {mood_val:.0f}",
+            "action": "Сделай паузу, прогуляйся",
+        })
+    if due_tasks > 2:
+        insights.append({
+            "type": "action", "headline": f"{due_tasks} задач на сегодня",
+            "why": "Есть просроченные или срочные задачи",
+            "action": "Начни с самой важной",
+        })
+    # Check for streak wins from habits
+    try:
+        from app.notes.habits import HabitTracker
+        tracker = HabitTracker(_get("db"))
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        habit_statuses = await tracker.check_habits_for_date(today_str)
+        for h in habit_statuses:
+            if h.get("streak", 0) >= 5 and len(insights) < 3:
+                insights.append({
+                    "type": "win", "headline": f"{h['name']} — {h['streak']} дней подряд",
+                    "why": "Стабильная привычка формируется",
+                    "action": "Продолжай в том же духе",
+                })
+                break
+    except Exception:
+        pass
+
+    insights = insights[:3]
+
+    # ── Correlations (filtered) ──
+    filtered_corrs = []
+    if maturity == "mature":
+        for c in correlations:
+            if c.get("correlation") is not None and abs(c["correlation"]) >= 0.25:
+                if c.get("data_points", 999) >= 14:
+                    filtered_corrs.append(c)
+        filtered_corrs = filtered_corrs[:3]
+
+    actions = {
+        "due_tasks": due_tasks, "review_count": review_count,
+        "reminders_count": reminders_count,
+        "top_items": top_actions[:3],
+    }
+
+    return {
+        "maturity": maturity,
+        "hero": hero,
+        "kpis": kpis,
+        "insights": insights,
+        "actions": actions,
+        "correlations": filtered_corrs,
+        "days_active": days_active,
+    }
+
+
 @router.get("/notes", response_class=HTMLResponse)
 async def notes_page(request: Request, category: str = ""):
-    from datetime import datetime
+    from datetime import datetime, timedelta
     db = _get("db")
     if not db:
         return templates.TemplateResponse("notes_dashboard.html", {
             "request": request, "page": "notes", "notes": [],
-            "today": "", "today_data": {}, "correlations": [],
+            "today": "", "dashboard": {"maturity": "empty", "hero": {"state_label": "Добро пожаловать", "orb_tone": "blue", "warning": None, "recommendation": "Отправьте первую заметку в Telegram", "supporting_line": None}, "kpis": [], "insights": [], "actions": {"due_tasks": 0, "review_count": 0, "reminders_count": 0, "top_items": []}, "correlations": [], "days_active": 0},
             "categories": [], "current_category": "",
         })
 
     notes = await db.list_notes(limit=100, category=category)
     today = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Today's summary
     from app.notes.analytics import NoteAnalytics
     analytics = NoteAnalytics(db)
     today_data = await analytics.get_daily_summary_data(today)
+    yesterday_data = await analytics.get_daily_summary_data(yesterday)
     correlations = await analytics.get_all_correlations(days=60)
     cat_dist = await db.get_category_distribution(days=30)
     categories = list(cat_dist.keys())
 
+    # Sparklines (7-day trends)
+    sparklines = {
+        "mood": await analytics.get_mood_trend(7),
+        "sleep": await analytics.get_sleep_trend(7) if hasattr(analytics, 'get_sleep_trend') else await analytics._get_trend("sleep_hours", 7),
+        "cal": await analytics.get_calorie_trend(7),
+        "weight": await analytics.get_weight_trend(7),
+    }
+
+    # Counts for actions
+    total_notes = len(await db.list_notes(limit=9999))
+    days_active_cursor = await db.db.execute(
+        "SELECT COUNT(DISTINCT date(created_at)) FROM notes"
+    )
+    days_active = (await days_active_cursor.fetchone())[0] or 0
+
+    due_tasks = 0
+    review_count = 0
+    reminders_count = 0
+    top_actions = []
+    try:
+        cursor = await db.db.execute(
+            "SELECT COUNT(*) FROM note_tasks WHERE status='open' AND due_date <= ?", (today,)
+        )
+        due_tasks = (await cursor.fetchone())[0] or 0
+        cursor = await db.db.execute(
+            "SELECT COUNT(*) FROM notes WHERE status='needs_review'"
+        )
+        review_count = (await cursor.fetchone())[0] or 0
+        cursor = await db.db.execute(
+            "SELECT COUNT(*) FROM note_reminders WHERE status='pending'"
+        )
+        reminders_count = (await cursor.fetchone())[0] or 0
+        cursor = await db.db.execute(
+            "SELECT description FROM note_tasks WHERE status='open' AND due_date <= ? ORDER BY due_date LIMIT 3",
+            (today,),
+        )
+        top_actions = [r[0] for r in await cursor.fetchall()]
+    except Exception:
+        pass
+
+    dashboard = await _build_dashboard_vm(
+        today_data, analytics, yesterday_data, sparklines, correlations,
+        total_notes, days_active, due_tasks, review_count, reminders_count, top_actions,
+    )
+
     return templates.TemplateResponse("notes_dashboard.html", {
         "request": request, "page": "notes", "notes": notes,
-        "today": today, "today_data": today_data,
-        "correlations": correlations[:5],
+        "today": today, "dashboard": dashboard,
         "categories": categories, "current_category": category,
     })
 
@@ -1335,6 +1592,154 @@ async def notes_create(request: Request, content: str = Form(...), title: str = 
             await db.save_note(content=content.strip(), title=title.strip(), source="web")
     return RedirectResponse("/notes", status_code=303)
 
+
+# ── Notes: static routes MUST come before /notes/{note_id} ──────────
+
+@router.get("/notes/graph", response_class=HTMLResponse)
+async def notes_graph(request: Request, center: int = 0):
+    """Knowledge graph visualization."""
+    return templates.TemplateResponse("note_graph.html", {
+        "request": request, "page": "notes", "center_id": center,
+    })
+
+
+@router.get("/api/notes/graph")
+async def notes_graph_api(request: Request, center: int = 0, limit: int = 100):
+    """JSON API for graph data."""
+    db = _get("db")
+    if not db:
+        return JSONResponse({"nodes": [], "edges": []})
+    limit = min(max(limit, 10), 500)
+    data = await db.get_graph_data(center, limit)
+    return JSONResponse(data)
+
+
+@router.get("/notes/habits", response_class=HTMLResponse)
+async def notes_habits(request: Request):
+    """Habit tracking page — define habits, view streaks."""
+    db = _get("db")
+    if not db:
+        return HTMLResponse("Database not available", status_code=500)
+    from app.notes.habits import HabitTracker
+    tracker = HabitTracker(db)
+    today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+    habit_statuses = await tracker.check_habits_for_date(today)
+    return templates.TemplateResponse("note_habits.html", {
+        "request": request, "page": "notes",
+        "habits": habit_statuses, "today": today,
+    })
+
+
+@router.post("/notes/habits/create")
+async def notes_habits_create(
+    request: Request, name: str = Form(""), metric_key: str = Form(""),
+    target_value: float = Form(1), frequency: str = Form("daily"),
+):
+    db = _get("db")
+    if db and name:
+        from app.notes.habits import HabitTracker
+        await HabitTracker(db).create_habit(name, frequency, target_value, metric_key)
+    return RedirectResponse("/notes/habits", status_code=303)
+
+
+@router.post("/notes/habits/{habit_id}/delete")
+async def notes_habits_delete(request: Request, habit_id: int):
+    db = _get("db")
+    if db:
+        from app.notes.habits import HabitTracker
+        await HabitTracker(db).delete_habit(habit_id)
+    return RedirectResponse("/notes/habits", status_code=303)
+
+
+@router.post("/notes/habits/{habit_id}/toggle")
+async def notes_habits_toggle(request: Request, habit_id: int):
+    db = _get("db")
+    if db:
+        from app.notes.habits import HabitTracker
+        today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+        await HabitTracker(db).toggle_habit_entry(habit_id, today)
+    return RedirectResponse("/notes/habits", status_code=303)
+
+
+@router.get("/notes/entities", response_class=HTMLResponse)
+async def notes_entities(request: Request):
+    """Entity management page."""
+    db = _get("db")
+    clusters = await db.get_all_entity_clusters() if db else []
+    duplicates = await db.find_duplicate_entities() if db else []
+    return templates.TemplateResponse("note_entities.html", {
+        "request": request, "page": "notes",
+        "clusters": clusters, "duplicates": duplicates,
+    })
+
+
+@router.post("/notes/entities/merge")
+async def notes_entities_merge(
+    request: Request, entity_type: str = Form(""),
+    canonical: str = Form(""), aliases: str = Form(""),
+):
+    db = _get("db")
+    if db and entity_type and canonical and aliases:
+        alias_list = [a.strip() for a in aliases.split(",") if a.strip()]
+        await db.merge_entities(entity_type, canonical, alias_list)
+    return RedirectResponse("/notes/entities", status_code=303)
+
+
+@router.get("/notes/review", response_class=HTMLResponse)
+async def notes_review(request: Request):
+    db = _get("db")
+    needs_review = await db.get_notes_by_status("needs_review") if db else []
+    failed = await db.get_notes_by_status("failed") if db else []
+    return templates.TemplateResponse("notes_review.html", {
+        "request": request, "page": "notes",
+        "needs_review": needs_review, "failed": failed,
+    })
+
+
+@router.get("/notes/reminders", response_class=HTMLResponse)
+async def notes_reminders(request: Request):
+    db = _get("db")
+    reminders = await db.list_note_reminders() if db else []
+    return templates.TemplateResponse("note_reminders.html", {
+        "request": request, "page": "notes", "reminders": reminders,
+    })
+
+
+@router.get("/notes/export")
+async def notes_export(request: Request, fmt: str = "csv", kind: str = "notes",
+                       from_date: str = "", to_date: str = ""):
+    """Export notes data as CSV or JSON."""
+    fmt = request.query_params.get("format", fmt)
+    kind = request.query_params.get("type", kind)
+    from starlette.responses import Response
+    db = _get("db")
+    if not db:
+        return HTMLResponse("Database not available", status_code=500)
+    from app.notes.export import ExportService
+    svc = ExportService(db)
+    now = __import__("datetime").datetime.now().strftime("%Y%m%d")
+    if fmt == "json":
+        data = await svc.export_all_json(from_date, to_date)
+        return Response(
+            content=data, media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="notes_export_{now}.json"'},
+        )
+    if kind == "food":
+        data = await svc.export_food_csv(from_date, to_date)
+        filename = f"food_{now}.csv"
+    elif kind == "facts":
+        data = await svc.export_facts_csv(from_date=from_date, to_date=to_date)
+        filename = f"facts_{now}.csv"
+    else:
+        data = await svc.export_notes_csv(from_date, to_date)
+        filename = f"notes_{now}.csv"
+    return Response(
+        content=data, media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Notes: dynamic {note_id} routes ────────────────────────────────
 
 @router.post("/notes/{note_id}/delete")
 async def notes_delete(request: Request, note_id: int):
@@ -1407,97 +1812,6 @@ async def notes_archive(request: Request, note_id: int):
     return RedirectResponse("/notes", status_code=303)
 
 
-@router.get("/notes/graph", response_class=HTMLResponse)
-async def notes_graph(request: Request, center: int = 0):
-    """Knowledge graph visualization."""
-    return templates.TemplateResponse("note_graph.html", {
-        "request": request, "page": "notes", "center_id": center,
-    })
-
-
-@router.get("/api/notes/graph")
-async def notes_graph_api(request: Request, center: int = 0, limit: int = 100):
-    """JSON API for graph data."""
-    db = _get("db")
-    if not db:
-        return JSONResponse({"nodes": [], "edges": []})
-    limit = min(max(limit, 10), 500)
-    data = await db.get_graph_data(center, limit)
-    return JSONResponse(data)
-
-
-@router.get("/notes/habits", response_class=HTMLResponse)
-async def notes_habits(request: Request):
-    """Habit tracking page — define habits, view streaks."""
-    db = _get("db")
-    if not db:
-        return HTMLResponse("Database not available", status_code=500)
-
-    from app.notes.habits import HabitTracker
-    tracker = HabitTracker(db)
-    today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
-    habit_statuses = await tracker.check_habits_for_date(today)
-    return templates.TemplateResponse("note_habits.html", {
-        "request": request, "page": "notes",
-        "habits": habit_statuses, "today": today,
-    })
-
-
-@router.post("/notes/habits/create")
-async def notes_habits_create(
-    request: Request, name: str = Form(""), metric_key: str = Form(""),
-    target_value: float = Form(1), frequency: str = Form("daily"),
-):
-    db = _get("db")
-    if db and name:
-        from app.notes.habits import HabitTracker
-        await HabitTracker(db).create_habit(name, frequency, target_value, metric_key)
-    return RedirectResponse("/notes/habits", status_code=303)
-
-
-@router.post("/notes/habits/{habit_id}/delete")
-async def notes_habits_delete(request: Request, habit_id: int):
-    db = _get("db")
-    if db:
-        from app.notes.habits import HabitTracker
-        await HabitTracker(db).delete_habit(habit_id)
-    return RedirectResponse("/notes/habits", status_code=303)
-
-
-@router.post("/notes/habits/{habit_id}/toggle")
-async def notes_habits_toggle(request: Request, habit_id: int):
-    db = _get("db")
-    if db:
-        from app.notes.habits import HabitTracker
-        today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
-        await HabitTracker(db).toggle_habit_entry(habit_id, today)
-    return RedirectResponse("/notes/habits", status_code=303)
-
-
-@router.get("/notes/entities", response_class=HTMLResponse)
-async def notes_entities(request: Request):
-    """Entity management page — view clusters, merge duplicates."""
-    db = _get("db")
-    clusters = await db.get_all_entity_clusters() if db else []
-    duplicates = await db.find_duplicate_entities() if db else []
-    return templates.TemplateResponse("note_entities.html", {
-        "request": request, "page": "notes",
-        "clusters": clusters, "duplicates": duplicates,
-    })
-
-
-@router.post("/notes/entities/merge")
-async def notes_entities_merge(
-    request: Request, entity_type: str = Form(""),
-    canonical: str = Form(""), aliases: str = Form(""),
-):
-    db = _get("db")
-    if db and entity_type and canonical and aliases:
-        alias_list = [a.strip() for a in aliases.split(",") if a.strip()]
-        await db.merge_entities(entity_type, canonical, alias_list)
-    return RedirectResponse("/notes/entities", status_code=303)
-
-
 @router.post("/notes/bulk/archive")
 async def notes_bulk_archive(request: Request, note_ids: str = Form("")):
     db = _get("db")
@@ -1534,23 +1848,7 @@ async def notes_pin(request: Request, note_id: int):
     return RedirectResponse(referer, status_code=303)
 
 
-# ── Note Chart Partials ───────────────────────────────────────────────────
-
-@router.get("/notes/review", response_class=HTMLResponse)
-async def notes_review(request: Request):
-    """Review queue — needs_review + failed notes."""
-    db = _get("db")
-    if not db:
-        return templates.TemplateResponse("notes_review.html", {
-            "request": request, "page": "notes", "notes": [],
-        })
-    review = await db.get_notes_by_status("needs_review", limit=50)
-    failed = await db.get_notes_by_status("failed", limit=50)
-    notes = review + failed
-    return templates.TemplateResponse("notes_review.html", {
-        "request": request, "page": "notes", "notes": notes,
-    })
-
+# ── Note Detail + Chart Partials ─────────────────────────────────────────
 
 @router.get("/notes/{note_id}", response_class=HTMLResponse)
 async def note_detail(request: Request, note_id: int):
@@ -1595,42 +1893,28 @@ async def toggle_task(request: Request, task_id: int):
     return RedirectResponse("/notes", status_code=303)
 
 
-@router.get("/notes/export")
-async def notes_export(request: Request, format: str = "csv", type: str = "notes",
-                       from_date: str = "", to_date: str = ""):
-    """Export notes data as CSV or JSON."""
-    from starlette.responses import Response
-    db = _get("db")
-    if not db:
-        return HTMLResponse("Database not available", status_code=500)
+def _chart_context(data: list, chart_color: str, chart_color_light: str,
+                   chart_label: str, min_val: float = 0,
+                   target_min: float | None = None, target_max: float | None = None,
+                   value_key: str = "avg") -> dict:
+    """Build unified chart partial context."""
+    if not data:
+        return {"data": [], "empty_mode": "empty", "chart_color": chart_color}
 
-    from app.notes.export import ExportService
-    svc = ExportService(db)
+    vals = [d.get(value_key, 0) or 0 for d in data]
+    actual_min = min(vals) if vals else 0
+    actual_max = max(vals) if vals else 1
+    if min_val == 0 and actual_min > 0 and chart_label == "кг":
+        min_val = max(0, actual_min - 2)  # Weight: don't start at 0
+    max_val = actual_max if actual_max > min_val else min_val + 1
 
-    now = __import__("datetime").datetime.now().strftime("%Y%m%d")
-
-    if format == "json":
-        data = await svc.export_all_json(from_date, to_date)
-        return Response(
-            content=data, media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="notes_export_{now}.json"'},
-        )
-
-    # CSV export by type
-    if type == "food":
-        data = await svc.export_food_csv(from_date, to_date)
-        filename = f"food_{now}.csv"
-    elif type == "facts":
-        data = await svc.export_facts_csv(from_date=from_date, to_date=to_date)
-        filename = f"facts_{now}.csv"
-    else:
-        data = await svc.export_notes_csv(from_date, to_date)
-        filename = f"notes_{now}.csv"
-
-    return Response(
-        content=data, media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    return {
+        "data": data, "max_val": max_val, "min_val": min_val,
+        "chart_color": chart_color, "chart_color_light": chart_color_light,
+        "chart_label": chart_label, "value_key": value_key,
+        "target_min": target_min, "target_max": target_max,
+        "empty_mode": "single" if len(data) == 1 else "none",
+    }
 
 
 @router.get("/partials/note-mood-chart", response_class=HTMLResponse)
@@ -1639,11 +1923,10 @@ async def note_mood_chart(request: Request, days: int = 30):
     days = min(max(days, 7), 365)
     from app.notes.analytics import NoteAnalytics
     data = await NoteAnalytics(db).get_mood_trend(days) if db else []
-    max_val = 10  # mood is always 1-10
-    return templates.TemplateResponse("partials/note_charts.html", {
-        "request": request, "data": data, "max_val": max_val,
-        "bar_color": "progress-purple", "unit": "",
-    })
+    ctx = _chart_context(data, "#a78bfa", "#7c3aed", "/10", min_val=0,
+                         target_min=6, target_max=8)
+    ctx["max_val"] = 10
+    return templates.TemplateResponse("partials/note_charts.html", {"request": request, **ctx})
 
 
 @router.get("/partials/note-calories-chart", response_class=HTMLResponse)
@@ -1652,14 +1935,10 @@ async def note_calories_chart(request: Request, days: int = 30):
     days = min(max(days, 7), 365)
     from app.notes.analytics import NoteAnalytics
     data = await NoteAnalytics(db).get_calorie_trend(days) if db else []
-    max_val = max((d.get("total", 0) for d in data), default=2500) or 2500
-    # Use total for calories (sum per day)
     for d in data:
         d["avg"] = d.get("total", d.get("avg", 0))
-    return templates.TemplateResponse("partials/note_charts.html", {
-        "request": request, "data": data, "max_val": max_val,
-        "bar_color": "progress-orange", "unit": "",
-    })
+    ctx = _chart_context(data, "#fb923c", "#f59e0b", "kcal")
+    return templates.TemplateResponse("partials/note_charts.html", {"request": request, **ctx})
 
 
 @router.get("/partials/note-weight-chart", response_class=HTMLResponse)
@@ -1668,11 +1947,8 @@ async def note_weight_chart(request: Request, days: int = 90):
     days = min(max(days, 7), 365)
     from app.notes.analytics import NoteAnalytics
     data = await NoteAnalytics(db).get_weight_trend(days) if db else []
-    max_val = max((d.get("avg", 0) for d in data), default=100) or 100
-    return templates.TemplateResponse("partials/note_charts.html", {
-        "request": request, "data": data, "max_val": max_val,
-        "bar_color": "progress-green", "unit": "кг",
-    })
+    ctx = _chart_context(data, "#4ade80", "#22c55e", "кг")
+    return templates.TemplateResponse("partials/note_charts.html", {"request": request, **ctx})
 
 
 @router.get("/partials/note-category-dist", response_class=HTMLResponse)
@@ -1683,6 +1959,41 @@ async def note_category_dist(request: Request, days: int = 30):
     total = sum(distribution.values()) if distribution else 0
     return templates.TemplateResponse("partials/note_category_dist.html", {
         "request": request, "distribution": distribution, "total": total,
+    })
+
+
+@router.get("/partials/note-heatmap", response_class=HTMLResponse)
+async def note_heatmap(request: Request, days: int = 90):
+    """Calendar heatmap of note activity."""
+    from datetime import datetime, timedelta
+    db = _get("db")
+    days = min(max(days, 28), 365)
+    counts = await db.get_notes_count_by_date(days) if db else {}
+    max_count = max(counts.values()) if counts else 1
+
+    # Build cell grid: each day → {date, count, weekday (0=Mon), week}
+    cells = []
+    today = datetime.now().date()
+    start = today - timedelta(days=days - 1)
+    # Align start to Monday
+    start = start - timedelta(days=start.weekday())
+    weeks = 0
+    current = start
+    while current <= today:
+        date_str = current.strftime("%Y-%m-%d")
+        cells.append({
+            "date": date_str,
+            "count": counts.get(date_str, 0),
+            "weekday": current.weekday(),
+            "week": (current - start).days // 7,
+        })
+        if current.weekday() == 6:
+            weeks = (current - start).days // 7
+        current += timedelta(days=1)
+    weeks += 1
+
+    return templates.TemplateResponse("partials/note_heatmap.html", {
+        "request": request, "cells": cells, "max_count": max_count, "weeks": weeks,
     })
 
 

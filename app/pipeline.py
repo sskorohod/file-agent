@@ -377,9 +377,9 @@ class Pipeline:
         start = time.monotonic()
         run_id = getattr(result, "_run_id", None)
 
-        # Always log — use file_id if available, otherwise run_id links it later
+        # Always log — use file_id if available, empty string for pre-store steps
         log_id = await self.db.log_step(
-            result.file_id or None, step_name, run_id=run_id,
+            result.file_id or "", step_name, run_id=run_id,
         )
 
         retries = self._MAX_RETRIES if step_name in self._RETRYABLE_STEPS else 0

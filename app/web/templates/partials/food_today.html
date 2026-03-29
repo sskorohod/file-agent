@@ -1,60 +1,94 @@
+{# Nutrition widget — compact, SaaS-grade
+   Expects: nutrition (dict), meals (dict mt→[entries]), entries (list), date (str) #}
 {% if nutrition and nutrition.items > 0 %}
-<div class="card !p-4 mb-4">
-  <h2 class="text-xs font-semibold text-txt-3 uppercase tracking-wider mb-3">Nutrition Today</h2>
 
-  {# ── Macro Summary ── #}
-  <div class="grid grid-cols-4 gap-3 mb-4">
-    <div class="text-center">
-      <div class="text-lg font-bold text-orange-400">{{ '%.0f'|format(nutrition.calories) }}</div>
-      <div class="text-xs text-txt-3">kcal</div>
+{# ── Calories + Macro Segmented Bar ── #}
+<div class="mb-4">
+  <div class="flex items-baseline justify-between mb-2">
+    <span class="text-2xl font-bold text-txt">{{ '%.0f'|format(nutrition.calories) }}</span>
+    <span class="text-xs text-txt-3">kcal today</span>
+  </div>
+  {# Segmented macro bar #}
+  {% set total_macro_cal = (nutrition.protein * 4 + nutrition.fat * 9 + nutrition.carbs * 4) or 1 %}
+  {% set p_pct = (nutrition.protein * 4 / total_macro_cal * 100)|round|int %}
+  {% set f_pct = (nutrition.fat * 9 / total_macro_cal * 100)|round|int %}
+  {% set c_pct = 100 - p_pct - f_pct %}
+  <div class="flex h-2 rounded-full overflow-hidden bg-surface-3 mb-2">
+    {% if p_pct > 0 %}<div class="bg-blue-400" style="width:{{ p_pct }}%"></div>{% endif %}
+    {% if f_pct > 0 %}<div class="bg-yellow-400" style="width:{{ f_pct }}%"></div>{% endif %}
+    {% if c_pct > 0 %}<div class="bg-green-400" style="width:{{ c_pct }}%"></div>{% endif %}
+  </div>
+  <div class="flex justify-between text-[10px] text-txt-3">
+    <span><span class="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 mr-1"></span>P {{ '%.0f'|format(nutrition.protein) }}g <span class="text-txt-3/50">{{ p_pct }}%</span></span>
+    <span><span class="inline-block w-1.5 h-1.5 rounded-full bg-yellow-400 mr-1"></span>F {{ '%.0f'|format(nutrition.fat) }}g <span class="text-txt-3/50">{{ f_pct }}%</span></span>
+    <span><span class="inline-block w-1.5 h-1.5 rounded-full bg-green-400 mr-1"></span>C {{ '%.0f'|format(nutrition.carbs) }}g <span class="text-txt-3/50">{{ c_pct }}%</span></span>
+  </div>
+</div>
+
+{# ── Meal Completion Strip ── #}
+{% set meal_order = ['breakfast', 'lunch', 'dinner', 'snack'] %}
+{% set meal_icons = {'breakfast': '🌅', 'lunch': '☀️', 'dinner': '🌙', 'snack': '🍪'} %}
+{% set meal_labels = {'breakfast': 'Завтрак', 'lunch': 'Обед', 'dinner': 'Ужин', 'snack': 'Перекус'} %}
+
+<div class="flex gap-2 mb-3">
+  {% for mt in meal_order %}
+  {% set has_meal = mt in meals and meals[mt]|length > 0 %}
+  {% set meal_cal = meals[mt]|map(attribute='calories_kcal')|select('number')|sum if has_meal else 0 %}
+  <div class="flex-1 rounded-lg px-2 py-1.5 text-center {{ 'bg-ok-bg/40 border border-ok/20' if has_meal else 'bg-surface-3/50 border border-transparent' }}">
+    <div class="text-xs">{{ meal_icons.get(mt, '🍽') }}</div>
+    {% if has_meal and meal_cal %}
+    <div class="text-[10px] font-medium {{ 'text-ok-text' if has_meal else 'text-txt-3' }}">{{ '%.0f'|format(meal_cal) }}</div>
+    {% else %}
+    <div class="text-[10px] text-txt-3">—</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+{# ── Compact Meal List ── #}
+{% for mt in meal_order %}
+  {% if mt in meals %}
+  <div class="mb-2">
+    <div class="flex items-center gap-1.5 mb-1">
+      <span class="text-[10px]">{{ meal_icons.get(mt) }}</span>
+      <span class="text-[10px] font-semibold text-txt-3 uppercase">{{ meal_labels.get(mt, mt) }}</span>
     </div>
-    <div class="text-center">
-      <div class="text-lg font-bold text-blue-400">{{ '%.0f'|format(nutrition.protein) }}</div>
-      <div class="text-xs text-txt-3">protein</div>
+    {% for e in meals[mt] %}
+    <div class="flex items-center justify-between pl-4 py-0.5">
+      <span class="text-xs text-txt-2 truncate flex-1">{{ e.food_name }}</span>
+      <div class="flex items-center gap-1.5 shrink-0">
+        {% if e.calories_kcal %}<span class="text-[11px] text-txt-3 font-mono">{{ '%.0f'|format(e.calories_kcal) }}</span>{% endif %}
+        {% if e.estimated %}<span class="text-[9px] px-1 py-0 rounded bg-warn-bg/50 text-warn-text/70">est</span>{% endif %}
+      </div>
     </div>
-    <div class="text-center">
-      <div class="text-lg font-bold text-yellow-400">{{ '%.0f'|format(nutrition.fat) }}</div>
-      <div class="text-xs text-txt-3">fat</div>
-    </div>
-    <div class="text-center">
-      <div class="text-lg font-bold text-green-400">{{ '%.0f'|format(nutrition.carbs) }}</div>
-      <div class="text-xs text-txt-3">carbs</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+{% endfor %}
+
+{# Unknown meals #}
+{% if 'unknown' in meals %}
+<div class="mb-2">
+  <div class="flex items-center gap-1.5 mb-1">
+    <span class="text-[10px]">🍽</span>
+    <span class="text-[10px] font-semibold text-txt-3 uppercase">Other</span>
+  </div>
+  {% for e in meals['unknown'] %}
+  <div class="flex items-center justify-between pl-4 py-0.5">
+    <span class="text-xs text-txt-2 truncate flex-1">{{ e.food_name }}</span>
+    <div class="flex items-center gap-1.5 shrink-0">
+      {% if e.calories_kcal %}<span class="text-[11px] text-txt-3 font-mono">{{ '%.0f'|format(e.calories_kcal) }}</span>{% endif %}
+      {% if e.estimated %}<span class="text-[9px] px-1 py-0 rounded bg-warn-bg/50 text-warn-text/70">est</span>{% endif %}
     </div>
   </div>
-
-  {# ── Per-Meal Breakdown ── #}
-  {% set meal_order = ['breakfast', 'lunch', 'dinner', 'snack', 'unknown'] %}
-  {% set meal_labels = {'breakfast': 'Breakfast', 'lunch': 'Lunch', 'dinner': 'Dinner', 'snack': 'Snack', 'unknown': 'Other'} %}
-  {% set meal_icons = {'breakfast': '🌅', 'lunch': '☀️', 'dinner': '🌙', 'snack': '🍪', 'unknown': '🍽'} %}
-
-  {% for mt in meal_order %}
-    {% if mt in meals %}
-    <div class="mb-3">
-      <div class="flex items-center gap-2 mb-1">
-        <span>{{ meal_icons.get(mt, '🍽') }}</span>
-        <span class="text-xs font-semibold text-txt-2 uppercase">{{ meal_labels.get(mt, mt) }}</span>
-        {% set meal_cal = meals[mt] | map(attribute='calories_kcal') | select('number') | sum %}
-        {% if meal_cal %}
-        <span class="text-xs text-txt-3">{{ '%.0f'|format(meal_cal) }} kcal</span>
-        {% endif %}
-      </div>
-      <div class="space-y-1 pl-6">
-        {% for e in meals[mt] %}
-        <div class="flex items-center justify-between text-sm">
-          <span class="text-txt-2">{{ e.food_name }}</span>
-          <div class="flex items-center gap-2">
-            {% if e.calories_kcal %}
-            <span class="text-xs text-txt-3 font-mono">{{ '%.0f'|format(e.calories_kcal) }}</span>
-            {% endif %}
-            {% if e.estimated %}
-            <span class="text-xs px-1 py-0.5 rounded bg-warn-bg text-warn-text">est</span>
-            {% endif %}
-          </div>
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-    {% endif %}
   {% endfor %}
+</div>
+{% endif %}
+
+{% else %}
+{# No food data #}
+<div class="text-center py-4">
+  <p class="text-xs text-txt-3 mb-1">Нет записей о еде</p>
+  <p class="text-[10px] text-txt-3/60">Отправьте заметку о приёме пищи в Telegram</p>
 </div>
 {% endif %}

@@ -29,6 +29,32 @@ _last_command: dict[int, float] = {}
 _MIN_COMMAND_INTERVAL = 1.0  # seconds
 
 
+async def _safe_answer(query, text: str = "", **kwargs):
+    """Answer callback query, ignoring 'query too old' errors."""
+    try:
+        await query.answer(text, **kwargs)
+    except Exception as e:
+        if "query is too old" in str(e).lower() or "query id is invalid" in str(e).lower():
+            logger.debug(f"Callback query expired (normal): {e}")
+        else:
+            logger.warning(f"Failed to answer callback query: {e}")
+
+
+async def _safe_edit(query, text: str, **kwargs):
+    """Edit callback message, falling back to send_message on error."""
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except Exception as e:
+        if "message is not modified" in str(e).lower():
+            pass  # Same text — ignore
+        else:
+            logger.warning(f"Failed to edit message: {e}")
+            try:
+                await query.message.reply_text(text, **kwargs)
+            except Exception:
+                pass
+
+
 def owner_only(func):
     """Restrict handler to the configured owner_id only. Block non-private chats."""
     @wraps(func)
@@ -385,28 +411,24 @@ class BotHandlers:
     async def handle_scan_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle scan confirm/cancel buttons."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
         action = query.data.split(":")[1]  # "confirm" or "cancel"
 
         session = context.user_data.pop("scan_session", None)
 
         if action == "cancel":
-            if session:
-                await query.edit_message_caption(
-                    f"🚫 Сканирование «{session['name']}» отменено."
-                )
-            else:
-                try:
-                    await query.edit_message_text("🚫 Отменено.")
-                except Exception:
-                    await query.edit_message_caption("🚫 Отменено.")
+            try:
+                msg = f"🚫 Сканирование «{session['name']}» отменено." if session else "🚫 Отменено."
+                await query.edit_message_caption(msg)
+            except Exception:
+                await _safe_edit(query, "🚫 Отменено.")
             return
 
         if not session or not session["images"]:
             try:
-                await query.edit_message_text("📭 Данные устарели. Начните /scan заново.")
+                await query.edit_message_caption("📭 Данные устарели. Начните /scan заново.")
             except Exception:
-                await query.edit_message_caption("📭 Данные устарели.")
+                await _safe_edit(query, "📭 Данные устарели.")
             return
 
         # Confirm: build PDF and process
@@ -446,13 +468,13 @@ class BotHandlers:
     async def handle_files_page(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle pagination buttons for /files."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
         # fp:<offset>:<category or _>
         parts = query.data.split(":", 2)
         offset = int(parts[1]) if len(parts) > 1 else 0
         category = parts[2] if len(parts) > 2 and parts[2] != "_" else None
         text, markup = await self._files_page(offset, category)
-        await query.edit_message_text(text, reply_markup=markup)
+        await _safe_edit(query, text, reply_markup=markup)
 
     async def _files_page(self, offset: int, category: str | None):
         """Build a files list page with navigation."""
@@ -882,7 +904,7 @@ class BotHandlers:
     async def handle_text_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle text message choice: search or save as note."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
 
         parts = query.data.split(":")  # "tc:s:abcd1234" or "tc:n:abcd1234"
         if len(parts) < 3:
@@ -893,11 +915,11 @@ class BotHandlers:
         text = self._pending_files.pop(f"tc:{text_key}", None)
 
         if not text:
-            await query.edit_message_text("❌ Данные устарели. Отправьте сообщение заново.")
+            await _safe_edit(query, "❌ Данные устарели. Отправьте сообщение заново.")
             return
 
         if action == "s":
-            await query.edit_message_text(f"«{text[:100]}»\n\n🔍 Ищу...")
+            await _safe_edit(query, f"«{text[:100]}»\n\n🔍 Ищу...")
             # Create a fake Update to reuse _do_search
             class _FakeUpdate:
                 def __init__(self, message, chat):
@@ -914,7 +936,7 @@ class BotHandlers:
             await self._do_search(fake_update, text, context)
 
         elif action == "n":
-            await query.edit_message_text(f"«{text[:100]}»\n\n⏳ Сохраняю заметку...")
+            await _safe_edit(query, f"«{text[:100]}»\n\n⏳ Сохраняю заметку...")
             await self._save_smart_note(text, query.message.chat_id, query, source="text")
 
     @owner_only
@@ -993,7 +1015,7 @@ class BotHandlers:
     async def handle_voice_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle voice message choice: search or save as note."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
 
         parts = query.data.split(":")  # "vc:s:abcd1234" or "vc:n:abcd1234"
         if len(parts) < 3:
@@ -1004,12 +1026,12 @@ class BotHandlers:
         text = self._pending_files.pop(f"vc:{voice_key}", None)
 
         if not text:
-            await query.edit_message_text("❌ Данные устарели. Отправьте голосовое заново.")
+            await _safe_edit(query, "❌ Данные устарели. Отправьте голосовое заново.")
             return
 
         if action == "s":
             # Search
-            await query.edit_message_text(f"🎤 «{text}»\n\n🔍 Ищу...")
+            await _safe_edit(query, f"🎤 «{text}»\n\n🔍 Ищу...")
             # Create a fake update-like object to reply in the same chat
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
@@ -1047,7 +1069,7 @@ class BotHandlers:
                     await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Ошибка: {e}")
 
         elif action == "n":
-            await query.edit_message_text(f"🎤 «{text}»\n\n⏳ Обрабатываю заметку...")
+            await _safe_edit(query, f"🎤 «{text}»\n\n⏳ Обрабатываю заметку...")
             await self._save_smart_note(text, query.message.chat_id, query)
 
     async def _save_smart_note(self, text: str, chat_id: int, callback_query, source: str = "voice"):
@@ -1057,12 +1079,12 @@ class BotHandlers:
         capture = get_state("note_capture")
         if capture:
             note_id = await capture.capture(text, source=source)
-            await callback_query.edit_message_text(f"📝 Сохранено (#{note_id}). Обработка в фоне...")
+            await _safe_edit(callback_query, f"📝 Сохранено (#{note_id}). Обработка в фоне...")
         else:
             # Fallback: direct DB save
             db = self.pipeline.db
             note_id = await db.save_note(content=text, source=source)
-            await callback_query.edit_message_text(f"📝 Сохранено (#{note_id})")
+            await _safe_edit(callback_query, f"📝 Сохранено (#{note_id})")
 
     @owner_only
     async def cmd_note(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1260,7 +1282,7 @@ class BotHandlers:
     async def handle_note_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle note action buttons: note:ok:ID, note:edit:ID, note:archive:ID."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
 
         parts = query.data.split(":")
         if len(parts) < 3:
@@ -1275,30 +1297,31 @@ class BotHandlers:
         db = self.pipeline.db
 
         if action == "ok":
-            await query.edit_message_reply_markup(reply_markup=None)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
         elif action == "archive":
             await db.set_note_status(note_id, "archived")
-            await query.edit_message_text(f"📦 Заметка #{note_id} архивирована")
+            await _safe_edit(query, f"📦 Заметка #{note_id} архивирована")
         elif action == "pin":
             is_pinned = await db.toggle_note_pin(note_id)
             emoji = "📌" if is_pinned else "📎"
             label = "закреплена" if is_pinned else "откреплена"
-            await query.answer(f"{emoji} Заметка #{note_id} {label}", show_alert=False)
+            await _safe_answer(query, f"{emoji} Заметка #{note_id} {label}", show_alert=False)
         elif action == "edit":
             # v1: Edit metadata only — redirect to web detail page
             from app.config import get_settings
             s = get_settings()
             host = s.web.host if s.web.host != "0.0.0.0" else "localhost"
             url = f"http://{host}:{s.web.port}/notes/{note_id}"
-            await query.edit_message_text(
-                f"✏️ Редактировать заметку #{note_id}:\n{url}",
-            )
+            await _safe_edit(query, f"✏️ Редактировать заметку #{note_id}:\n{url}")
 
     @owner_only
     async def handle_checkin_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle evening check-in callbacks: ci:score:N:cat, ci:skip:cat, ci:done."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
 
         parts = query.data.split(":")
         if len(parts) < 2:
@@ -1326,21 +1349,21 @@ class BotHandlers:
         if action == "score" and len(parts) >= 4:
             score = int(parts[2])
             category = parts[3]
-            await query.edit_message_text(f"💭 Настроение: {score}/10 ✓")
+            await _safe_edit(query, f"💭 Настроение: {score}/10 ✓")
             await checkin.handle_mood_score(score, chat_id, tg_app, category)
         elif action == "skip" and len(parts) >= 3:
             category = parts[2]
-            await query.edit_message_text(f"⏭ Пропущено")
+            await _safe_edit(query, "⏭ Пропущено")
             await checkin.handle_skip(chat_id, tg_app, category)
         elif action == "done":
-            await query.edit_message_text("✅ Check-in завершён")
+            await _safe_edit(query, "✅ Check-in завершён")
             await checkin.handle_done(chat_id, tg_app)
 
     @owner_only
     async def handle_reminder_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle reminder buttons: done or snooze."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
 
         parts = query.data.split(":")  # "rem:done:123" or "rem:snooze:123"
         if len(parts) < 3:
@@ -1352,7 +1375,7 @@ class BotHandlers:
 
         if action == "done":
             await db.mark_reminder_sent(reminder_id)
-            await query.edit_message_text(query.message.text + "\n\n✅ Отмечено как выполненное.")
+            await _safe_edit(query, query.message.text + "\n\n✅ Отмечено как выполненное.")
         elif action == "snooze":
             from datetime import datetime, timedelta
             new_date = (datetime.now() + timedelta(days=1)).isoformat()
@@ -1360,13 +1383,13 @@ class BotHandlers:
                 "UPDATE reminders SET remind_at=?, sent=0 WHERE id=?", (new_date, reminder_id)
             )
             await db.db.commit()
-            await query.edit_message_text(query.message.text + "\n\n⏰ Отложено на 1 день.")
+            await _safe_edit(query, query.message.text + "\n\n⏰ Отложено на 1 день.")
 
     @owner_only
     async def handle_note_reminder_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle note reminder buttons: create, done, snooze."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
 
         parts = query.data.split(":")  # "nrem:create:14" or "nrem:done:5"
         if len(parts) < 3:
@@ -1380,28 +1403,31 @@ class BotHandlers:
             from app.notes.reminders import ReminderExtractionService
             svc = ReminderExtractionService(db)
             count = await svc.create_for_inferred(id_val)  # id_val = note_id
-            await query.edit_message_reply_markup(reply_markup=None)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
             if count:
                 await query.message.reply_text(f"⏰ Создано напоминаний: {count}")
             else:
                 await query.message.reply_text("Нет задач с дедлайном для напоминания")
         elif action == "done":
             await db.complete_note_reminder(id_val)  # id_val = reminder_id
-            await query.edit_message_text(query.message.text + "\n\n✅ Выполнено")
+            await _safe_edit(query, query.message.text + "\n\n✅ Выполнено")
         elif action == "snooze":
             await db.snooze_note_reminder(id_val)  # id_val = reminder_id
-            await query.edit_message_text(query.message.text + "\n\n⏰ Отложено на 24ч")
+            await _safe_edit(query, query.message.text + "\n\n⏰ Отложено на 24ч")
 
     @owner_only
     async def handle_dedup_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle user's choice on semantic duplicate: n=keep_new / o=keep_old / b=keep_both."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
 
         data = query.data  # "dedup:n:abcd1234" etc.
         parts = data.split(":")
         if len(parts) < 3:
-            await query.edit_message_text("❌ Неверные данные")
+            await _safe_edit(query, "❌ Неверные данные")
             return
 
         action = parts[1]
@@ -1410,7 +1436,7 @@ class BotHandlers:
         # Retrieve full IDs from bot_data
         ids = context.bot_data.pop(f"dd:{dedup_key}", None)
         if not ids:
-            await query.edit_message_text("❌ Данные устарели. Обработайте файл заново.")
+            await _safe_edit(query, "❌ Данные устарели. Обработайте файл заново.")
             return
 
         new_file_id = ids["new"]
@@ -1418,20 +1444,20 @@ class BotHandlers:
 
         if action == "n":
             await self._cascade_delete(old_file_id)
-            await query.edit_message_text("✅ Оставлен новый файл. Старый удалён.")
+            await _safe_edit(query, "✅ Оставлен новый файл. Старый удалён.")
         elif action == "o":
             await self._cascade_delete(new_file_id)
-            await query.edit_message_text("✅ Оставлен старый файл. Новый удалён.")
+            await _safe_edit(query, "✅ Оставлен старый файл. Новый удалён.")
         elif action == "b":
-            await query.edit_message_text("✅ Оба файла сохранены.")
+            await _safe_edit(query, "✅ Оба файла сохранены.")
         else:
-            await query.edit_message_text("❌ Неизвестное действие")
+            await _safe_edit(query, "❌ Неизвестное действие")
 
     @owner_only
     async def handle_file_send(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send a file document to the user when they click a file button."""
         query = update.callback_query
-        await query.answer()
+        await _safe_answer(query)
 
         parts = query.data.split(":")  # "file:s:short_key"
         if len(parts) < 3:
@@ -1440,18 +1466,18 @@ class BotHandlers:
         short_key = parts[2]
         file_id = self._pending_files.pop(f"fs:{short_key}", None) or context.bot_data.pop(f"fs:{short_key}", None)
         if not file_id:
-            await query.answer("❌ Данные устарели", show_alert=True)
+            await _safe_answer(query, "❌ Данные устарели", show_alert=True)
             return
 
         db = self.pipeline.db
         file = await db.get_file(file_id)
         if not file or not file.get("stored_path"):
-            await query.answer("❌ Файл не найден", show_alert=True)
+            await _safe_answer(query, "❌ Файл не найден", show_alert=True)
             return
 
         stored_uri = file["stored_path"]
         if not await self.pipeline.file_storage.exists(stored_uri):
-            await query.answer("❌ Файл удалён", show_alert=True)
+            await _safe_answer(query, "❌ Файл удалён", show_alert=True)
             return
 
         import io
