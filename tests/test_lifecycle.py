@@ -193,7 +193,7 @@ class TestReclassify:
         svc = FileLifecycleService(db, file_storage, mock_vector_store, mock_llm_search, mock_classifier)
         result = await svc.reclassify("schema-test")
 
-        required_keys = {"file_id", "category", "tags", "summary", "document_type"}
+        required_keys = {"file_id", "category", "tags", "summary", "document_type", "summary_source"}
         assert required_keys == set(result.keys())
 
     @pytest.mark.asyncio

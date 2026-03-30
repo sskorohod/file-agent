@@ -811,6 +811,11 @@ class Database:
         )
         await self.db.commit()
 
+    async def delete_file_log(self, file_id: str):
+        """Delete all processing log entries for a file."""
+        await self.db.execute("DELETE FROM processing_log WHERE file_id=?", (file_id,))
+        await self.db.commit()
+
     async def delete_run_logs(self, run_id: str):
         """Delete all processing_log entries for a pipeline run.
 
@@ -922,7 +927,7 @@ class Database:
 
     async def list_api_keys(self) -> list[dict]:
         cursor = await self.db.execute(
-            "SELECT key, name, created_at, last_used_at FROM api_keys ORDER BY created_at DESC"
+            "SELECT key, name, mode, created_at, last_used_at FROM api_keys ORDER BY created_at DESC"
         )
         return [dict(r) for r in await cursor.fetchall()]
 

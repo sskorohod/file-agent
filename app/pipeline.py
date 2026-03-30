@@ -158,6 +158,7 @@ class Pipeline:
         self.llm = llm_router
         self.classifier = classifier
         self.skills = skill_engine
+        self.summarizer = None  # Set via pipeline.summarizer = FileSummarizer(...)
 
     async def process(
         self,
@@ -278,6 +279,17 @@ class Pipeline:
                 result.semantic_duplicate_of = self._last_semantic_dup["existing"]
                 result.similarity_score = self._last_semantic_dup["score"]
 
+            # Step 7.5: Summarize (non-fatal, enriches metadata quality)
+            summary_result = None
+            if parse_result.text and parse_result.text.strip() and hasattr(self, 'summarizer') and self.summarizer:
+                try:
+                    summary_result = await self._log_step(
+                        result, "summarize",
+                        lambda: self._step_summarize(parse_result, filename, classification),
+                    )
+                except Exception as e:
+                    logger.warning(f"Summarize failed (non-fatal): {e}")
+
             # Step 8: Save metadata — write to SQLite
             # If save_meta fails after store succeeded, clean up orphaned artifacts
             try:
@@ -285,6 +297,7 @@ class Pipeline:
                     result, "save_meta",
                     lambda: self._step_save_meta(
                         file_record, parse_result, classification, source, chunks,
+                        summary_result=summary_result,
                     ),
                 )
             except Exception as save_err:
@@ -553,6 +566,24 @@ class Pipeline:
             category=classification.category,
         )
 
+    async def _step_summarize(
+        self,
+        parse_result: ParseResult,
+        filename: str,
+        classification: ClassificationResult,
+    ):
+        """Generate dedicated file summary with richer context."""
+        from app.llm.summarizer import SummaryContext, build_summary_context
+        text_excerpt = build_summary_context(parse_result.text)
+        context = SummaryContext(
+            filename=filename,
+            document_type=classification.document_type,
+            category=classification.category,
+            text_excerpt=text_excerpt,
+            text_length=len(parse_result.text),
+        )
+        return await self.summarizer.summarize(context)
+
     async def _step_embed(
         self,
         file_record: FileRecord,
@@ -643,6 +674,7 @@ class Pipeline:
         classification: ClassificationResult,
         source: str,
         chunks: int,
+        summary_result=None,
     ):
         """Save metadata to SQLite."""
         # Get priority from extracted fields if available
@@ -650,14 +682,37 @@ class Pipeline:
         if self._current_extracted_fields:
             priority = (self._current_extracted_fields.get("priority", "") or "").lower().strip()
 
-        # Use extracted summary if available (more detailed than classification summary)
+        # Summary priority: skill extraction > summarizer > classifier fallback
+        summary_source = "classifier"
         summary = classification.summary
         if self._current_extracted_fields and self._current_extracted_fields.get("summary"):
             summary = self._current_extracted_fields["summary"]
+            summary_source = "skill"
+        elif summary_result:
+            summary = summary_result.summary
+            summary_source = "summarizer"
 
         # Extract document_date from extracted_fields by priority:
         # date → issue_date → date_of_service → measurement_date → None
         document_date = self._extract_document_date(self._current_extracted_fields)
+
+        # Build metadata with summary quality hints
+        metadata = {
+            "document_type": classification.document_type,
+            "confidence": classification.confidence,
+            "skill": classification.skill_name,
+            "chunks_embedded": chunks,
+            "language": parse_result.language,
+            "parser": parse_result.parser_used,
+            "pages": parse_result.pages,
+            "extracted_fields": self._current_extracted_fields or {},
+            "text_length": len(parse_result.text),
+            "summary_source": summary_source,
+        }
+        if summary_result:
+            metadata["summary_context_chars"] = summary_result.context_chars
+            metadata["summary_model"] = summary_result.model
+            metadata["summary_latency_ms"] = summary_result.latency_ms
 
         await self.db.insert_file(
             id=file_record.id,
@@ -671,16 +726,7 @@ class Pipeline:
             summary=summary,
             source=source,
             extracted_text=parse_result.text[:50000],
-            metadata={
-                "document_type": classification.document_type,
-                "confidence": classification.confidence,
-                "skill": classification.skill_name,
-                "chunks_embedded": chunks,
-                "language": parse_result.language,
-                "parser": parse_result.parser_used,
-                "pages": parse_result.pages,
-                "extracted_fields": self._current_extracted_fields or {},
-            },
+            metadata=metadata,
             priority=priority,
             document_date=document_date,
         )

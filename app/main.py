@@ -1,4 +1,4 @@
-"""AI File Intelligence Agent — Entry Point with full lifespan management."""
+"""Smart Storage — Entry Point with full lifespan management."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     settings.setup_env_keys()
 
     logging.basicConfig(level=settings.logging.level, format=settings.logging.format)
-    logger.info("Starting AI File Intelligence Agent v0.1.0")
+    logger.info("Starting Smart Storage v0.2.0")
 
     # ── Encryption setup ────────────────────────────────────────────────
     import os as _os
@@ -243,12 +243,16 @@ async def lifespan(app: FastAPI):
     parser_factory = ParserFactory(vision_model=vision_model.model if vision_model else None)
     _state["parser_factory"] = parser_factory
 
+    from app.llm.summarizer import FileSummarizer
+    summarizer = FileSummarizer(llm_router, prompt_template=settings.llm.file_summary_prompt)
+
     from app.pipeline import Pipeline
     pipeline = Pipeline(
         settings=settings, db=db, file_storage=file_storage,
         vector_store=vector_store, parser_factory=parser_factory,
         llm_router=llm_router, classifier=classifier, skill_engine=skill_engine,
     )
+    pipeline.summarizer = summarizer
     _state["pipeline"] = pipeline
 
     from app.llm.search import LLMSearch
@@ -266,6 +270,7 @@ async def lifespan(app: FastAPI):
         vector_store=vector_store,
         llm_search=llm_search,
         classifier=classifier,
+        summarizer=summarizer,
     )
     _state["lifecycle"] = lifecycle
 
@@ -756,17 +761,27 @@ async def _evening_checkin_loop(note_capture, db, tg_app, settings):
             if not chat_id:
                 continue
 
-            checkin = EveningCheckin(
-                db,
-                expected_categories=settings.notes.expected_daily_categories,
-                expected_signals=settings.notes.expected_daily_signals,
-                capture=note_capture,
-                max_questions=settings.notes.checkin_max_questions,
-                include_closing=settings.notes.checkin_include_closing_prompt,
-                weight_frequency_days=settings.notes.checkin_weight_frequency_days,
+            # Send web checkin link
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            public_url = ""
+            if settings.telegram.webhook_url:
+                from urllib.parse import urlparse
+                parsed = urlparse(settings.telegram.webhook_url)
+                public_url = f"{parsed.scheme}://{parsed.netloc}"
+            else:
+                host = settings.web.host if settings.web.host != "0.0.0.0" else "localhost"
+                public_url = f"http://{host}:{settings.web.port}"
+
+            checkin_url = f"{public_url}/notes/checkin"
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📝 Открыть чекин", url=checkin_url),
+            ]])
+            await tg_app.bot.send_message(
+                chat_id=chat_id,
+                text="🌙 Время вечернего чекина!\n\nЗаполни настроение, сон, еду и другие сигналы дня.",
+                reply_markup=keyboard,
             )
-            await checkin.run_checkin(tg_app, chat_id)
-            logger.info("Evening check-in sent")
+            logger.info("Evening check-in link sent")
 
         except asyncio.CancelledError:
             break
@@ -879,7 +894,7 @@ async def _weekly_report_loop(note_agent, db, llm_router, tg_app):
             await asyncio.sleep(3600)
 
 
-app = FastAPI(title="AI File Intelligence Agent", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Smart Storage", version="0.2.0", lifespan=lifespan)
 
 # ── Security Middleware ──────────────────────────────────────────────────────
 import secrets as _secrets
@@ -905,7 +920,7 @@ class SecurityHeadersMiddleware:
             if message["type"] == "http.response.start":
                 # Skip CSP for file download responses (PDF viewer needs full permissions)
                 path = scope.get("path", "")
-                if "/download" in path:
+                if "/download" in path or path.startswith("/mcp") or path.startswith("/api"):
                     await send(message)
                     return
                 headers = dict(message.get("headers", []))
@@ -993,8 +1008,10 @@ _static_dir = Path(__file__).parent / "web" / "static"
 if _static_dir.exists():
     app.mount("/static", _StaticFiles(directory=str(_static_dir)), name="static")
 
-app.mount("/mcp/sse", mcp.sse_app())                # Legacy SSE transport
-app.mount("/mcp", mcp.streamable_http_app())         # Streamable HTTP (Codex, Claude Code)
+# Mount MCP server (both transports)
+from app.mcp_server import mcp as _mcp
+app.mount("/mcp/sse", _mcp.sse_app())                # Legacy SSE transport
+app.mount("/mcp", _mcp.streamable_http_app())         # Streamable HTTP (Codex, Claude Code)
 
 
 # Telegram webhook endpoint

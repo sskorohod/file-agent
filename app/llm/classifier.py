@@ -19,7 +19,7 @@ Available categories:
 Rules:
 - FIRST determine what this document ACTUALLY is. Read the content carefully.
 - document_type: be PRECISE and SPECIFIC. Examples: passport, driver_license, lab_result, invoice, marketing_guide, business_plan, contract, pay_stub, tax_form, educational_material, manual, presentation, report, letter, certificate
-- summary: 3-5 предложений на русском. Опиши ЧТО это за документ, О ЧЁМ он, ДЛЯ ЧЕГО нужен, КЛЮЧЕВЫЕ факты из содержания.
+- summary: одно короткое предложение на русском для quick reference (fallback-описание).
 - tags: 3-5 relevant tags, lowercase
 - DO NOT force-fit the document. If it's a guide about marketing — say so. If it's a receipt — say so. Be honest about what you see.
 
@@ -28,7 +28,7 @@ Respond ONLY with valid JSON, no markdown fences:
   "category": "<category_name>",
   "confidence": <0.0-1.0>,
   "tags": ["tag1", "tag2", "tag3"],
-  "summary": "<3-5 sentences in Russian describing what this document is, what it contains, and why it matters>",
+  "summary": "<одно короткое предложение на русском — что это за документ>",
   "document_type": "<specific_type>"
 }}
 """

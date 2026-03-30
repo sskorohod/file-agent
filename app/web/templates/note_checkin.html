@@ -1,0 +1,67 @@
+{% extends "layout.html" %}
+{% block title %}Evening Check-in — Smart Storage{% endblock %}
+{% block content %}
+
+<div class="max-w-lg mx-auto">
+  <div class="flex items-center justify-between mb-5">
+    <div>
+      <h1 class="text-lg font-bold text-txt">Вечерний чекин</h1>
+      <p class="text-xs text-txt-3 mt-0.5">{{ today }}</p>
+    </div>
+    <a href="/notes" class="btn-secondary btn-sm">Back</a>
+  </div>
+
+  {% if completed %}
+  <div class="card !p-6 text-center">
+    <div class="w-12 h-12 rounded-2xl bg-ok-bg flex items-center justify-center mx-auto mb-3">
+      <svg class="w-6 h-6 text-ok-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+    </div>
+    <h2 class="text-lg font-semibold text-txt mb-1">Чекин завершён</h2>
+    <p class="text-sm text-txt-3">Данные за сегодня уже собраны</p>
+    <a href="/notes" class="btn-primary btn-sm mt-4 inline-block">К заметкам</a>
+  </div>
+
+  {% else %}
+  <form method="POST" action="/notes/checkin/submit" class="space-y-4">
+
+    {% for sig in signals %}
+    {% set prompt = prompts[sig] %}
+    <div class="card !p-4">
+      <label class="block text-sm font-medium text-txt mb-2">
+        {{ prompt.emoji }} {{ prompt.question }}
+      </label>
+
+      {% if prompt.type == 'mood_scale' %}
+      <div class="flex gap-1.5 flex-wrap">
+        {% for i in range(1, 11) %}
+        <label class="cursor-pointer">
+          <input type="radio" name="{{ sig }}" value="{{ i }}" class="sr-only peer">
+          <span class="inline-flex items-center justify-center w-9 h-9 rounded-lg text-sm font-medium
+            bg-surface-2 text-txt-3 border border-border
+            peer-checked:bg-accent peer-checked:text-white peer-checked:border-accent
+            hover:bg-surface-3 transition-all">{{ i }}</span>
+        </label>
+        {% endfor %}
+      </div>
+
+      {% else %}
+      <textarea name="{{ sig }}" rows="2" placeholder="..."
+                class="input text-sm resize-y min-h-[60px]"></textarea>
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    {% if not signals %}
+    <div class="card !p-6 text-center">
+      <p class="text-sm text-txt-3">Все сигналы за сегодня уже получены</p>
+      <a href="/notes" class="btn-primary btn-sm mt-3 inline-block">К заметкам</a>
+    </div>
+    {% else %}
+    <button type="submit" class="btn-primary w-full">Отправить</button>
+    {% endif %}
+
+  </form>
+  {% endif %}
+</div>
+
+{% endblock %}

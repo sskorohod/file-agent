@@ -6,7 +6,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#09090b">
 <meta name="csrf-token" content="{{ csrf_token }}">
-<title>{% block title %}FileAgent{% endblock %}</title>
+<title>{% block title %}Smart Storage{% endblock %}</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📁</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -47,7 +47,7 @@ document.addEventListener('DOMContentLoaded', function() {
           <svg class="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
         </div>
         <div>
-          <div class="text-base font-bold text-txt">FileAgent</div>
+          <div class="text-base font-bold text-txt">Smart Storage</div>
           <div class="text-[10px] text-txt-3 font-medium tracking-wide">AI Knowledge Base</div>
         </div>
       </div>
@@ -135,7 +135,7 @@ document.addEventListener('DOMContentLoaded', function() {
         <button onclick="toggleSidebar()" class="p-2 -ml-2 rounded-lg hover:bg-surface-2 transition-colors touch-target">
           <svg class="w-5 h-5 text-txt-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>
         </button>
-        <span class="text-sm font-semibold text-txt">FileAgent</span>
+        <span class="text-sm font-semibold text-txt">Smart Storage</span>
       </div>
       {# Page title on mobile #}
       <span class="text-xs text-txt-3 capitalize">{{ page }}</span>

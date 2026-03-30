@@ -1,8 +1,8 @@
-# CLAUDE.md — AI File Intelligence Agent + Life OS
+# CLAUDE.md — Smart Storage + Life OS
 
 ## Project Overview
 
-Personal AI agent: document processing + smart notes + health tracking + life analytics.
+Smart Storage — personal AI agent for document processing + smart notes + health tracking + life analytics.
 Telegram Bot + Web Dashboard (Life OS). Receives files/voice/text → processes → classifies (LLM) → stores → embeds → semantic search. Smart Notes with enrichment, habit tracking, anomaly detection, morning briefings, weekly reports.
 
 ## Tech Stack

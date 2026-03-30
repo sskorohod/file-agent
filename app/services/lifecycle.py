@@ -20,12 +20,14 @@ class FileLifecycleService:
         vector_store: Any | None = None,
         llm_search: Any | None = None,
         classifier: Any | None = None,
+        summarizer: Any | None = None,
     ):
         self.db = db
         self.file_storage = file_storage
         self.vector_store = vector_store
         self.llm_search = llm_search
         self.classifier = classifier
+        self.summarizer = summarizer
 
     # ── Delete ───────────────────────────────────────────────────────────
 
@@ -85,6 +87,32 @@ class FileLifecycleService:
             text=text, filename=filename, mime_type=mime_type,
         )
 
+        # 1.5. Summarize (non-fatal, richer context)
+        summary = result.summary
+        summary_source = "classifier"
+        summary_meta = {}
+        if self.summarizer and text.strip():
+            try:
+                from app.llm.summarizer import SummaryContext, build_summary_context
+                text_excerpt = build_summary_context(text)
+                ctx = SummaryContext(
+                    filename=filename,
+                    document_type=result.document_type,
+                    category=result.category,
+                    text_excerpt=text_excerpt,
+                    text_length=len(text),
+                )
+                sr = await self.summarizer.summarize(ctx)
+                summary = sr.summary
+                summary_source = "summarizer"
+                summary_meta = {
+                    "summary_context_chars": sr.context_chars,
+                    "summary_model": sr.model,
+                    "summary_latency_ms": sr.latency_ms,
+                }
+            except Exception as e:
+                logger.warning(f"Summarize failed in reclassify (non-fatal): {e}")
+
         # 2. Update DB columns + document_type in metadata_json (single atomic update)
         meta_raw = file.get("metadata_json") or "{}"
         try:
@@ -92,12 +120,17 @@ class FileLifecycleService:
         except (json.JSONDecodeError, TypeError):
             meta = {}
         meta["document_type"] = result.document_type
+        meta["confidence"] = result.confidence
+        meta["text_length"] = len(text)
+        meta["summary_source"] = summary_source
+        meta["extracted_fields"] = {}  # Clear stale skill-extracted fields
+        meta.update(summary_meta)
 
         await self.db.update_file(
             file_id,
             category=result.category,
             tags=result.tags,
-            summary=result.summary,
+            summary=summary,
             metadata_json=meta,
         )
 
@@ -118,13 +151,14 @@ class FileLifecycleService:
         # 5. Invalidate search cache
         await self._invalidate_cache()
 
-        logger.info(f"Reclassified {file_id} → {result.category}")
+        logger.info(f"Reclassified {file_id} → {result.category} (summary: {summary_source})")
         return {
             "file_id": file_id,
             "category": result.category,
             "tags": result.tags,
-            "summary": result.summary,
+            "summary": summary,
             "document_type": result.document_type,
+            "summary_source": summary_source,
         }
 
     # ── Helpers ──────────────────────────────────────────────────────────

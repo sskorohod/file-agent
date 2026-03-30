@@ -1,5 +1,5 @@
 {% extends "layout.html" %}
-{% block title %}Settings — FileAgent{% endblock %}
+{% block title %}Settings — Smart Storage{% endblock %}
 {% block content %}
 
 {# ── Header ── #}
@@ -29,6 +29,7 @@
       ("llm", "LLM", "/settings/llm"),
       ("storage", "Storage", "/settings/storage"),
       ("security", "Security", "/settings/security"),
+      ("mcp", "MCP", "/settings/mcp"),
       ("advanced", "Advanced", "/settings/advanced"),
     ] %}
     {% for id, label, href in tabs %}

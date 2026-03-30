@@ -10,9 +10,11 @@ embedding:
   vector_size: 768
 llm:
   classification_prompt: "You are a document classification system.\r\n\r\nRules:\r\
-    \n- summary: два коротких предложения на русском языке. Только ключевые факты.\r\
+    \n- summary: одно короткое предложение на русском (fallback quick reference).\r\
     \n- tags: 2-4 relevant tags, lowercase\r\n- document_type: specific type (e.g.\
-    \ lab_result, invoice, passport)"
+    \ lab_result, invoice, passport, marketing_guide, manual, report)"
+  file_summary_prompt: "Напиши краткое описание документа (2-4 предложения на русском).\
+    \ Что это, о чём, для чего нужен. Только факты из текста."
   default_provider: openai
   models:
     analysis:

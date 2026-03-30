@@ -107,9 +107,13 @@ class LLMConfig(BaseModel):
     classification_prompt: str = (
         "You are a document classification system.\n\n"
         "Rules:\n"
-        "- summary: 1 короткое предложение на русском языке. Только ключевой факт.\n"
+        "- summary: одно короткое предложение на русском (fallback quick reference).\n"
         "- tags: 2-4 relevant tags, lowercase\n"
-        "- document_type: specific type (e.g. lab_result, invoice, passport)"
+        "- document_type: specific type (e.g. lab_result, invoice, passport, marketing_guide, manual, report)"
+    )
+    file_summary_prompt: str = (
+        "Напиши краткое описание документа (2-4 предложения на русском). "
+        "Что это, о чём, для чего нужен. Только факты из текста."
     )
 
 

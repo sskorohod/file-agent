@@ -1,0 +1,89 @@
+{% extends "settings_base.html" %}
+{% block settings_content %}
+
+<div class="space-y-6">
+
+  {# ── Connection Info ── #}
+  <div class="card !p-5">
+    <h2 class="text-sm font-semibold text-txt mb-3">Connection</h2>
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs text-txt-3 block mb-1">Public URL (Claude Code, Codex)</label>
+        <code class="block bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono text-accent-2 select-all">{{ mcp_url }}</code>
+      </div>
+      {% if mcp_local_url != mcp_url %}
+      <div>
+        <label class="text-xs text-txt-3 block mb-1">Local URL</label>
+        <code class="block bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono text-txt-2 select-all">{{ mcp_local_url }}</code>
+      </div>
+      {% endif %}
+      <div>
+        <label class="text-xs text-txt-3 block mb-1">SSE Transport (legacy)</label>
+        <code class="block bg-bg border border-border rounded-lg px-3 py-2 text-sm font-mono text-txt-3 select-all">{{ mcp_sse_url }}</code>
+      </div>
+    </div>
+  </div>
+
+  {# ── Claude Code Config ── #}
+  <div class="card !p-5">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-semibold text-txt">Claude Code Config</h2>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('mcp-config').textContent).then(()=>this.textContent='Copied!'); setTimeout(()=>this.textContent='Copy',1500)"
+              class="btn-secondary btn-sm">Copy</button>
+    </div>
+    <pre id="mcp-config" class="bg-bg border border-border rounded-lg px-4 py-3 text-xs font-mono text-txt-2 overflow-x-auto select-all">{{ config_json }}</pre>
+    <p class="text-xs text-txt-3 mt-2">Add to <code class="text-accent-2">.mcp.json</code> in project root or <code class="text-accent-2">~/.claude.json</code> globally.</p>
+  </div>
+
+  {# ── Tools ── #}
+  <div class="card !p-5">
+    <h2 class="text-sm font-semibold text-txt mb-1">Tools</h2>
+    <p class="text-xs text-txt-3 mb-3">{{ tools|length }} tools available</p>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      {% for t in tools %}
+      <div class="flex items-start gap-2 px-3 py-2 rounded-lg bg-surface-2/50">
+        <svg class="w-3.5 h-3.5 text-ok-text mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        <div class="min-w-0">
+          <span class="text-xs font-medium text-txt font-mono">{{ t.name }}</span>
+          {% if t.description %}
+          <p class="text-[10px] text-txt-3 line-clamp-1">{{ t.description[:80] }}</p>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  {# ── Prompts ── #}
+  {% if prompts %}
+  <div class="card !p-5">
+    <h2 class="text-sm font-semibold text-txt mb-3">Prompts</h2>
+    <div class="space-y-2">
+      {% for p in prompts %}
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-2/50">
+        <svg class="w-3.5 h-3.5 text-accent-2 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+        <span class="text-xs font-medium text-txt font-mono">{{ p.name }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {# ── Resources ── #}
+  {% if resources %}
+  <div class="card !p-5">
+    <h2 class="text-sm font-semibold text-txt mb-3">Resources</h2>
+    <div class="space-y-2">
+      {% for r in resources %}
+      <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-2/50">
+        <svg class="w-3.5 h-3.5 text-info-text shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span class="text-xs font-medium text-txt font-mono">{{ r.uri }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+
+{% endblock %}

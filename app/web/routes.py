@@ -81,7 +81,7 @@ async def logout(request: Request):
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    from datetime import date
+    from datetime import date, datetime
     db = _get("db")
     today = date.today().isoformat()
     stats = await db.get_stats() if db else {}
@@ -91,7 +91,6 @@ async def dashboard(request: Request):
     llm_today = await db.get_llm_stats(since=today) if db else {}
     vs = _get("vector_store")
     qdrant_health = await vs.health_check() if vs else {}
-    # New dashboard data
     total_queries = await db.get_total_queries() if db else 0
     today_queries = await db.get_total_queries(since=today) if db else 0
     processed = await db.get_processed_count() if db else 0
@@ -99,7 +98,7 @@ async def dashboard(request: Request):
     query_history = await db.get_query_history(limit=15) if db else []
     pipeline_health = await db.get_pipeline_health(limit=5) if db else []
     source_dist = await db.get_source_distribution() if db else {}
-    # Determine provider mode: oauth (subscription) vs api (pay-per-token)
+
     from app.config import get_settings as _gs
     _search_cfg = _gs().llm.models.get("search")
     is_oauth = bool(_search_cfg and _search_cfg.api_base)
@@ -110,12 +109,12 @@ async def dashboard(request: Request):
         try:
             meta = json.loads(r.get("metadata_json", "{}") or "{}")
             r["document_type"] = meta.get("document_type", "")
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             r["document_type"] = ""
     pending_reminders = reminders_all[:5]
     pending_count = len(reminders_all)
 
-    # Build unified activity feed: searches + uploads, sorted by time
+    # Activity feed
     activity = []
     for q in query_history:
         activity.append({"type": "search", "text": q.get("text", "?"), "source": q.get("source", "web"), "time": q.get("created_at", "")})
@@ -124,8 +123,109 @@ async def dashboard(request: Request):
     activity.sort(key=lambda x: x.get("time", ""), reverse=True)
     activity = activity[:12]
 
+    # ── Hero scoring ──
+    qdrant_ok = bool(qdrant_health.get("status") == "ok" or qdrant_health.get("points_count", 0) > 0)
+    overdue_reminders = sum(1 for r in reminders_all if r.get("remind_at", "9") < datetime.now().isoformat())
+
+    # Review queue + failed files
+    review_count = 0
+    last_processed = None
+    try:
+        if db:
+            cursor = await db.db.execute("SELECT COUNT(*) FROM notes WHERE status='needs_review'")
+            review_count = (await cursor.fetchone())[0] or 0
+            cursor = await db.db.execute(
+                "SELECT finished_at FROM processing_log WHERE status='success' ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+            last_processed = row[0][:16] if row and row[0] else None
+    except Exception:
+        pass
+
+    alerts = []
+    if errors > 0:
+        alerts.append({"type": "error", "text": f"{errors} ошибок pipeline", "link": "/logs"})
+    if not qdrant_ok and vs:
+        alerts.append({"type": "error", "text": "Qdrant недоступен", "link": "/settings/storage"})
+    if review_count > 0:
+        alerts.append({"type": "warning", "text": f"{review_count} заметок на review", "link": "/notes/review"})
+    if overdue_reminders > 0:
+        alerts.append({"type": "warning", "text": f"{overdue_reminders} просроченных напоминаний", "link": "/notes/reminders"})
+
+    if errors > 2 or not qdrant_ok:
+        hero_state, hero_tone = "Errors Detected", "red"
+    elif errors > 0 or overdue_reminders > 2:
+        hero_state, hero_tone = "Attention Needed", "orange"
+    else:
+        hero_state, hero_tone = "System Healthy", "green"
+
+    today_files = sum(1 for f in recent if f.get("created_at", "").startswith(today))
+    hero_message = f"{today_files} файлов обработано сегодня, {today_queries} запросов" if today_files else f"{today_queries} запросов сегодня"
+
+    # ── Notes cross-link ──
+    notes_today = 0
+    today_mood = None
+    habits_done = 0
+    habits_total = 0
+    try:
+        if db:
+            notes_list = await db.get_daily_notes(today)
+            notes_today = len(notes_list)
+            from app.notes.analytics import NoteAnalytics
+            day_data = await NoteAnalytics(db).get_daily_summary_data(today)
+            metrics = day_data.get("metrics", {})
+            mood_data = metrics.get("mood_score", {})
+            today_mood = mood_data.get("avg") if isinstance(mood_data, dict) else None
+            from app.notes.habits import HabitTracker
+            habit_statuses = await HabitTracker(db).check_habits_for_date(today)
+            habits_total = len(habit_statuses)
+            habits_done = sum(1 for h in habit_statuses if h.get("completed"))
+    except Exception:
+        pass
+
+    # ── Unified view-model ──
+    dash = {
+        "hero": {
+            "state": hero_state, "tone": hero_tone,
+            "message": hero_message,
+            "warning": alerts[0]["text"] if alerts else None,
+        },
+        "alerts": alerts,
+        "kpis": {
+            "total_files": stats.get("total_files", 0),
+            "storage_mb": round(stats.get("total_size_bytes", 0) / 1048576, 1),
+            "qdrant_points": qdrant_health.get("points_count", 0),
+            "total_queries": total_queries,
+            "today_queries": today_queries,
+            "today_files": today_files,
+            "processed": processed,
+            "errors": errors,
+            "pending_reminders": pending_count,
+            "review_count": review_count,
+        },
+        "notes": {
+            "today": notes_today,
+            "mood": today_mood,
+            "habits": f"{habits_done}/{habits_total}" if habits_total else None,
+        },
+        "activity": activity,
+        "categories": stats.get("categories", {}),
+        "source_dist": source_dist,
+        "llm": {"session": llm_session, "all": llm_all, "today": llm_today},
+        "reminders": {"items": pending_reminders, "count": pending_count},
+        "pipeline": pipeline_health,
+        "last_processed": last_processed,
+        "system": {
+            "qdrant": qdrant_health,
+            "qdrant_ok": qdrant_ok,
+            "is_oauth": is_oauth,
+        },
+    }
+
+    # Backward compat: templates still reference some top-level vars
     return templates.TemplateResponse("dashboard.html", {
-        "request": request, "page": "dashboard",
+        "request": request, "page": "dashboard", "d": dash,
+        # Legacy vars for existing partials
         "stats": stats, "recent_files": recent,
         "llm_session": llm_session, "llm_all": llm_all, "llm_today": llm_today,
         "qdrant": qdrant_health,
@@ -133,8 +233,7 @@ async def dashboard(request: Request):
         "total_queries": total_queries, "today_queries": today_queries,
         "processed": processed, "errors": errors,
         "query_history": query_history, "pipeline_health": pipeline_health,
-        "source_dist": source_dist,
-        "is_oauth": is_oauth,
+        "source_dist": source_dist, "is_oauth": is_oauth,
         "activity": activity,
         "pending_reminders": pending_reminders, "pending_count": pending_count,
     })
@@ -228,6 +327,14 @@ async def reclassify_file(file_id: str):
         result = await lifecycle.reclassify(file_id)
         if result:
             log.info(f"Reclassified {file_id[:8]} → {result['category']}")
+            # Clear old processing log and write fresh reclassify entry
+            db = _get("db")
+            if db:
+                await db.delete_file_log(file_id)
+                await db.log_step(file_id, "reclassify", status="success",
+                                  details={"category": result["category"],
+                                           "document_type": result.get("document_type", ""),
+                                           "summary_source": result.get("summary_source", "")})
     except Exception as e:
         log.warning(f"Reclassify failed: {e}")
 
@@ -525,6 +632,64 @@ async def settings_llm_page(request: Request):
 async def settings_storage_page(request: Request):
     return templates.TemplateResponse("settings_storage.html",
                                       _settings_ctx(request, "storage"))
+
+
+@router.get("/settings/mcp", response_class=HTMLResponse)
+async def settings_mcp_page(request: Request):
+    from app.mcp_server import mcp as _mcp_instance
+    from app.config import get_settings
+    settings = get_settings()
+
+    host = settings.web.host if settings.web.host != "0.0.0.0" else "localhost"
+    local_url = f"http://{host}:{settings.web.port}"
+    # Derive public URL from webhook_url if configured
+    public_url = ""
+    if settings.telegram.webhook_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(settings.telegram.webhook_url)
+        public_url = f"{parsed.scheme}://{parsed.netloc}"
+
+    mcp_url = f"{public_url}/mcp" if public_url else f"{local_url}/mcp"
+    mcp_local_url = f"{local_url}/mcp"
+    mcp_sse_url = f"{local_url}/mcp/sse"
+
+    config_json = json.dumps({
+        "mcpServers": {
+            "smart-storage": {
+                "type": "url",
+                "url": mcp_url
+            }
+        }
+    }, indent=2)
+
+    tools = []
+    try:
+        for t in _mcp_instance._tool_manager.list_tools():
+            tools.append({"name": t.name, "description": t.description or ""})
+    except Exception:
+        pass
+
+    prompts = []
+    try:
+        for p in _mcp_instance._prompt_manager.list_prompts():
+            prompts.append({"name": p.name})
+    except Exception:
+        pass
+
+    resources = []
+    try:
+        for r in _mcp_instance._resource_manager.list_resources():
+            resources.append({"uri": str(r.uri)})
+    except Exception:
+        pass
+
+    ctx = _settings_ctx(request, "mcp")
+    ctx.update({
+        "mcp_url": mcp_url, "mcp_local_url": mcp_local_url, "mcp_sse_url": mcp_sse_url,
+        "config_json": config_json,
+        "tools": tools, "prompts": prompts, "resources": resources,
+    })
+    return templates.TemplateResponse("settings_mcp.html", ctx)
 
 
 @router.get("/settings/security", response_class=HTMLResponse)
@@ -928,7 +1093,10 @@ async def save_llm_settings(request: Request):
 
 
 @router.post("/settings/api-keys/create")
-async def create_api_key(request: Request, name: str = Form("default"), mode: str = Form("lite")):
+async def create_api_key(request: Request):
+    form = await request.form()
+    name = form.get("name", "default")
+    mode = form.get("mode", "lite")
     db = _get("db")
     new_key = await db.create_api_key(name, mode=mode) if db else ""
     # Pass new_key via query param so it shows on the redirected page
@@ -1685,6 +1853,79 @@ async def notes_entities_merge(
     return RedirectResponse("/notes/entities", status_code=303)
 
 
+@router.get("/notes/checkin", response_class=HTMLResponse)
+async def notes_checkin_page(request: Request):
+    """Evening check-in web form."""
+    from datetime import datetime
+    from app.notes.checkin import EveningCheckin, CHECKIN_PROMPTS
+    db = _get("db")
+    if not db:
+        return HTMLResponse("DB not available", status_code=500)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    settings = __import__("app.config", fromlist=["get_settings"]).get_settings()
+
+    checkin = EveningCheckin(
+        db,
+        expected_signals=settings.notes.expected_daily_signals,
+        capture=_get("note_capture"),
+        max_questions=settings.notes.checkin_max_questions,
+        include_closing=settings.notes.checkin_include_closing_prompt,
+        weight_frequency_days=settings.notes.checkin_weight_frequency_days,
+    )
+
+    # Check if already completed
+    state = await db.get_checkin_state(today)
+    completed = state and state.get("completed")
+
+    # Get missing signals for the form
+    signals = []
+    if not completed:
+        signals = await checkin.build_question_plan(today)
+
+    return templates.TemplateResponse("note_checkin.html", {
+        "request": request, "page": "notes",
+        "today": today, "completed": completed,
+        "signals": signals, "prompts": CHECKIN_PROMPTS,
+    })
+
+
+@router.post("/notes/checkin/submit")
+async def notes_checkin_submit(request: Request):
+    """Process web check-in form submission."""
+    from datetime import datetime
+    form = await request.form()
+    db = _get("db")
+    capture = _get("note_capture")
+    if not db:
+        return RedirectResponse("/notes/checkin", status_code=303)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    from app.notes.checkin import CHECKIN_PROMPTS
+
+    for sig, prompt in CHECKIN_PROMPTS.items():
+        value = form.get(sig, "").strip()
+        if not value:
+            continue
+        # Capture as note
+        emoji = prompt.get("emoji", "")
+        text = f"{emoji} Check-in / {sig}: {value}"
+        if capture:
+            await capture.capture(text, source="checkin")
+        else:
+            await db.save_note(content=text, source="checkin")
+        # Record for adaptive checkin
+        try:
+            await db.record_checkin_signal(sig, today, "answered")
+        except Exception:
+            pass
+
+    # Mark checkin complete
+    await db.save_checkin_state(today, "[]", completed=1)
+
+    return RedirectResponse("/notes/checkin", status_code=303)
+
+
 @router.get("/notes/review", response_class=HTMLResponse)
 async def notes_review(request: Request):
     db = _get("db")
@@ -1862,6 +2103,16 @@ async def note_detail(request: Request, note_id: int):
         return RedirectResponse("/notes", status_code=303)
 
     enrichment = await db.get_latest_enrichment(note_id)
+    # Parse JSON tags if stored as string
+    def _parse_tags(obj):
+        if obj and isinstance(obj.get("tags"), str):
+            try:
+                obj["tags"] = json.loads(obj["tags"])
+            except (json.JSONDecodeError, TypeError):
+                obj["tags"] = []
+    _parse_tags(note)
+    _parse_tags(enrichment)
+
     entities = await db.get_entities_by_note(note_id)
     facts = await db.get_facts_by_note(note_id)
     tasks = await db.get_tasks_by_note(note_id)
@@ -2234,6 +2485,15 @@ async def partial_stats(request: Request):
     _search_cfg = _gs().llm.models.get("search")
     is_oauth = bool(_search_cfg and _search_cfg.api_base)
     reminders_all = await db.list_reminders(include_sent=False) if db else []
+    recent = await db.list_files(limit=10) if db else []
+    today_files = sum(1 for f in recent if f.get("created_at", "").startswith(today))
+    review_count = 0
+    try:
+        if db:
+            cursor = await db.db.execute("SELECT COUNT(*) FROM notes WHERE status='needs_review'")
+            review_count = (await cursor.fetchone())[0] or 0
+    except Exception:
+        pass
     return templates.TemplateResponse("partials/stats_cards.html", {
         "request": request, "stats": stats,
         "qdrant_points": qdrant_health.get("points_count", 0),
@@ -2245,6 +2505,8 @@ async def partial_stats(request: Request):
         "llm_today": await db.get_llm_stats(since=today) if db else {},
         "is_oauth": is_oauth,
         "pending_count": len(reminders_all),
+        "today_files": today_files,
+        "review_count": review_count,
     })
 
 

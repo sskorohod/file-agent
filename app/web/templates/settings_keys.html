@@ -4,7 +4,7 @@
 {# ── Internal API Keys ── #}
 <div class="card mb-6">
   <h3 class="card-header">Internal API Keys</h3>
-  <p class="text-xs text-txt-3 mb-4">Keys for external apps to access your FileAgent via REST API or MCP.</p>
+  <p class="text-xs text-txt-3 mb-4">Keys for external apps to access your Smart Storage via REST API or MCP.</p>
 
   {% if new_key %}
   <div class="mb-4 px-4 py-3 rounded-lg bg-ok-bg border border-ok/20 text-ok-text text-sm">
@@ -15,12 +15,10 @@
 
   <form method="POST" action="/settings/api-keys/create" class="flex items-center gap-3 flex-wrap mb-4">
     <input type="text" name="name" placeholder="Key name" value="default" class="input-sm w-40">
-    <label class="flex items-center gap-1.5 text-xs text-txt-2 cursor-pointer bg-surface-2 px-3 py-2 rounded-lg border border-border">
-      <input type="radio" name="mode" value="lite" checked class="accent-accent"> Lite
-    </label>
-    <label class="flex items-center gap-1.5 text-xs text-txt-2 cursor-pointer bg-surface-2 px-3 py-2 rounded-lg border border-border">
-      <input type="radio" name="mode" value="full" class="accent-accent"> Full
-    </label>
+    <select name="mode" class="input-sm w-24">
+      <option value="lite">Lite</option>
+      <option value="full">Full</option>
+    </select>
     <button type="submit" class="btn-primary btn-sm">+ Create Key</button>
   </form>
   <p class="text-xs text-txt-3 mb-3">Lite: search only. Full: search + LLM answers + file access.</p>
