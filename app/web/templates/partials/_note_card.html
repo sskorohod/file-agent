@@ -101,7 +101,7 @@
     {% endif %}
 
     {# Actions (stop propagation with onclick) #}
-    <div class="shrink-0 flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onclick="event.preventDefault(); event.stopPropagation();">
+    <div class="shrink-0 flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onclick="event.stopPropagation();">
       <form method="POST" action="/notes/{{ n.id }}/pin" class="inline">
         <button type="submit" class="p-1.5 rounded-lg text-txt-3 hover:text-accent-2 hover:bg-accent-bg transition-all" title="{{ 'Открепить' if n.is_pinned else 'Закрепить' }}">
           <svg class="w-3.5 h-3.5 {% if n.is_pinned %}text-accent-2{% endif %}" viewBox="0 0 24 24" fill="{% if n.is_pinned %}currentColor{% else %}none{% endif %}" stroke="currentColor" stroke-width="2"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8l-6.2 4.5 2.4-7.4L2 9.4h7.6z"/></svg>

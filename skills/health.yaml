@@ -1,132 +1,111 @@
 name: health
-display_name: "Медицина / Health"
-description: "Medical documents, lab results, prescriptions, insurance"
+display_name: Медицина / Health
+description: Medical documents, lab results, prescriptions, insurance
 category: health
-priority: 10
-enabled: true
-tags:
-  - medical
-  - health
-  - insurance
-
+storage_path: ''
 routing_rules:
   keywords:
-    - diagnosis
-    - patient
-    - prescription
-    - laboratory
-    - blood test
-    - medical
-    - doctor
-    - hospital
-    - insurance
-    - claim
-    - анализ
-    - диагноз
-    - рецепт
-    - пациент
-    - лаборатория
-    - кровь
-    - врач
-    - больница
-    - страховка
-    - полис
+  - diagnosis
+  - patient
+  - prescription
+  - laboratory
+  - blood test
+  - medical
+  - doctor
+  - hospital
+  - insurance
+  - claim
+  - анализ
+  - диагноз
+  - рецепт
+  - пациент
+  - лаборатория
+  - кровь
+  - врач
+  - больница
+  - страховка
+  - полис
   patterns:
-    - '\b(WBC|RBC|HGB|HCT|PLT|glucose|cholesterol)\b'
-    - '\b(ICD-?\d+|CPT\s?\d+)\b'
-    - '\b(mg/dL|mmol/L|U/L)\b'
-    - '\b\d{1,3}/\d{2,3}\s?(mmHg|мм\.рт\.ст)\b'
+  - \b(WBC|RBC|HGB|HCT|PLT|glucose|cholesterol)\b
+  - \b(ICD-?\d+|CPT\s?\d+)\b
+  - \b(mg/dL|mmol/L|U/L)\b
+  - \b\d{1,3}/\d{2,3}\s?(mmHg|мм\.рт\.ст)\b
   mime_types:
-    - application/pdf
-    - image/jpeg
-    - image/png
+  - application/pdf
+  - image/jpeg
+  - image/png
   min_confidence: 0.3
-
-response_template: |
-  📋 {document_type}
-  👤 {patient_name}
-  📅 {date_of_service}
-  🏥 {provider}
-
-  🔍 Результаты: {key_findings}
-  {priority_badge} {priority}
-
-  📝 {summary}
-
-  ⚠️ {importance}
-
-  ✅ {action_required}
-
-  📎 Связанные: {related_documents}
-
-  💾 {storage_advice}
-
+naming_template: ''
 extraction:
   fields:
-    - name: patient_name
-      description: "ФИО пациента"
-      required: false
-    - name: date_of_service
-      description: "Дата приёма, анализа или процедуры в формате YYYY-MM-DD"
-      required: false
-    - name: provider
-      description: "Врач (ФИО, специальность) и/или название клиники"
-      required: false
-    - name: document_type
-      description: "Тип на русском: анализ крови, рецепт, выписка, направление, результат УЗИ, страховой полис и т.д."
-      required: true
-    - name: key_findings
-      description: >
-        Ключевые результаты и отклонения от нормы. Для анализов: конкретные значения
-        с указанием нормы (например: гемоглобин 14.2 g/dL — норма).
-        Для рецептов: название лекарств, дозировки. Для выписок: диагноз.
-      required: false
-    - name: expiry_date
-      description: "Срок действия рецепта, направления, страховки в формате YYYY-MM-DD"
-      required: false
-    - name: priority
-      description: "high / medium / low. Одно слово."
-      required: true
-    - name: summary
-      description: >
-        Подробное описание на русском (4-6 предложений):
-        1) Что это за документ (анализ, выписка, рецепт)
-        2) Когда и где проведено обследование
-        3) Основные результаты простым языком (что значат цифры)
-        4) Есть ли отклонения от нормы и насколько серьёзные
-        5) Общий вывод о состоянии здоровья по этому документу
-      required: true
-    - name: importance
-      description: >
-        Почему этот документ важен для здоровья (2-3 предложения):
-        Нужно ли срочно обратиться к врачу. Какие риски если проигнорировать результаты.
-        Нужно ли повторить анализ или обследование.
-      required: true
-    - name: action_required
-      description: >
-        Конкретные медицинские рекомендации:
-        - К какому врачу записаться и когда
-        - Какие анализы/обследования пройти дополнительно
-        - Лекарства: название, дозировка, длительность курса
-        - Когда повторить анализ
-        - Изменения в образе жизни (диета, нагрузки)
-      required: true
-    - name: related_documents
-      description: "Какие анализы/обследования связаны: общий анализ крови + биохимия + УЗИ, или рецепт + выписка + направление. Через запятую."
-      required: false
-    - name: storage_advice
-      description: "Сколько хранить результаты, нужно ли показать другому врачу, стоит ли добавить в медицинскую карту, нужен ли оригинал для страховой."
-      required: false
-  custom_prompt: >
-    Ты опытный врач-консультант. Извлеки данные из документа. Отвечай на русском, подробно и профессионально.
+  - name: patient_name
+    description: ФИО пациента
+    required: false
+  - name: date_of_service
+    description: Дата приёма, анализа или процедуры в формате YYYY-MM-DD
+    required: false
+  - name: provider
+    description: Врач (ФИО, специальность) и/или название клиники
+    required: false
+  - name: document_type
+    description: 'Тип на русском: анализ крови, рецепт, выписка, направление, результат
+      УЗИ, страховой полис и т.д.'
+    required: true
+  - name: key_findings
+    description: 'Ключевые результаты и отклонения от нормы. Для анализов: конкретные
+      значения с указанием нормы (например: гемоглобин 14.2 g/dL — норма). Для рецептов:
+      название лекарств, дозировки. Для выписок: диагноз.
 
-    ВАЖНО: Если документ НЕ медицинский — опиши его как есть, оставь медицинские поля пустыми.
+      '
+    required: false
+  - name: expiry_date
+    description: Срок действия рецепта, направления, страховки в формате YYYY-MM-DD
+    required: false
+  - name: priority
+    description: high / medium / low. Одно слово.
+    required: true
+  - name: summary
+    description: 'Подробное описание на русском (4-6 предложений): 1) Что это за документ
+      (анализ, выписка, рецепт) 2) Когда и где проведено обследование 3) Основные
+      результаты простым языком (что значат цифры) 4) Есть ли отклонения от нормы
+      и насколько серьёзные 5) Общий вывод о состоянии здоровья по этому документу
 
-    summary — развёрнутое описание (4-6 предложений): что за обследование, основные результаты
-    простым языком, есть ли отклонения, общий вывод.
+      '
+    required: true
+  - name: importance
+    description: 'Почему этот документ важен для здоровья (2-3 предложения): Нужно
+      ли срочно обратиться к врачу. Какие риски если проигнорировать результаты. Нужно
+      ли повторить анализ или обследование.
 
-    key_findings — конкретные значения с нормами. Для анализов крови: значение → норма → вывод.
-    Для рецептов: лекарства с дозировками. Для выписок: диагноз, коды ICD.
+      '
+    required: true
+  - name: action_required
+    description: 'Конкретные медицинские рекомендации: - К какому врачу записаться
+      и когда - Какие анализы/обследования пройти дополнительно - Лекарства: название,
+      дозировка, длительность курса - Когда повторить анализ - Изменения в образе
+      жизни (диета, нагрузки)
+
+      '
+    required: true
+  - name: related_documents
+    description: 'Какие анализы/обследования связаны: общий анализ крови + биохимия
+      + УЗИ, или рецепт + выписка + направление. Через запятую.'
+    required: false
+  - name: storage_advice
+    description: Сколько хранить результаты, нужно ли показать другому врачу, стоит
+      ли добавить в медицинскую карту, нужен ли оригинал для страховой.
+    required: false
+  custom_prompt: 'Ты опытный врач-консультант. Извлеки данные из документа. Отвечай
+    на русском, подробно и профессионально.
+
+    ВАЖНО: Если документ НЕ медицинский — опиши его как есть, оставь медицинские поля
+    пустыми.
+
+    summary — развёрнутое описание (4-6 предложений): что за обследование, основные
+    результаты простым языком, есть ли отклонения, общий вывод.
+
+    key_findings — конкретные значения с нормами. Для анализов крови: значение → норма
+    → вывод. Для рецептов: лекарства с дозировками. Для выписок: диагноз, коды ICD.
 
     importance — оценка серьёзности: нужно ли срочно к врачу, какие риски при бездействии.
     Если отклонения серьёзные — предупреди однозначно.
@@ -135,5 +114,42 @@ extraction:
     лекарства (название, дозировка, курс), когда повторить, изменения образа жизни.
 
     priority — HIGH: серьёзные отклонения (значения >2x от нормы), срочные назначения,
-    опасный диагноз. MEDIUM: умеренные отклонения, плановые назначения, рецепт.
-    LOW: всё в норме, информационная выписка, плановый осмотр.
+    опасный диагноз. MEDIUM: умеренные отклонения, плановые назначения, рецепт. LOW:
+    всё в норме, информационная выписка, плановый осмотр.
+
+    '
+response_template: '📋 {document_type}
+
+  👤 {patient_name}
+
+  📅 {date_of_service}
+
+  🏥 {provider}
+
+
+  🔍 Результаты: {key_findings}
+
+  {priority_badge} {priority}
+
+
+  📝 {summary}
+
+
+  ⚠️ {importance}
+
+
+  ✅ {action_required}
+
+
+  📎 Связанные: {related_documents}
+
+
+  💾 {storage_advice}
+
+  '
+tags:
+- medical
+- health
+- insurance
+enabled: true
+priority: 10

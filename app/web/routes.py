@@ -249,13 +249,25 @@ async def files_page(request: Request, category: str | None = None, q: str | Non
         files = await db.list_files(category=category, limit=limit, offset=offset) if db else []
     total = await db.count_files(category=category) if db else 0
     categories = list((await db.get_stats()).get("categories", {}).keys()) if db else []
-    # Enrich files with document_type from metadata_json
+    # Enrich files with document_type and encryption status
+    file_storage = _get("file_storage")
     for f in files:
         try:
             meta = json.loads(f.get("metadata_json", "{}") or "{}")
             f["document_type"] = meta.get("document_type", "")
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             f["document_type"] = ""
+        # Check encryption: read first 5 bytes for FAGE magic header
+        f["is_encrypted"] = False
+        if file_storage and f.get("stored_path"):
+            try:
+                from pathlib import Path as _P
+                p = _P(f["stored_path"])
+                if p.exists():
+                    with open(p, "rb") as fh:
+                        f["is_encrypted"] = fh.read(5) == b"FAGE\x01"
+            except Exception:
+                pass
     return templates.TemplateResponse("files.html", {
         "request": request, "page": "files", "files": files, "total": total,
         "current_page": page, "limit": limit, "category": category,
@@ -278,6 +290,17 @@ async def file_detail(request: Request, file_id: str):
                     file[key + "_parsed"] = json.loads(val)
                 except Exception:
                     file[key + "_parsed"] = val
+        # Check encryption status
+        file["is_encrypted"] = False
+        if file.get("stored_path"):
+            try:
+                from pathlib import Path as _P
+                p = _P(file["stored_path"])
+                if p.exists():
+                    with open(p, "rb") as fh:
+                        file["is_encrypted"] = fh.read(5) == b"FAGE\x01"
+            except Exception:
+                pass
     return templates.TemplateResponse("file_detail.html", {
         "request": request, "page": "files", "file": file, "log": log, "notes": notes,
     })
