@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -399,6 +399,66 @@ CREATE TABLE IF NOT EXISTS note_reminders (
 
 CREATE INDEX IF NOT EXISTS idx_note_rem_status ON note_reminders(status, remind_at);
 CREATE INDEX IF NOT EXISTS idx_note_rem_note ON note_reminders(note_id);
+
+-- Medical Metrics & Baselines
+CREATE TABLE IF NOT EXISTS medical_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id INTEGER REFERENCES notes(id) ON DELETE CASCADE,
+    metric_type TEXT NOT NULL,
+    value_primary REAL,
+    value_secondary REAL,
+    context TEXT DEFAULT '',
+    measured_at TEXT NOT NULL,
+    source TEXT DEFAULT 'manual',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_medical_type_date ON medical_metrics(metric_type, measured_at);
+
+CREATE TABLE IF NOT EXISTS personal_baselines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_key TEXT NOT NULL,
+    window_days INTEGER DEFAULT 30,
+    avg_value REAL,
+    std_value REAL,
+    min_value REAL,
+    max_value REAL,
+    data_points INTEGER,
+    computed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(metric_key, window_days)
+);
+
+CREATE TABLE IF NOT EXISTS lag_correlations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_a TEXT NOT NULL,
+    metric_b TEXT NOT NULL,
+    lag_days INTEGER NOT NULL,
+    correlation REAL,
+    p_value REAL,
+    data_points INTEGER,
+    computed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(metric_a, metric_b, lag_days)
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    recovery_key_hash TEXT NOT NULL DEFAULT '',
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- magic_link_tokens: kept for backward compat with existing DBs
+CREATE TABLE IF NOT EXISTS magic_link_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT NOT NULL UNIQUE,
+    purpose TEXT NOT NULL DEFAULT 'registration',
+    email TEXT DEFAULT '',
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -434,6 +494,15 @@ class Database:
         await self._db.execute(
             "INSERT OR IGNORE INTO schema_version(version) VALUES(?)", (SCHEMA_VERSION,)
         )
+        # Validate schema version
+        import sqlite3
+        cursor = await self._db.execute("SELECT MAX(version) FROM schema_version")
+        row = await cursor.fetchone()
+        if row and row[0] and row[0] > SCHEMA_VERSION:
+            logger.warning(
+                f"DB schema v{row[0]} is newer than app v{SCHEMA_VERSION} — "
+                "some features may not work correctly"
+            )
         # Migrate: add new columns to notes if missing
         for col, default in [
             ("category", "''"), ("subcategory", "''"), ("structured_json", "'{}'"),
@@ -451,8 +520,9 @@ class Database:
         ]:
             try:
                 await self._db.execute(f"ALTER TABLE notes ADD COLUMN {col} TEXT DEFAULT {default}")
-            except Exception:
-                pass  # column already exists
+            except (sqlite3.OperationalError, Exception) as e:
+                if "duplicate column" not in str(e).lower() and "already exists" not in str(e).lower():
+                    logger.warning(f"Migration error adding column {col}: {e}")
         # Create indexes on new columns (after migration)
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS idx_notes_category ON notes(category)",
@@ -461,8 +531,8 @@ class Database:
         ]:
             try:
                 await self._db.execute(idx_sql)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Index creation failed: {e}")
         # v1.5 backfill: copy content → raw_content if empty
         try:
             await self._db.execute(
@@ -528,6 +598,21 @@ class Database:
         except Exception:
             pass
 
+        # Migrate: add encrypted column to files (selective encryption by skill)
+        try:
+            await self._db.execute("ALTER TABLE files ADD COLUMN encrypted INTEGER DEFAULT 0")
+            import logging as _log
+            _log.getLogger(__name__).info("Migrated: added encrypted column to files")
+        except Exception:
+            pass  # column already exists
+
+        # Migrate: add status to file reminders
+        try:
+            await self._db.execute("ALTER TABLE reminders ADD COLUMN status TEXT DEFAULT 'pending'")
+            await self._db.execute("UPDATE reminders SET status='sent' WHERE sent=1")
+        except Exception:
+            pass
+
         # Migrate: add recurrence columns to note_reminders
         for col, default in [
             ("recurrence_rule", "''"),
@@ -539,6 +624,44 @@ class Database:
                 )
             except Exception:
                 pass
+
+        # Migrate: add detailed nutrition columns to food_entries
+        for col, default in [
+            ("fiber_g", "NULL"), ("sugar_g", "NULL"), ("sodium_mg", "NULL"),
+            ("nutrition_json", "'{}'"),
+            # v2: extended nutrition tracking
+            ("serving_g", "NULL"), ("consumed_time", "''"),
+            ("food_source", "''"), ("brand", "''"),
+            ("glycemic_index", "NULL"),
+            ("alcohol_g", "NULL"), ("caffeine_mg", "NULL"),
+            ("cholesterol_mg", "NULL"), ("trans_fat_g", "NULL"),
+            ("saturated_fat_g", "NULL"),
+        ]:
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE food_entries ADD COLUMN {col} TEXT DEFAULT {default}"
+                )
+            except Exception:
+                pass
+
+        # Migrate: create water_entries table
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS water_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note_id INTEGER REFERENCES notes(id) ON DELETE CASCADE,
+                amount_ml REAL NOT NULL,
+                drink_type TEXT DEFAULT 'water',
+                consumed_at TEXT NOT NULL,
+                consumed_time TEXT DEFAULT '',
+                caffeine_mg REAL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        try:
+            await self._db.execute("CREATE INDEX IF NOT EXISTS idx_water_date ON water_entries(consumed_at)")
+            await self._db.execute("CREATE INDEX IF NOT EXISTS idx_water_note ON water_entries(note_id)")
+        except Exception:
+            pass
 
         # Create notes FTS5 index (after migration to ensure columns exist)
         await self._setup_notes_fts()
@@ -605,8 +728,8 @@ class Database:
 
                 INSERT INTO files_fts(files_fts) VALUES('rebuild');
             """)
-        except Exception:
-            pass  # FTS rebuild is non-fatal
+        except Exception as e:
+            logger.warning(f"FTS5 rebuild failed (non-fatal): {e}")
 
     async def close(self):
         if self._db:
@@ -804,9 +927,13 @@ class Database:
         await self.db.commit()
 
     async def backfill_run_file_id(self, run_id: str, file_id: str):
-        """After store step, backfill file_id on all earlier steps of this run."""
+        """After store step, backfill file_id on all earlier steps of this run.
+
+        Note: pre-store steps log file_id as '' (empty string), not NULL,
+        so we must match both cases.
+        """
         await self.db.execute(
-            "UPDATE processing_log SET file_id=? WHERE run_id=? AND file_id IS NULL",
+            "UPDATE processing_log SET file_id=? WHERE run_id=? AND (file_id IS NULL OR file_id = '')",
             (file_id, run_id),
         )
         await self.db.commit()
@@ -944,6 +1071,8 @@ class Database:
             row["content"] = self._decrypt(row["content"])
         if row.get("raw_content"):
             row["raw_content"] = self._decrypt(row["raw_content"])
+        if row.get("structured_json"):
+            row["structured_json"] = self._decrypt(row["structured_json"])
         # Parse tags from JSON string to list
         tags = row.get("tags", "[]")
         if isinstance(tags, str):
@@ -986,7 +1115,8 @@ class Database:
                vault_path=?, structured_json=?, processed_at=datetime('now'),
                title=?, tags=?, sentiment=?, energy=?, confidence=?
                WHERE id=?""",
-            (category, subcategory, mood_score, vault_path, structured_json,
+            (category, subcategory, mood_score, vault_path,
+             self._encrypt(structured_json),
              title, tags, sentiment, energy, confidence, note_id),
         )
         await self.db.commit()
@@ -1361,8 +1491,8 @@ class Database:
                (note_id, suggested_title, summary, category, subcategory, tags,
                 confidence, sentiment, energy, mood_score, raw_llm_json, model, prompt_version)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (note_id, suggested_title, summary, category, subcategory, tags,
-             confidence, sentiment, energy, mood_score, raw_llm_json, model, prompt_version),
+            (note_id, suggested_title, self._encrypt(summary), category, subcategory, tags,
+             confidence, sentiment, energy, mood_score, self._encrypt(raw_llm_json), model, prompt_version),
         )
         enrichment_id = cursor.lastrowid
         # Set as current enrichment
@@ -1373,6 +1503,14 @@ class Database:
         await self.db.commit()
         return enrichment_id
 
+    def _decrypt_enrichment_row(self, row: dict) -> dict:
+        """Decrypt sensitive columns in an enrichment row."""
+        if row.get("summary"):
+            row["summary"] = self._decrypt(row["summary"])
+        if row.get("raw_llm_json"):
+            row["raw_llm_json"] = self._decrypt(row["raw_llm_json"])
+        return row
+
     async def get_latest_enrichment(self, note_id: int) -> dict | None:
         """Get current enrichment for a note (via current_enrichment_id)."""
         cursor = await self.db.execute(
@@ -1382,7 +1520,7 @@ class Database:
             (note_id,),
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        return self._decrypt_enrichment_row(dict(row)) if row else None
 
     async def get_enrichment_history(self, note_id: int) -> list[dict]:
         """Get all enrichments for a note, newest first."""
@@ -1390,7 +1528,7 @@ class Database:
             "SELECT * FROM note_enrichments WHERE note_id=? ORDER BY processed_at DESC",
             (note_id,),
         )
-        return [dict(r) for r in await cursor.fetchall()]
+        return [self._decrypt_enrichment_row(dict(r)) for r in await cursor.fetchall()]
 
     async def update_note_bridge_fields(
         self, note_id: int, category: str = "", subcategory: str = "",
@@ -1584,6 +1722,50 @@ class Database:
             (limit,),
         )
         return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_all_tasks(self, status: str = "", limit: int = 100) -> list[dict]:
+        if status:
+            cursor = await self.db.execute(
+                """SELECT t.*, n.user_title, n.category FROM note_tasks t
+                   JOIN notes n ON t.note_id = n.id
+                   WHERE t.status=? ORDER BY
+                   CASE t.priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                   t.created_at DESC LIMIT ?""",
+                (status, limit),
+            )
+        else:
+            cursor = await self.db.execute(
+                """SELECT t.*, n.user_title, n.category FROM note_tasks t
+                   JOIN notes n ON t.note_id = n.id
+                   ORDER BY t.status ASC,
+                   CASE t.priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                   t.created_at DESC LIMIT ?""",
+                (limit,),
+            )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def update_task(self, task_id: int, description: str, priority: str, due_date: str):
+        await self.db.execute(
+            "UPDATE note_tasks SET description=?, priority=?, due_date=? WHERE id=?",
+            (description, priority, due_date, task_id),
+        )
+        await self.db.commit()
+
+    async def delete_task(self, task_id: int):
+        await self.db.execute("DELETE FROM note_tasks WHERE id=?", (task_id,))
+        await self.db.commit()
+
+    async def create_task(self, description: str, priority: str = "medium", due_date: str = "", note_id: int | None = None) -> int:
+        if not note_id:
+            # Create a standalone task note
+            note_id_val = await self.save_note(content=description, title="Task", source="web", category="tasks")
+            note_id = note_id_val
+        cursor = await self.db.execute(
+            "INSERT INTO note_tasks (note_id, description, priority, due_date) VALUES (?, ?, ?, ?)",
+            (note_id, description, priority, due_date),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
 
     # ── Relations v1.5 ──
 
@@ -1804,7 +1986,7 @@ class Database:
 
     async def create_reminder(self, file_id: str, remind_at: str, message: str = ""):
         await self.db.execute(
-            "INSERT INTO reminders (file_id, remind_at, message) VALUES (?, ?, ?)",
+            "INSERT INTO reminders (file_id, remind_at, message, status) VALUES (?, ?, ?, 'pending')",
             (file_id, remind_at, message),
         )
         await self.db.commit()
@@ -1813,16 +1995,64 @@ class Database:
         cursor = await self.db.execute(
             "SELECT r.*, f.original_name, f.category FROM reminders r "
             "LEFT JOIN files f ON r.file_id = f.id "
-            "WHERE r.sent = 0 AND r.remind_at <= datetime('now') ORDER BY r.remind_at"
+            "WHERE COALESCE(r.status, 'pending') = 'pending' AND r.remind_at <= datetime('now') ORDER BY r.remind_at"
         )
         return [dict(r) for r in await cursor.fetchall()]
 
     async def mark_reminder_sent(self, reminder_id: int):
-        await self.db.execute("UPDATE reminders SET sent=1 WHERE id=?", (reminder_id,))
+        await self.db.execute("UPDATE reminders SET sent=1, status='sent' WHERE id=?", (reminder_id,))
+        await self.db.commit()
+
+    async def complete_file_reminder(self, reminder_id: int):
+        await self.db.execute(
+            "UPDATE reminders SET sent=1, status='done' WHERE id=?", (reminder_id,),
+        )
+        await self.db.commit()
+
+    async def cancel_file_reminder(self, reminder_id: int):
+        await self.db.execute(
+            "UPDATE reminders SET status='cancelled' WHERE id=?", (reminder_id,),
+        )
+        await self.db.commit()
+
+    async def delete_file_reminder(self, reminder_id: int):
+        await self.db.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
+        await self.db.commit()
+
+    async def update_file_reminder(self, reminder_id: int, message: str = None,
+                                   remind_at: str = None):
+        updates, params = [], []
+        if message is not None:
+            updates.append("message=?"); params.append(message)
+        if remind_at is not None:
+            updates.append("remind_at=?"); params.append(remind_at)
+        if not updates:
+            return
+        params.append(reminder_id)
+        await self.db.execute(f"UPDATE reminders SET {', '.join(updates)} WHERE id=?", params)
+        await self.db.commit()
+
+    async def snooze_file_reminder_to(self, reminder_id: int, remind_at: str):
+        await self.db.execute(
+            "UPDATE reminders SET sent=0, status='pending', remind_at=? WHERE id=?",
+            (remind_at, reminder_id),
+        )
+        await self.db.commit()
+
+    async def snooze_file_reminder(self, reminder_id: int, hours: int = 24):
+        hours = int(hours)
+        await self.db.execute(
+            "UPDATE reminders SET sent=0, status='pending', "
+            "remind_at=datetime(remind_at, '+' || ? || ' hours') WHERE id=?",
+            (str(hours), reminder_id),
+        )
         await self.db.commit()
 
     async def list_reminders(self, include_sent: bool = False) -> list[dict]:
-        where = "" if include_sent else "WHERE r.sent = 0"
+        if include_sent:
+            where = ""
+        else:
+            where = "WHERE COALESCE(r.status, 'pending') IN ('pending', 'sent')"
         cursor = await self.db.execute(
             f"SELECT r.*, f.original_name, f.category, f.summary, f.metadata_json FROM reminders r "
             f"LEFT JOIN files f ON r.file_id = f.id {where} ORDER BY r.remind_at"
@@ -1933,17 +2163,33 @@ class Database:
         calories_kcal: float | None = None,
         protein_g: float | None = None, fat_g: float | None = None,
         carbs_g: float | None = None,
+        fiber_g: float | None = None, sugar_g: float | None = None,
+        sodium_mg: float | None = None, nutrition_json: str = "{}",
+        serving_g: float | None = None, consumed_time: str = "",
+        food_source: str = "", brand: str = "",
+        glycemic_index: int | None = None,
+        alcohol_g: float | None = None, caffeine_mg: float | None = None,
+        cholesterol_mg: float | None = None,
+        trans_fat_g: float | None = None, saturated_fat_g: float | None = None,
         estimated: int = 1, confidence: float = 0, source_text: str = "",
     ):
         await self.db.execute(
             """INSERT INTO food_entries
                (note_id, entry_type, meal_type, food_name, quantity_value, quantity_unit,
-                calories_kcal, protein_g, fat_g, carbs_g, estimated, confidence,
-                consumed_at, source_text)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                calories_kcal, protein_g, fat_g, carbs_g,
+                fiber_g, sugar_g, sodium_mg, nutrition_json,
+                serving_g, consumed_time, food_source, brand,
+                glycemic_index, alcohol_g, caffeine_mg,
+                cholesterol_mg, trans_fat_g, saturated_fat_g,
+                estimated, confidence, consumed_at, source_text)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (note_id, entry_type, meal_type, food_name, quantity_value, quantity_unit,
-             calories_kcal, protein_g, fat_g, carbs_g, estimated, confidence,
-             consumed_at, source_text),
+             calories_kcal, protein_g, fat_g, carbs_g,
+             fiber_g, sugar_g, sodium_mg, nutrition_json,
+             serving_g, consumed_time, food_source, brand,
+             glycemic_index, alcohol_g, caffeine_mg,
+             cholesterol_mg, trans_fat_g, saturated_fat_g,
+             estimated, confidence, consumed_at, source_text),
         )
         await self.db.commit()
 
@@ -1971,6 +2217,60 @@ class Database:
         await self.db.execute("DELETE FROM grocery_expenses WHERE note_id=?", (note_id,))
         await self.db.commit()
 
+    # ── Water entries ────────────────────────────────────────────
+
+    async def save_water_entry(
+        self, consumed_at: str, amount_ml: float,
+        note_id: int | None = None, drink_type: str = "water",
+        consumed_time: str = "", caffeine_mg: float | None = None,
+    ):
+        await self.db.execute(
+            """INSERT INTO water_entries
+               (note_id, amount_ml, drink_type, consumed_at, consumed_time, caffeine_mg)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (note_id, amount_ml, drink_type, consumed_at, consumed_time, caffeine_mg),
+        )
+        await self.db.commit()
+
+    async def get_water_by_date(self, date: str) -> list[dict]:
+        cursor = await self.db.execute(
+            "SELECT * FROM water_entries WHERE consumed_at=? ORDER BY id", (date,),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_daily_water(self, date: str) -> dict:
+        cursor = await self.db.execute(
+            """SELECT SUM(amount_ml) as total_ml, COUNT(*) as entries,
+                      SUM(caffeine_mg) as caffeine_total
+               FROM water_entries WHERE consumed_at=?""",
+            (date,),
+        )
+        row = await cursor.fetchone()
+        total = row[0] or 0 if row else 0
+        entries = row[1] or 0 if row else 0
+        caffeine = row[2] or 0 if row else 0
+        # By type
+        cursor2 = await self.db.execute(
+            """SELECT drink_type, SUM(amount_ml) as ml
+               FROM water_entries WHERE consumed_at=? GROUP BY drink_type""",
+            (date,),
+        )
+        by_type = {r[0]: r[1] for r in await cursor2.fetchall()}
+        return {"total_ml": total, "entries": entries, "caffeine_mg": caffeine, "by_type": by_type}
+
+    async def get_water_trend(self, days: int = 30) -> list[dict]:
+        cursor = await self.db.execute(
+            """SELECT consumed_at as date, SUM(amount_ml) as total_ml, COUNT(*) as entries
+               FROM water_entries WHERE consumed_at >= date('now', ?)
+               GROUP BY consumed_at ORDER BY consumed_at""",
+            (f"-{days} days",),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def clear_water_entries(self, note_id: int):
+        await self.db.execute("DELETE FROM water_entries WHERE note_id=?", (note_id,))
+        await self.db.commit()
+
     async def get_food_entries_by_date(self, date: str) -> list[dict]:
         cursor = await self.db.execute(
             "SELECT * FROM food_entries WHERE consumed_at=? ORDER BY meal_type, id",
@@ -1988,16 +2288,26 @@ class Database:
         """Daily nutrition totals from food_entries."""
         cursor = await self.db.execute(
             """SELECT SUM(calories_kcal) as calories, SUM(protein_g) as protein,
-                      SUM(fat_g) as fat, SUM(carbs_g) as carbs, COUNT(*) as items
+                      SUM(fat_g) as fat, SUM(carbs_g) as carbs, COUNT(*) as items,
+                      SUM(fiber_g) as fiber, SUM(sugar_g) as sugar, SUM(sodium_mg) as sodium,
+                      SUM(saturated_fat_g) as sat_fat, SUM(trans_fat_g) as trans_fat,
+                      SUM(cholesterol_mg) as cholesterol, SUM(caffeine_mg) as caffeine,
+                      SUM(alcohol_g) as alcohol
                FROM food_entries WHERE consumed_at=?""",
             (date,),
         )
         row = await cursor.fetchone()
         if not row:
-            return {"calories": 0, "protein": 0, "fat": 0, "carbs": 0, "items": 0}
+            return {"calories": 0, "protein": 0, "fat": 0, "carbs": 0, "items": 0,
+                    "fiber": 0, "sugar": 0, "sodium": 0, "saturated_fat": 0,
+                    "trans_fat": 0, "cholesterol": 0, "caffeine": 0, "alcohol": 0}
         return {
             "calories": row[0] or 0, "protein": row[1] or 0,
             "fat": row[2] or 0, "carbs": row[3] or 0, "items": row[4] or 0,
+            "fiber": row[5] or 0, "sugar": row[6] or 0, "sodium": row[7] or 0,
+            "saturated_fat": row[8] or 0, "trans_fat": row[9] or 0,
+            "cholesterol": row[10] or 0, "caffeine": row[11] or 0,
+            "alcohol": row[12] or 0,
         }
 
     async def get_nutrition_trend(self, days: int = 7) -> list[dict]:
@@ -2073,10 +2383,41 @@ class Database:
         await self.db.commit()
 
     async def snooze_note_reminder(self, reminder_id: int, hours: int = 24):
+        hours = int(hours)  # sanitize
         await self.db.execute(
-            f"UPDATE note_reminders SET status='pending', sent_at=NULL, "
-            f"remind_at=datetime(remind_at, '+{hours} hours') WHERE id=?",
-            (reminder_id,),
+            "UPDATE note_reminders SET status='pending', sent_at=NULL, "
+            "remind_at=datetime(remind_at, '+' || ? || ' hours') WHERE id=?",
+            (str(hours), reminder_id),
+        )
+        await self.db.commit()
+
+    async def snooze_note_reminder_to(self, reminder_id: int, remind_at: str):
+        """Snooze to a specific datetime."""
+        await self.db.execute(
+            "UPDATE note_reminders SET status='pending', sent_at=NULL, remind_at=? WHERE id=?",
+            (remind_at, reminder_id),
+        )
+        await self.db.commit()
+
+    async def update_note_reminder(self, reminder_id: int, description: str = None,
+                                   remind_at: str = None, recurrence_rule: str = None):
+        """Update reminder fields."""
+        updates = []
+        params = []
+        if description is not None:
+            updates.append("description=?")
+            params.append(description)
+        if remind_at is not None:
+            updates.append("remind_at=?")
+            params.append(remind_at)
+        if recurrence_rule is not None:
+            updates.append("recurrence_rule=?")
+            params.append(recurrence_rule)
+        if not updates:
+            return
+        params.append(reminder_id)
+        await self.db.execute(
+            f"UPDATE note_reminders SET {', '.join(updates)} WHERE id=?", params,
         )
         await self.db.commit()
 
@@ -2085,6 +2426,41 @@ class Database:
             "UPDATE note_reminders SET status='cancelled' WHERE id=?",
             (reminder_id,),
         )
+        await self.db.commit()
+
+    async def delete_note_reminder(self, reminder_id: int):
+        await self.db.execute("DELETE FROM note_reminders WHERE id=?", (reminder_id,))
+        await self.db.commit()
+
+    async def bulk_update_reminders(self, reminder_ids: list[int], reminder_type: str, action: str):
+        """Bulk action on reminders: done, cancel, delete."""
+        if not reminder_ids:
+            return
+        placeholders = ",".join("?" * len(reminder_ids))
+        if reminder_type == "note":
+            table = "note_reminders"
+        else:
+            table = "reminders"
+        if action == "done":
+            if reminder_type == "note":
+                await self.db.execute(
+                    f"UPDATE {table} SET status='done', completed_at=datetime('now') WHERE id IN ({placeholders})",
+                    reminder_ids,
+                )
+            else:
+                await self.db.execute(
+                    f"UPDATE {table} SET sent=1, status='done' WHERE id IN ({placeholders})",
+                    reminder_ids,
+                )
+        elif action == "cancel":
+            await self.db.execute(
+                f"UPDATE {table} SET status='cancelled' WHERE id IN ({placeholders})",
+                reminder_ids,
+            )
+        elif action == "delete":
+            await self.db.execute(
+                f"DELETE FROM {table} WHERE id IN ({placeholders})", reminder_ids,
+            )
         await self.db.commit()
 
     async def list_note_reminders(self, include_done: bool = False) -> list[dict]:
@@ -2108,3 +2484,151 @@ class Database:
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+    # ── Medical Metrics ──
+
+    async def save_medical_metric(self, note_id: int | None, metric_type: str,
+                                   value_primary: float, value_secondary: float | None = None,
+                                   context: str = "", measured_at: str = "",
+                                   source: str = "manual") -> int:
+        if not measured_at:
+            measured_at = datetime.now().isoformat()
+        cursor = await self.db.execute(
+            """INSERT INTO medical_metrics (note_id, metric_type, value_primary, value_secondary,
+               context, measured_at, source) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (note_id, metric_type, value_primary, value_secondary, context, measured_at, source),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
+
+    async def get_medical_metrics(self, metric_type: str, days: int = 30) -> list[dict]:
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cursor = await self.db.execute(
+            """SELECT * FROM medical_metrics WHERE metric_type=? AND measured_at >= ?
+               ORDER BY measured_at DESC""",
+            (metric_type, since),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def get_medical_metrics_by_date(self, date: str, metric_type: str = "") -> list[dict]:
+        if metric_type:
+            cursor = await self.db.execute(
+                "SELECT * FROM medical_metrics WHERE metric_type=? AND measured_at LIKE ? ORDER BY measured_at",
+                (metric_type, f"{date}%"),
+            )
+        else:
+            cursor = await self.db.execute(
+                "SELECT * FROM medical_metrics WHERE measured_at LIKE ? ORDER BY measured_at",
+                (f"{date}%",),
+            )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    # ── Personal Baselines ──
+
+    async def save_personal_baseline(self, metric_key: str, window_days: int,
+                                      avg_value: float, std_value: float,
+                                      min_value: float, max_value: float,
+                                      data_points: int):
+        await self.db.execute(
+            """INSERT OR REPLACE INTO personal_baselines
+               (metric_key, window_days, avg_value, std_value, min_value, max_value, data_points, computed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (metric_key, window_days, avg_value, std_value, min_value, max_value, data_points,
+             datetime.now().isoformat()),
+        )
+        await self.db.commit()
+
+    async def get_personal_baseline(self, metric_key: str, window_days: int = 30) -> dict | None:
+        cursor = await self.db.execute(
+            "SELECT * FROM personal_baselines WHERE metric_key=? AND window_days=?",
+            (metric_key, window_days),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_all_baselines(self, window_days: int = 30) -> dict[str, dict]:
+        cursor = await self.db.execute(
+            "SELECT * FROM personal_baselines WHERE window_days=?", (window_days,),
+        )
+        rows = await cursor.fetchall()
+        return {r["metric_key"]: dict(r) for r in rows}
+
+    # ── Lag Correlations ──
+
+    async def save_lag_correlation(self, metric_a: str, metric_b: str, lag_days: int,
+                                    correlation: float, p_value: float | None,
+                                    data_points: int):
+        await self.db.execute(
+            """INSERT OR REPLACE INTO lag_correlations
+               (metric_a, metric_b, lag_days, correlation, p_value, data_points, computed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (metric_a, metric_b, lag_days, correlation, p_value, data_points,
+             datetime.now().isoformat()),
+        )
+        await self.db.commit()
+
+    async def get_lag_correlations(self) -> list[dict]:
+        cursor = await self.db.execute(
+            "SELECT * FROM lag_correlations ORDER BY ABS(correlation) DESC",
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    # ── Users ──
+
+    async def create_user(self, email: str, password_hash: str, recovery_key_hash: str = "") -> int:
+        """Create a new user. Returns user id."""
+        cursor = await self.db.execute(
+            "INSERT INTO users (email, password_hash, recovery_key_hash) VALUES (?, ?, ?)",
+            (email, password_hash, recovery_key_hash),
+        )
+        await self.db.commit()
+        return cursor.lastrowid
+
+    async def get_user_by_email(self, email: str) -> dict | None:
+        """Get user by email (case-insensitive)."""
+        cursor = await self.db.execute(
+            "SELECT * FROM users WHERE email = ? COLLATE NOCASE AND is_active = 1",
+            (email,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def update_user_password(self, user_id: int, new_password_hash: str):
+        """Update user password hash."""
+        await self.db.execute(
+            "UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?",
+            (new_password_hash, user_id),
+        )
+        await self.db.commit()
+
+    async def update_user_recovery_hash(self, user_id: int, recovery_key_hash: str):
+        """Update recovery key hash for user."""
+        await self.db.execute(
+            "UPDATE users SET recovery_key_hash = ?, updated_at = datetime('now') WHERE id = ?",
+            (recovery_key_hash, user_id),
+        )
+        await self.db.commit()
+
+    async def get_user_count(self) -> int:
+        """Get total number of active users."""
+        cursor = await self.db.execute("SELECT COUNT(*) FROM users WHERE is_active = 1")
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    # ── Signal Streaks ──
+
+    async def get_signal_streak(self, fact_key: str, max_days: int = 365) -> int:
+        """Count consecutive days (ending today) where note_facts has entry for this key."""
+        today = datetime.now().date()
+        streak = 0
+        for i in range(max_days):
+            date = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            cursor = await self.db.execute(
+                "SELECT 1 FROM note_facts WHERE key=? AND date=? LIMIT 1",
+                (fact_key, date),
+            )
+            if await cursor.fetchone():
+                streak += 1
+            else:
+                break
+        return streak

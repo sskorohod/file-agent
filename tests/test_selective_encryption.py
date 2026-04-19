@@ -107,3 +107,23 @@ class TestFileStorageSelectiveEncryption:
         rec = await fs.save_from_bytes(b"secret", "s.txt", category="x", encrypt=True)
         assert rec.encrypted is True
         assert Path(rec.stored_path).read_bytes().startswith(b"FAGE\x01")
+
+
+class TestDbEncryptedColumn:
+    @pytest.mark.asyncio
+    async def test_encrypted_column_exists(self, db):
+        cursor = await db._db.execute("PRAGMA table_info(files)")
+        cols = {row[1] for row in await cursor.fetchall()}
+        assert "encrypted" in cols
+
+    @pytest.mark.asyncio
+    async def test_encrypted_column_defaults_to_zero(self, db):
+        await db._db.execute(
+            """INSERT INTO files
+               (id, original_name, stored_path, sha256, size_bytes, mime_type, category)
+               VALUES ('legacy1', 'x.txt', '/tmp/x', 'abc', 1, 'text/plain', 'x')"""
+        )
+        await db._db.commit()
+        cursor = await db._db.execute("SELECT encrypted FROM files WHERE id='legacy1'")
+        row = await cursor.fetchone()
+        assert row[0] == 0
