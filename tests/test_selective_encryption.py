@@ -151,3 +151,42 @@ class TestDbInsertFileEncrypted:
         row = await db.get_file("f2")
         assert row is not None
         assert row["encrypted"] is False
+
+
+class TestPipelineEncryptFlow:
+    """Verify _step_store passes encrypt based on skill."""
+
+    @pytest.mark.asyncio
+    async def test_step_store_encrypts_when_skill_opts_in(self, tmp_dir):
+        from app.llm.classifier import ClassificationResult
+        from app.skills.engine import SkillDefinition
+        from app.storage.backends.local import LocalBackend
+        from app.storage.files import FileStorage
+
+        key = b"\x06" * 32
+        local = LocalBackend(tmp_dir / "pf", encryption_key=key)
+        fs = FileStorage("local", {"local": local})
+
+        class _Stub:
+            file_storage = fs
+
+        from app.pipeline import Pipeline
+        step = Pipeline._step_store.__get__(_Stub(), Pipeline)
+
+        skill_on = SkillDefinition(name="personal", category="personal", encrypt=True)
+        cls = ClassificationResult(
+            category="personal", confidence=0.9, tags=[], summary="",
+            document_type="passport", skill_name="personal",
+        )
+        rec = await step(b"secret", "passport.pdf", cls, skill_on)
+        assert rec.encrypted is True
+        assert Path(rec.stored_path).read_bytes().startswith(b"FAGE\x01")
+
+        skill_off = SkillDefinition(name="business", category="business", encrypt=False)
+        cls2 = ClassificationResult(
+            category="business", confidence=0.9, tags=[], summary="",
+            document_type="invoice", skill_name="business",
+        )
+        rec2 = await step(b"plain", "inv.pdf", cls2, skill_off)
+        assert rec2.encrypted is False
+        assert not Path(rec2.stored_path).read_bytes().startswith(b"FAGE\x01")

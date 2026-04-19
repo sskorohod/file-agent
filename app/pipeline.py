@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -23,16 +24,16 @@ logger = logging.getLogger(__name__)
 def _reminder_days_for_doc_type(doc_type: str) -> int:
     """Return how many days before expiry to send a reminder.
 
-    - Passports: 180 days (6 months)
-    - Driver licenses: 60 days
-    - Everything else: 14 days (2 weeks)
+    Values are configurable via config.yaml → reminders section.
     """
+    from app.config import get_settings
+    cfg = get_settings().reminders
     dt = doc_type.lower()
     if any(w in dt for w in ("passport", "паспорт", "загранпаспорт")):
-        return 180
+        return cfg.passport_days
     if any(w in dt for w in ("driver", "водительск", "license", "права", "удостоверение водител")):
-        return 60
-    return 14
+        return cfg.license_days
+    return cfg.default_days
 
 
 @dataclass
@@ -178,7 +179,9 @@ class Pipeline:
             await self._log_step(result, "receive", lambda: self._step_receive(file_data, filename))
 
             # Step 1.5: Auto-crop images (detect document, trim borders)
-            file_data = self._auto_crop_if_image(file_data, filename)
+            file_data = await asyncio.to_thread(
+                self._auto_crop_if_image, file_data, filename
+            )
 
             # Step 1.6: Dedup — check if file already exists by SHA-256
             existing = await self._step_dedup(file_data)
@@ -279,8 +282,9 @@ class Pipeline:
                 result.semantic_duplicate_of = self._last_semantic_dup["existing"]
                 result.similarity_score = self._last_semantic_dup["score"]
 
-            # Step 7.5: Summarize (non-fatal, enriches metadata quality)
+            # Step 7.5: Summarize (non-fatal but retryable, enriches metadata quality)
             summary_result = None
+            summary_failed = False
             if parse_result.text and parse_result.text.strip() and hasattr(self, 'summarizer') and self.summarizer:
                 try:
                     summary_result = await self._log_step(
@@ -288,7 +292,8 @@ class Pipeline:
                         lambda: self._step_summarize(parse_result, filename, classification),
                     )
                 except Exception as e:
-                    logger.warning(f"Summarize failed (non-fatal): {e}")
+                    summary_failed = True
+                    logger.warning(f"Summarize failed after retries (non-fatal): {e}")
 
             # Step 8: Save metadata — write to SQLite
             # If save_meta fails after store succeeded, clean up orphaned artifacts
@@ -298,6 +303,8 @@ class Pipeline:
                     lambda: self._step_save_meta(
                         file_record, parse_result, classification, source, chunks,
                         summary_result=summary_result,
+                        summary_failed=summary_failed,
+                        vector_failed=(chunks == 0 and not parse_result.is_empty),
                     ),
                 )
             except Exception as save_err:
@@ -380,7 +387,7 @@ class Pipeline:
         return result
 
     # Steps that depend on external services and can be retried
-    _RETRYABLE_STEPS = frozenset({"classify", "embed", "extract", "route"})
+    _RETRYABLE_STEPS = frozenset({"classify", "embed", "extract", "route", "summarize"})
     _MAX_RETRIES = 2
     _RETRY_DELAY = 1.0  # seconds
 
@@ -560,10 +567,12 @@ class Pipeline:
             "document_type": classification.document_type,
             "source": "telegram",
         }
+        encrypt = bool(skill and skill.encrypt)
         return await self.file_storage.save_from_bytes(
             data=data,
             original_name=filename,
             category=classification.category,
+            encrypt=encrypt,
         )
 
     async def _step_summarize(
@@ -675,6 +684,8 @@ class Pipeline:
         source: str,
         chunks: int,
         summary_result=None,
+        summary_failed: bool = False,
+        vector_failed: bool = False,
     ):
         """Save metadata to SQLite."""
         # Get priority from extracted fields if available
@@ -696,6 +707,14 @@ class Pipeline:
         # date → issue_date → date_of_service → measurement_date → None
         document_date = self._extract_document_date(self._current_extracted_fields)
 
+        # Warn about text truncation
+        text_truncated = len(parse_result.text) > 50000
+        if text_truncated:
+            logger.info(
+                f"Extracted text truncated: {len(parse_result.text)} → 50000 chars "
+                f"({file_record.original_name})"
+            )
+
         # Build metadata with summary quality hints
         metadata = {
             "document_type": classification.document_type,
@@ -709,6 +728,12 @@ class Pipeline:
             "text_length": len(parse_result.text),
             "summary_source": summary_source,
         }
+        if summary_failed:
+            metadata["summary_failed"] = True
+        if vector_failed:
+            metadata["vector_failed"] = True
+        if text_truncated:
+            metadata["text_truncated"] = True
         if summary_result:
             metadata["summary_context_chars"] = summary_result.context_chars
             metadata["summary_model"] = summary_result.model
@@ -729,6 +754,7 @@ class Pipeline:
             metadata=metadata,
             priority=priority,
             document_date=document_date,
+            encrypted=file_record.encrypted,
         )
 
     @staticmethod
