@@ -65,15 +65,23 @@ class GDriveBackend(StorageBackend):
 
     async def write(
         self, data: bytes, category: str, original_name: str,
+        encrypt: bool = False,
     ) -> str:
-        if self._encryption_key:
-            from app.utils.crypto import encrypt_bytes
-            data = encrypt_bytes(data, self._encryption_key)
+        payload = data
+        if encrypt:
+            if self._encryption_key:
+                from app.utils.crypto import encrypt_bytes
+                payload = encrypt_bytes(data, self._encryption_key)
+            else:
+                logger.warning(
+                    "encrypt=True requested but no encryption key — writing plaintext (%s)",
+                    original_name,
+                )
 
         from googleapiclient.http import MediaInMemoryUpload
         folder_id = await asyncio.to_thread(self._get_or_create_folder, category)
         name = Path(original_name).name
-        media = MediaInMemoryUpload(data, resumable=False)
+        media = MediaInMemoryUpload(payload, resumable=False)
         meta = {"name": name, "parents": [folder_id]}
         result = await asyncio.to_thread(
             lambda: self._service.files().create(

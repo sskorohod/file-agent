@@ -55,14 +55,22 @@ class S3Backend(StorageBackend):
 
     async def write(
         self, data: bytes, category: str, original_name: str,
+        encrypt: bool = False,
     ) -> str:
-        if self._encryption_key:
-            from app.utils.crypto import encrypt_bytes
-            data = encrypt_bytes(data, self._encryption_key)
+        payload = data
+        if encrypt:
+            if self._encryption_key:
+                from app.utils.crypto import encrypt_bytes
+                payload = encrypt_bytes(data, self._encryption_key)
+            else:
+                logger.warning(
+                    "encrypt=True requested but no encryption key — writing plaintext (%s)",
+                    original_name,
+                )
 
         key = self._build_key(category, original_name)
         await asyncio.to_thread(
-            self._client.put_object, Bucket=self._bucket, Key=key, Body=data,
+            self._client.put_object, Bucket=self._bucket, Key=key, Body=payload,
         )
         return f"s3://{self._bucket}/{key}"
 
