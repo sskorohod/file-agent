@@ -50,6 +50,7 @@ class SkillDefinition(BaseModel):
     tags: list[str] = []
     enabled: bool = True
     priority: int = 0  # higher = checked first
+    encrypt: bool = False  # if true, files classified into this skill are AES-256-GCM encrypted at rest
 
     @property
     def effective_display_name(self) -> str:
