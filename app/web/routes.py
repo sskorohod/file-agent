@@ -42,32 +42,118 @@ def _safe_filename(name: str) -> str:
     return quote(name, safe="")
 
 
+def _is_valid_email(email: str) -> bool:
+    """Basic email format validation (no external deps)."""
+    import re
+    return bool(re.match(
+        r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$',
+        email.strip(),
+    ))
+
+
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+    # Check if setup is needed (no users yet)
+    db = _get("db")
+    if db:
+        user_count = await db.get_user_count()
+        if user_count == 0:
+            return RedirectResponse("/setup", status_code=303)
+    return templates.TemplateResponse(
+        "login.html", {"request": request, "error": None}
+    )
 
 
 @router.post("/login")
-@limiter.limit("5/minute")
-async def login(request: Request, login: str = Form(...), password: str = Form(...)):
+@limiter.limit("3/minute")
+async def login(
+    request: Request,
+    login: str = Form(...),
+    password: str = Form(...),
+    encryption_key: str = Form(""),
+):
     import logging
     import bcrypt
     from app.config import get_settings
     _log = logging.getLogger(__name__)
     settings = get_settings()
-    login_ok = not settings.web.login or login.strip().lower() == settings.web.login.lower()
-    password_ok = settings.web.password_hash and bcrypt.checkpw(
-        password.encode(), settings.web.password_hash.encode()
-    )
-    _log.info(f"Login attempt: success={login_ok and password_ok}")
-    if login_ok and password_ok:
-        request.session.clear()  # Prevent session fixation
+
+    db = _get("db")
+    user = await db.get_user_by_email(login.strip()) if db else None
+
+    if user:
+        # ── v2 auth: users table ──
+        password_ok = bcrypt.checkpw(
+            password.encode(), user["password_hash"].encode()
+        )
+        if not password_ok:
+            _log.info("Login attempt: password mismatch")
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "Неверный логин или пароль"},
+                status_code=401,
+            )
+
+        # Unlock encryption with primary key
+        if encryption_key:
+            from app.utils.crypto import (
+                unlock_with_primary_key_v2,
+                is_v2_keyfile,
+            )
+            if is_v2_keyfile():
+                try:
+                    import os
+                    key_file_data = None
+                    kf_path = os.environ.get("KEY_FILE", "")
+                    if kf_path and Path(kf_path).exists():
+                        key_file_data = Path(kf_path).read_bytes()
+                    mdk = unlock_with_primary_key_v2(
+                        encryption_key,
+                        "data/encryption.key",
+                        key_file_data,
+                    )
+                    from app.main import _state
+                    _state["_encryption_key"] = mdk
+                    _apply_encryption_key(mdk)
+                    _save_session_key(mdk)
+                except ValueError as e:
+                    _log.info(f"Login attempt: encryption key error: {e}")
+                    return templates.TemplateResponse(
+                        "login.html",
+                        {
+                            "request": request,
+                            "error": "Неверный ключ шифрования",
+                        },
+                        status_code=401,
+                    )
+
+        request.session.clear()
         request.session["authenticated"] = True
+        request.session["user_id"] = user["id"]
+        _log.info(f"Login success: {login.strip()}")
         return RedirectResponse("/", status_code=303)
+
+    else:
+        # ── Fallback: legacy env-based auth (no users in DB) ──
+        login_ok = (
+            not settings.web.login
+            or login.strip().lower() == settings.web.login.lower()
+        )
+        password_ok = settings.web.password_hash and bcrypt.checkpw(
+            password.encode(), settings.web.password_hash.encode()
+        )
+        _log.info(f"Login attempt (legacy): success={login_ok and password_ok}")
+        if login_ok and password_ok:
+            request.session.clear()
+            request.session["authenticated"] = True
+            return RedirectResponse("/", status_code=303)
+
     return templates.TemplateResponse(
-        "login.html", {"request": request, "error": "Неверный логин или пароль"}, status_code=401
+        "login.html",
+        {"request": request, "error": "Неверный логин или пароль"},
+        status_code=401,
     )
 
 
@@ -75,6 +161,293 @@ async def login(request: Request, login: str = Form(...), password: str = Form(.
 async def logout(request: Request):
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
+
+
+# ── Setup (first-time) ──────────────────────────────────────────────────────
+
+@router.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    db = _get("db")
+    if db:
+        user_count = await db.get_user_count()
+        if user_count > 0:
+            return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(
+        "setup.html", {"request": request, "error": None}
+    )
+
+
+@router.post("/setup")
+@limiter.limit("3/minute")
+async def setup_create(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    password_confirm: str = Form(...),
+):
+    import hashlib
+
+    import bcrypt
+
+    db = _get("db")
+    if db:
+        user_count = await db.get_user_count()
+        if user_count > 0:
+            return RedirectResponse("/login", status_code=303)
+
+    if not _is_valid_email(email):
+        return templates.TemplateResponse(
+            "setup.html",
+            {"request": request, "error": "Неверный формат email"},
+            status_code=400,
+        )
+    if password != password_confirm:
+        return templates.TemplateResponse(
+            "setup.html",
+            {"request": request, "error": "Пароли не совпадают"},
+            status_code=400,
+        )
+    if len(password) < 8:
+        return templates.TemplateResponse(
+            "setup.html",
+            {"request": request, "error": "Пароль: минимум 8 символов"},
+            status_code=400,
+        )
+
+    import os
+
+    from app.utils.crypto import is_v2_keyfile
+
+    key_file_data = None
+    kf_path = os.environ.get("KEY_FILE", "")
+    if kf_path and Path(kf_path).exists():
+        key_file_data = Path(kf_path).read_bytes()
+
+    if is_v2_keyfile():
+        # v2 keyfile exists (e.g. after v1→v2 migration).
+        # Keys were already generated — read from migration file.
+        migration_file = Path("data/MIGRATION_KEYS.txt")
+        primary_key = ""
+        recovery_key = ""
+        if migration_file.exists():
+            text = migration_file.read_text()
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(
+                    ("КЛЮЧ", "===", "PRIMARY", "RECOVERY", "⚠", "Без")
+                ):
+                    if not primary_key:
+                        primary_key = stripped
+                    elif not recovery_key:
+                        recovery_key = stripped
+
+        # Create user (account for existing encryption)
+        pw_hash = bcrypt.hashpw(
+            password.encode(), bcrypt.gensalt()
+        ).decode()
+        rk_hash = (
+            hashlib.sha256(recovery_key.encode()).hexdigest()
+            if recovery_key else ""
+        )
+        await db.create_user(email, pw_hash, rk_hash)
+
+        # Apply encryption from session key if available
+        from app.web.routes import load_session_key
+
+        session_key = load_session_key()
+        if session_key:
+            from app.main import _state
+
+            _state["_encryption_key"] = session_key
+            _apply_encryption_key(session_key)
+
+        request.session.clear()
+        request.session["authenticated"] = True
+
+        if primary_key:
+            return templates.TemplateResponse(
+                "register_keys.html",
+                {
+                    "request": request,
+                    "primary_key": primary_key,
+                    "recovery_key": recovery_key,
+                },
+            )
+        else:
+            return RedirectResponse("/", status_code=303)
+    else:
+        # Fresh setup — generate new encryption keys
+        from app.utils.crypto import (
+            generate_primary_key,
+            setup_master_key_v2,
+        )
+
+        primary_key = generate_primary_key()
+        mdk, recovery_key = setup_master_key_v2(
+            primary_key, "data/encryption.key", key_file_data
+        )
+
+        pw_hash = bcrypt.hashpw(
+            password.encode(), bcrypt.gensalt()
+        ).decode()
+        rk_hash = hashlib.sha256(recovery_key.encode()).hexdigest()
+        await db.create_user(email, pw_hash, rk_hash)
+
+        from app.main import _state
+
+        _state["_encryption_key"] = mdk
+        _apply_encryption_key(mdk)
+        _save_session_key(mdk)
+
+        request.session.clear()
+        request.session["authenticated"] = True
+
+        return templates.TemplateResponse(
+            "register_keys.html",
+            {
+                "request": request,
+                "primary_key": primary_key,
+                "recovery_key": recovery_key,
+            },
+        )
+
+
+# ── Recovery ────────────────────────────────────────────────────────────────
+
+@router.get("/recover", response_class=HTMLResponse)
+async def recover_page(request: Request):
+    return templates.TemplateResponse(
+        "recover.html", {"request": request, "error": None, "success": None}
+    )
+
+
+@router.post("/recover")
+@limiter.limit("2/minute")
+async def recover_process(
+    request: Request,
+    email: str = Form(...),
+    recovery_key: str = Form(...),
+    password: str = Form(...),
+    password_confirm: str = Form(...),
+):
+    import hashlib
+    import logging
+    import os
+
+    import bcrypt
+
+    _log = logging.getLogger(__name__)
+    db = _get("db")
+    user = await db.get_user_by_email(email.strip()) if db else None
+
+    _generic_recover_error = "Неверные данные для восстановления"
+    if not user:
+        return templates.TemplateResponse(
+            "recover.html",
+            {
+                "request": request,
+                "error": _generic_recover_error,
+                "success": None,
+            },
+            status_code=400,
+        )
+
+    if password != password_confirm:
+        return templates.TemplateResponse(
+            "recover.html",
+            {"request": request, "error": "Пароли не совпадают", "success": None},
+            status_code=400,
+        )
+    if len(password) < 8:
+        return templates.TemplateResponse(
+            "recover.html",
+            {"request": request, "error": "Пароль: минимум 8 символов", "success": None},
+            status_code=400,
+        )
+
+    # Verify recovery key
+    from app.utils.crypto import (
+        generate_primary_key,
+        generate_recovery_key,
+        recover_key_from_recovery,
+        rewrap_master_key,
+    )
+
+    try:
+        mdk = recover_key_from_recovery(recovery_key.strip())
+    except ValueError:
+        return templates.TemplateResponse(
+            "recover.html",
+            {
+                "request": request,
+                "error": _generic_recover_error,
+                "success": None,
+            },
+            status_code=400,
+        )
+
+    # Verify recovery key matches stored hash
+    rk_str = generate_recovery_key(mdk)
+    rk_hash = hashlib.sha256(rk_str.encode()).hexdigest()
+    if (
+        user.get("recovery_key_hash")
+        and rk_hash != user["recovery_key_hash"]
+    ):
+        return templates.TemplateResponse(
+            "recover.html",
+            {
+                "request": request,
+                "error": _generic_recover_error,
+                "success": None,
+            },
+            status_code=400,
+        )
+
+    # Re-wrap MDK with new primary key
+    key_file_data = None
+    kf_path = os.environ.get("KEY_FILE", "")
+    if kf_path and Path(kf_path).exists():
+        key_file_data = Path(kf_path).read_bytes()
+
+    new_primary_key = generate_primary_key()
+    try:
+        mdk_out, new_recovery = rewrap_master_key(
+            recovery_key.strip(),
+            new_primary_key,
+            "data/encryption.key",
+            key_file_data,
+        )
+    except ValueError as e:
+        _log.error(f"Recovery rewrap failed: {e}")
+        return templates.TemplateResponse(
+            "recover.html",
+            {
+                "request": request,
+                "error": _generic_recover_error,
+                "success": None,
+            },
+            status_code=400,
+        )
+
+    # Update user password
+    new_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    await db.update_user_password(user["id"], new_hash)
+
+    # Update recovery hash
+    new_rk_hash = hashlib.sha256(new_recovery.encode()).hexdigest()
+    await db.update_user_recovery_hash(user["id"], new_rk_hash)
+
+    _log.info(f"Recovery successful for user {user['id']}")
+
+    return templates.TemplateResponse(
+        "recover.html",
+        {
+            "request": request,
+            "error": None,
+            "success": True,
+            "new_primary_key": new_primary_key,
+        },
+    )
 
 
 # ── Dashboard ────────────────────────────────────────────────────────────────
@@ -147,12 +520,24 @@ async def dashboard(request: Request):
         alerts.append({"type": "error", "text": f"{errors} ошибок pipeline", "link": "/logs"})
     if not qdrant_ok and vs:
         alerts.append({"type": "error", "text": "Qdrant недоступен", "link": "/settings/storage"})
+
+    # LLM Proxy health
+    proxy_ok = True
+    pm = _get("proxy_manager")
+    if pm:
+        from app.services.proxy_manager import ProxyState
+        if pm.state in (ProxyState.UNHEALTHY, ProxyState.STOPPED, ProxyState.COOLDOWN):
+            proxy_ok = False
+            alerts.append({"type": "error", "text": "LLM Proxy недоступен — summarize/classify не работают", "link": "/health"})
+        elif pm.state == ProxyState.RESTARTING:
+            alerts.append({"type": "warning", "text": "LLM Proxy перезапускается...", "link": "/health"})
+
     if review_count > 0:
         alerts.append({"type": "warning", "text": f"{review_count} заметок на review", "link": "/notes/review"})
     if overdue_reminders > 0:
         alerts.append({"type": "warning", "text": f"{overdue_reminders} просроченных напоминаний", "link": "/notes/reminders"})
 
-    if errors > 2 or not qdrant_ok:
+    if errors > 2 or not qdrant_ok or not proxy_ok:
         hero_state, hero_tone = "Errors Detected", "red"
     elif errors > 0 or overdue_reminders > 2:
         hero_state, hero_tone = "Attention Needed", "orange"
@@ -249,25 +634,14 @@ async def files_page(request: Request, category: str | None = None, q: str | Non
         files = await db.list_files(category=category, limit=limit, offset=offset) if db else []
     total = await db.count_files(category=category) if db else 0
     categories = list((await db.get_stats()).get("categories", {}).keys()) if db else []
-    # Enrich files with document_type and encryption status
-    file_storage = _get("file_storage")
+    # Enrich files with document_type; encryption status comes from the column
     for f in files:
         try:
             meta = json.loads(f.get("metadata_json", "{}") or "{}")
             f["document_type"] = meta.get("document_type", "")
         except (json.JSONDecodeError, TypeError):
             f["document_type"] = ""
-        # Check encryption: read first 5 bytes for FAGE magic header
-        f["is_encrypted"] = False
-        if file_storage and f.get("stored_path"):
-            try:
-                from pathlib import Path as _P
-                p = _P(f["stored_path"])
-                if p.exists():
-                    with open(p, "rb") as fh:
-                        f["is_encrypted"] = fh.read(5) == b"FAGE\x01"
-            except Exception:
-                pass
+        f["is_encrypted"] = bool(f.get("encrypted"))
     return templates.TemplateResponse("files.html", {
         "request": request, "page": "files", "files": files, "total": total,
         "current_page": page, "limit": limit, "category": category,
@@ -290,17 +664,8 @@ async def file_detail(request: Request, file_id: str):
                     file[key + "_parsed"] = json.loads(val)
                 except Exception:
                     file[key + "_parsed"] = val
-        # Check encryption status
-        file["is_encrypted"] = False
-        if file.get("stored_path"):
-            try:
-                from pathlib import Path as _P
-                p = _P(file["stored_path"])
-                if p.exists():
-                    with open(p, "rb") as fh:
-                        file["is_encrypted"] = fh.read(5) == b"FAGE\x01"
-            except Exception:
-                pass
+        # Encryption status from the column
+        file["is_encrypted"] = bool(file.get("encrypted"))
     return templates.TemplateResponse("file_detail.html", {
         "request": request, "page": "files", "file": file, "log": log, "notes": notes,
     })
@@ -394,6 +759,48 @@ async def file_delete(request: Request, file_id: str):
     if lifecycle:
         await lifecycle.delete(file_id)
     return RedirectResponse("/files", status_code=303)
+
+
+@router.post("/files/{file_id}/set-expiry")
+async def file_set_expiry(request: Request, file_id: str):
+    """Set expiry date on file and create reminder."""
+    from datetime import datetime, timedelta
+    from app.pipeline import _reminder_days_for_doc_type
+    form = await request.form()
+    expiry_date_str = form.get("expiry_date", "")
+    message = form.get("message", "").strip() or "Срок действия документа истекает"
+    db = _get("db")
+    if db and expiry_date_str:
+        try:
+            expiry = datetime.strptime(expiry_date_str, "%Y-%m-%d")
+            # Get doc type from file metadata for reminder days calculation
+            cursor = await db.db.execute(
+                "SELECT category, metadata_json FROM files WHERE id=?", (file_id,)
+            )
+            row = await cursor.fetchone()
+            doc_type = ""
+            if row:
+                try:
+                    import json
+                    meta = json.loads(row[1] or "{}")
+                    doc_type = meta.get("document_type", row[0] or "")
+                except Exception:
+                    doc_type = row[0] or ""
+            remind_days = _reminder_days_for_doc_type(doc_type)
+            remind_at = (expiry - timedelta(days=remind_days)).isoformat()
+            msg = f"{message}: {expiry_date_str} (напоминание за {remind_days} дн.)"
+            # Check if reminder already exists for this file
+            existing = await db.db.execute(
+                "SELECT id FROM reminders WHERE file_id=? AND status IN ('pending','sent')", (file_id,)
+            )
+            existing_row = await existing.fetchone()
+            if existing_row:
+                await db.update_file_reminder(existing_row[0], message=msg, remind_at=remind_at)
+            else:
+                await db.create_reminder(file_id, remind_at, msg)
+        except ValueError:
+            pass
+    return RedirectResponse(f"/files/{file_id}", status_code=303)
 
 
 @router.post("/files/upload")
@@ -627,10 +1034,33 @@ async def settings_llm_page(request: Request):
     }
     # Fetch available models (from proxy or presets)
     available_models = [
-        "anthropic/claude-sonnet-4-20250514",
-        "anthropic/claude-3-haiku-20240307",
+        # OpenAI — GPT-5.4 family (latest, April 2026)
+        "openai/gpt-5.4",
+        "openai/gpt-5.4-mini",
+        "openai/gpt-5.4-nano",
+        # OpenAI — GPT-5.x previous
+        "openai/gpt-5",
+        "openai/gpt-5-mini",
+        "openai/gpt-5-nano",
+        # OpenAI — Codex (coding-optimized)
+        "openai/gpt-5.3-codex",
+        "openai/gpt-5-codex",
+        # OpenAI — Reasoning (o-series)
+        "openai/o3",
+        "openai/o3-mini",
+        "openai/o4-mini",
+        # OpenAI — Legacy
         "openai/gpt-4.1",
         "openai/gpt-4.1-mini",
+        "openai/gpt-4o",
+        "openai/gpt-4o-mini",
+        # Anthropic
+        "anthropic/claude-opus-4-20250514",
+        "anthropic/claude-sonnet-4-20250514",
+        "anthropic/claude-haiku-4-20250514",
+        # Google
+        "gemini/gemini-2.5-pro",
+        "gemini/gemini-2.5-flash",
         "gemini/gemini-2.0-flash",
     ]
     if oauth_base:
@@ -1052,10 +1482,33 @@ async def list_available_models(request: Request):
 
     # Fallback: static presets
     return JSONResponse({"source": "presets", "models": [
-        "anthropic/claude-sonnet-4-20250514",
-        "anthropic/claude-3-haiku-20240307",
+        # OpenAI — GPT-5.4 family (latest)
+        "openai/gpt-5.4",
+        "openai/gpt-5.4-mini",
+        "openai/gpt-5.4-nano",
+        # OpenAI — GPT-5.x previous
+        "openai/gpt-5",
+        "openai/gpt-5-mini",
+        "openai/gpt-5-nano",
+        # OpenAI — Codex
+        "openai/gpt-5.3-codex",
+        "openai/gpt-5-codex",
+        # OpenAI — Reasoning
+        "openai/o3",
+        "openai/o3-mini",
+        "openai/o4-mini",
+        # OpenAI — Legacy
         "openai/gpt-4.1",
         "openai/gpt-4.1-mini",
+        "openai/gpt-4o",
+        "openai/gpt-4o-mini",
+        # Anthropic
+        "anthropic/claude-opus-4-20250514",
+        "anthropic/claude-sonnet-4-20250514",
+        "anthropic/claude-haiku-4-20250514",
+        # Google
+        "gemini/gemini-2.5-pro",
+        "gemini/gemini-2.5-flash",
         "gemini/gemini-2.0-flash",
     ]})
 
@@ -1138,17 +1591,34 @@ async def delete_api_key(key: str):
 _SESSION_KEY_PATH = Path("data/.session_key")
 
 
+_SESSION_KEY_SALT = b"session-key-encrypt-v2"
+_SESSION_KEY_ITERATIONS = 480_000
+
+
+def _derive_session_fernet(secret: str):
+    """Derive Fernet key from session secret using PBKDF2 (not raw SHA256)."""
+    import base64
+    import hashlib
+
+    from cryptography.fernet import Fernet
+
+    dk = hashlib.pbkdf2_hmac(
+        "sha256", secret.encode(), _SESSION_KEY_SALT, _SESSION_KEY_ITERATIONS
+    )
+    return Fernet(base64.urlsafe_b64encode(dk))
+
+
 def _save_session_key(key: bytes):
     """Save encryption key to temp file so it survives uvicorn reload.
-    The key is encrypted with Fernet using the web session secret as password."""
-    from cryptography.fernet import Fernet
-    import hashlib, base64
+    The key is encrypted with Fernet using PBKDF2-derived key."""
     from app.config import get_settings
+
     secret = get_settings().web.session_secret
     if not secret:
-        raise RuntimeError("WEB__SESSION_SECRET must be set to persist encryption key")
-    fernet_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
-    f = Fernet(fernet_key)
+        raise RuntimeError(
+            "WEB__SESSION_SECRET must be set to persist encryption key"
+        )
+    f = _derive_session_fernet(secret)
     _SESSION_KEY_PATH.write_bytes(f.encrypt(key))
     _SESSION_KEY_PATH.chmod(0o600)
 
@@ -1157,15 +1627,15 @@ def load_session_key() -> bytes | None:
     """Load encryption key from session file if it exists."""
     if not _SESSION_KEY_PATH.exists():
         return None
-    from cryptography.fernet import Fernet, InvalidToken
-    import hashlib, base64
+    from cryptography.fernet import InvalidToken
+
     from app.config import get_settings
+
     secret = get_settings().web.session_secret
     if not secret:
         return None
-    fernet_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
     try:
-        f = Fernet(fernet_key)
+        f = _derive_session_fernet(secret)
         return f.decrypt(_SESSION_KEY_PATH.read_bytes())
     except (InvalidToken, Exception):
         _SESSION_KEY_PATH.unlink(missing_ok=True)
@@ -1260,8 +1730,13 @@ async def encryption_unlock(
     request: Request,
     master_password: str = Form(...),
 ):
-    """Unlock encryption with master password."""
-    from app.utils.crypto import is_encryption_configured, unlock_with_password
+    """Unlock encryption with master password / primary key."""
+    from app.utils.crypto import (
+        is_encryption_configured,
+        unlock_with_password,
+        unlock_with_primary_key_v2,
+        is_v2_keyfile,
+    )
     import os
 
     if not is_encryption_configured():
@@ -1273,7 +1748,10 @@ async def encryption_unlock(
         key_file_data = Path(kf_path).read_bytes()
 
     try:
-        key = unlock_with_password(master_password, "data/encryption.key", key_file_data)
+        if is_v2_keyfile():
+            key = unlock_with_primary_key_v2(master_password, "data/encryption.key", key_file_data)
+        else:
+            key = unlock_with_password(master_password, "data/encryption.key", key_file_data)
     except ValueError as e:
         return RedirectResponse(f"/settings?error={e}", status_code=303)
 
@@ -1468,19 +1946,10 @@ async def insights_refresh(request: Request):
     return RedirectResponse("/insights", status_code=303)
 
 
-@router.get("/reminders", response_class=HTMLResponse)
+@router.get("/reminders")
 async def reminders_page(request: Request):
-    db = _get("db")
-    reminders = await db.list_reminders() if db else []
-    for r in reminders:
-        try:
-            meta = json.loads(r.get("metadata_json", "{}") or "{}")
-            r["document_type"] = meta.get("document_type", "")
-        except Exception:
-            r["document_type"] = ""
-    return templates.TemplateResponse("reminders.html", {
-        "request": request, "page": "reminders", "reminders": reminders,
-    })
+    """Legacy route — redirect to unified reminders page."""
+    return RedirectResponse("/notes/reminders", status_code=301)
 
 
 # ── Notes ──────────────────────────────────────────────────────────────────
@@ -1786,6 +2255,45 @@ async def notes_create(request: Request, content: str = Form(...), title: str = 
 
 # ── Notes: static routes MUST come before /notes/{note_id} ──────────
 
+
+@router.get("/notes/tasks", response_class=HTMLResponse)
+async def notes_tasks_page(request: Request, status: str = "open"):
+    """Task management page — list, create, edit, delete tasks."""
+    db = _get("db")
+    if not db:
+        return templates.TemplateResponse("note_tasks.html", {
+            "request": request, "page": "notes", "tasks": [], "filter": status,
+        })
+    tasks = await db.get_all_tasks(status=status if status != "all" else "")
+    return templates.TemplateResponse("note_tasks.html", {
+        "request": request, "page": "notes", "tasks": tasks, "filter": status,
+    })
+
+
+@router.post("/notes/tasks/create")
+async def create_task(request: Request, description: str = Form(...), priority: str = Form("medium"), due_date: str = Form(""), note_id: int = Form(0)):
+    db = _get("db")
+    if db and description.strip():
+        await db.create_task(description.strip(), priority, due_date, note_id or None)
+    return RedirectResponse("/notes/tasks", status_code=303)
+
+
+@router.post("/notes/tasks/{task_id}/edit")
+async def edit_task(request: Request, task_id: int, description: str = Form(...), priority: str = Form("medium"), due_date: str = Form("")):
+    db = _get("db")
+    if db and description.strip():
+        await db.update_task(task_id, description.strip(), priority, due_date)
+    return RedirectResponse("/notes/tasks", status_code=303)
+
+
+@router.post("/notes/tasks/{task_id}/delete")
+async def delete_task_route(request: Request, task_id: int):
+    db = _get("db")
+    if db:
+        await db.delete_task(task_id)
+    return RedirectResponse("/notes/tasks", status_code=303)
+
+
 @router.get("/notes/graph", response_class=HTMLResponse)
 async def notes_graph(request: Request, center: int = 0):
     """Knowledge graph visualization."""
@@ -1803,6 +2311,42 @@ async def notes_graph_api(request: Request, center: int = 0, limit: int = 100):
     limit = min(max(limit, 10), 500)
     data = await db.get_graph_data(center, limit)
     return JSONResponse(data)
+
+
+@router.post("/api/transcribe")
+async def api_transcribe(request: Request):
+    """Transcribe audio via OpenAI Whisper. Accepts multipart form with 'audio' file."""
+    from app.config import get_settings
+    settings = get_settings()
+    if not settings.openai_api_key:
+        return JSONResponse({"error": "OpenAI API key not configured"}, status_code=500)
+
+    form = await request.form()
+    audio = form.get("audio")
+    if not audio:
+        return JSONResponse({"error": "No audio file"}, status_code=400)
+
+    from io import BytesIO
+    buf = BytesIO(await audio.read())
+    buf.name = audio.filename or "recording.webm"
+
+    from openai import OpenAI
+    client = OpenAI(api_key=settings.openai_api_key)
+    transcript = client.audio.transcriptions.create(model="whisper-1", file=buf)
+    text = transcript.text.strip()
+
+    db = _get("db")
+    if db:
+        try:
+            await db.log_llm_usage(
+                role="whisper", model="whisper-1",
+                input_tokens=0, output_tokens=len(text.split()),
+                cost_usd=0, latency_ms=0,
+            )
+        except Exception:
+            pass
+
+    return JSONResponse({"text": text})
 
 
 @router.get("/notes/habits", response_class=HTMLResponse)
@@ -1954,19 +2498,293 @@ async def notes_review(request: Request):
     db = _get("db")
     needs_review = await db.get_notes_by_status("needs_review") if db else []
     failed = await db.get_notes_by_status("failed") if db else []
+    notes = needs_review + failed
     return templates.TemplateResponse("notes_review.html", {
         "request": request, "page": "notes",
-        "needs_review": needs_review, "failed": failed,
+        "notes": notes, "needs_review": needs_review, "failed": failed,
     })
 
 
 @router.get("/notes/reminders", response_class=HTMLResponse)
-async def notes_reminders(request: Request):
+async def notes_reminders(request: Request, tab: str = "all"):
+    """Unified reminders page — notes + files, grouped by date."""
+    from datetime import datetime, timedelta
     db = _get("db")
-    reminders = await db.list_note_reminders() if db else []
+    include_done = tab == "history"
+    note_reminders = await db.list_note_reminders(include_done=include_done) if db else []
+    file_reminders = await db.list_reminders(include_sent=include_done) if db else []
+
+    # Normalize to unified format
+    unified = []
+    for r in note_reminders:
+        r["reminder_type"] = "note"
+        r["linked_name"] = r.get("user_title") or f"Note #{r.get('note_id', '?')}"
+        r["linked_url"] = f"/notes/{r.get('note_id', '')}"
+        unified.append(r)
+    for r in file_reminders:
+        r["reminder_type"] = "file"
+        r["description"] = r.get("message") or "Срок документа"
+        r["linked_name"] = r.get("original_name") or "Файл"
+        r["linked_url"] = f"/files/{r.get('file_id', '')}"
+        r["status"] = r.get("status") or ("sent" if r.get("sent") else "pending")
+        r["recurrence_rule"] = ""
+        unified.append(r)
+
+    # Filter by tab
+    if tab == "notes":
+        unified = [r for r in unified if r["reminder_type"] == "note"]
+    elif tab == "files":
+        unified = [r for r in unified if r["reminder_type"] == "file"]
+
+    # Compute relative time + group key for each reminder
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+    tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    week_end_str = (now + timedelta(days=7)).strftime("%Y-%m-%d")
+
+    for r in unified:
+        remind_at = r.get("remind_at", "")[:19]
+        try:
+            dt = datetime.fromisoformat(remind_at)
+            delta = dt - now
+            total_min = int(delta.total_seconds() / 60)
+            r["_dt"] = dt
+            r["_overdue"] = total_min < 0
+            # Human-readable countdown
+            if total_min < 0:
+                abs_min = abs(total_min)
+                if abs_min < 60:
+                    r["countdown"] = f"просрочено {abs_min} мин"
+                elif abs_min < 1440:
+                    r["countdown"] = f"просрочено {abs_min // 60} ч"
+                else:
+                    r["countdown"] = f"просрочено {abs_min // 1440} дн"
+            elif total_min < 60:
+                r["countdown"] = f"через {total_min} мин"
+            elif total_min < 1440:
+                r["countdown"] = f"через {total_min // 60} ч"
+            else:
+                r["countdown"] = f"через {total_min // 1440} дн"
+            # Group key
+            date_str = dt.strftime("%Y-%m-%d")
+            if date_str < today_str:
+                r["_group"] = "overdue"
+            elif date_str == today_str:
+                r["_group"] = "today"
+            elif date_str == tomorrow_str:
+                r["_group"] = "tomorrow"
+            elif date_str <= week_end_str:
+                r["_group"] = "week"
+            else:
+                r["_group"] = "later"
+        except (ValueError, TypeError):
+            r["_dt"] = now
+            r["_overdue"] = False
+            r["countdown"] = ""
+            r["_group"] = "later"
+
+    # Sort: overdue first (oldest), then by remind_at
+    group_order = {"overdue": 0, "today": 1, "tomorrow": 2, "week": 3, "later": 4}
+    if tab == "history":
+        # History: most recent first
+        unified.sort(key=lambda r: r.get("remind_at", ""), reverse=True)
+    else:
+        unified.sort(key=lambda r: (group_order.get(r.get("_group", "later"), 9), r.get("remind_at", "")))
+
+    # Build groups
+    groups = []
+    group_labels = {"overdue": "Просроченные", "today": "Сегодня", "tomorrow": "Завтра", "week": "На этой неделе", "later": "Позже"}
+    if tab == "history":
+        groups = [{"key": "history", "label": "История", "entries": unified}]
+    else:
+        seen = set()
+        for r in unified:
+            g = r.get("_group", "later")
+            if g not in seen:
+                seen.add(g)
+                groups.append({"key": g, "label": group_labels.get(g, g), "entries": [x for x in unified if x.get("_group") == g]})
+
+    # Recent files for file reminder creation dialog
+    recent_files = []
+    if db:
+        cursor = await db.db.execute(
+            "SELECT id, original_name, category FROM files ORDER BY created_at DESC LIMIT 50"
+        )
+        recent_files = [dict(r) for r in await cursor.fetchall()]
+
     return templates.TemplateResponse("note_reminders.html", {
-        "request": request, "page": "notes", "reminders": reminders,
+        "request": request, "page": "reminders",
+        "reminders": unified, "groups": groups, "tab": tab,
+        "total_note": len(note_reminders), "total_file": len(file_reminders),
+        "recent_files": recent_files,
     })
+
+
+@router.post("/notes/reminders/{reminder_id}/done")
+async def note_reminder_done(request: Request, reminder_id: int):
+    db = _get("db")
+    if db:
+        await db.complete_note_reminder(reminder_id)
+        # Auto-note on completion
+        try:
+            cursor = await db.db.execute("SELECT description, note_id FROM note_reminders WHERE id=?", (reminder_id,))
+            row = await cursor.fetchone()
+            if row:
+                capture = _get("note_capture")
+                if capture:
+                    await capture.capture(f"✅ Выполнено: {row[0]}", source="reminder")
+        except Exception:
+            pass
+    return RedirectResponse("/notes/reminders", status_code=303)
+
+
+@router.post("/notes/reminders/{reminder_id}/cancel")
+async def note_reminder_cancel(request: Request, reminder_id: int):
+    db = _get("db")
+    if db:
+        await db.cancel_note_reminder(reminder_id)
+    return RedirectResponse("/notes/reminders", status_code=303)
+
+
+@router.post("/notes/reminders/{reminder_id}/snooze")
+async def note_reminder_snooze(request: Request, reminder_id: int):
+    form = await request.form()
+    snooze_to = form.get("snooze_to", "")
+    db = _get("db")
+    if db:
+        if snooze_to:
+            await db.snooze_note_reminder_to(reminder_id, snooze_to)
+        else:
+            hours = int(form.get("hours", 24))
+            await db.snooze_note_reminder(reminder_id, hours)
+    return RedirectResponse("/notes/reminders", status_code=303)
+
+
+@router.post("/notes/reminders/{reminder_id}/delete")
+async def note_reminder_delete(request: Request, reminder_id: int):
+    db = _get("db")
+    if db:
+        await db.delete_note_reminder(reminder_id)
+    return RedirectResponse("/notes/reminders", status_code=303)
+
+
+@router.post("/notes/reminders/{reminder_id}/edit")
+async def note_reminder_edit(request: Request, reminder_id: int):
+    form = await request.form()
+    db = _get("db")
+    if db:
+        await db.update_note_reminder(
+            reminder_id,
+            description=form.get("description"),
+            remind_at=form.get("remind_at"),
+            recurrence_rule=form.get("recurrence_rule"),
+        )
+    return RedirectResponse("/notes/reminders", status_code=303)
+
+
+@router.post("/notes/reminders/create")
+async def note_reminder_create(request: Request):
+    form = await request.form()
+    db = _get("db")
+    if db and form.get("description") and form.get("remind_at"):
+        note_id = int(form.get("note_id", 0)) or None
+        # If no note_id, create a standalone note for the reminder
+        if not note_id:
+            capture = _get("note_capture")
+            if capture:
+                note_id = await capture.capture(f"⏰ {form['description']}", source="reminder")
+            elif db:
+                note_id = await db.save_note(content=f"⏰ {form['description']}", source="reminder")
+        if note_id:
+            await db.create_note_reminder(
+                note_id=note_id,
+                description=form["description"],
+                remind_at=form["remind_at"],
+                source="manual",
+                recurrence_rule=form.get("recurrence_rule", ""),
+            )
+    return RedirectResponse("/notes/reminders", status_code=303)
+
+
+@router.post("/file-reminders/create")
+async def file_reminder_create(request: Request):
+    form = await request.form()
+    db = _get("db")
+    if db and form.get("file_id") and form.get("remind_at"):
+        await db.create_reminder(
+            file_id=form["file_id"],
+            remind_at=form["remind_at"],
+            message=form.get("message", ""),
+        )
+    return RedirectResponse("/notes/reminders?tab=files", status_code=303)
+
+
+@router.post("/file-reminders/{reminder_id}/done")
+async def file_reminder_done(request: Request, reminder_id: int):
+    db = _get("db")
+    if db:
+        await db.complete_file_reminder(reminder_id)
+    return RedirectResponse("/notes/reminders?tab=files", status_code=303)
+
+
+@router.post("/file-reminders/{reminder_id}/cancel")
+async def file_reminder_cancel(request: Request, reminder_id: int):
+    db = _get("db")
+    if db:
+        await db.cancel_file_reminder(reminder_id)
+    return RedirectResponse("/notes/reminders?tab=files", status_code=303)
+
+
+@router.post("/file-reminders/{reminder_id}/snooze")
+async def file_reminder_snooze(request: Request, reminder_id: int):
+    form = await request.form()
+    snooze_to = form.get("snooze_to", "")
+    db = _get("db")
+    if db:
+        if snooze_to:
+            await db.snooze_file_reminder_to(reminder_id, snooze_to)
+        else:
+            hours = int(form.get("hours", 24))
+            await db.snooze_file_reminder(reminder_id, hours)
+    return RedirectResponse("/notes/reminders?tab=files", status_code=303)
+
+
+@router.post("/file-reminders/{reminder_id}/delete")
+async def file_reminder_delete(request: Request, reminder_id: int):
+    db = _get("db")
+    if db:
+        await db.delete_file_reminder(reminder_id)
+    return RedirectResponse("/notes/reminders?tab=files", status_code=303)
+
+
+@router.post("/file-reminders/{reminder_id}/edit")
+async def file_reminder_edit(request: Request, reminder_id: int):
+    form = await request.form()
+    db = _get("db")
+    if db:
+        await db.update_file_reminder(
+            reminder_id,
+            message=form.get("message"),
+            remind_at=form.get("remind_at"),
+        )
+    return RedirectResponse("/notes/reminders?tab=files", status_code=303)
+
+
+@router.post("/reminders/bulk")
+async def reminders_bulk_action(request: Request):
+    """Bulk action on multiple reminders."""
+    form = await request.form()
+    action = form.get("action", "")
+    db = _get("db")
+    if not db or action not in ("done", "cancel", "delete"):
+        return RedirectResponse("/notes/reminders", status_code=303)
+    note_ids = [int(x) for x in form.getlist("note_ids") if x.isdigit()]
+    file_ids = [int(x) for x in form.getlist("file_ids") if x.isdigit()]
+    if note_ids:
+        await db.bulk_update_reminders(note_ids, "note", action)
+    if file_ids:
+        await db.bulk_update_reminders(file_ids, "file", action)
+    return RedirectResponse("/notes/reminders", status_code=303)
 
 
 @router.get("/notes/export")
@@ -2163,8 +2981,11 @@ async def toggle_task(request: Request, task_id: int):
         if row:
             new_status = "done" if row[0] == "open" else "open"
             await db.update_task_status(task_id, new_status)
+            referer = request.headers.get("referer", "")
+            if "/notes/tasks" in referer:
+                return RedirectResponse("/notes/tasks", status_code=303)
             return RedirectResponse(f"/notes/{row[1]}", status_code=303)
-    return RedirectResponse("/notes", status_code=303)
+    return RedirectResponse("/notes/tasks", status_code=303)
 
 
 def _chart_context(data: list, chart_color: str, chart_color_light: str,
@@ -2325,40 +3146,14 @@ async def note_search_partial(
     })
 
 
-@router.get("/notes/reminders", response_class=HTMLResponse)
-async def note_reminders_page(request: Request):
-    """Note reminders list page."""
-    db = _get("db")
-    reminders = await db.list_note_reminders(include_done=False) if db else []
-    return templates.TemplateResponse("note_reminders.html", {
-        "request": request, "page": "notes", "reminders": reminders,
-    })
-
-
-@router.post("/notes/reminders/{reminder_id}/done")
-async def note_reminder_done(request: Request, reminder_id: int):
-    db = _get("db")
-    if db:
-        await db.complete_note_reminder(reminder_id)
-    return RedirectResponse("/notes/reminders", status_code=303)
-
-
-@router.post("/notes/reminders/{reminder_id}/cancel")
-async def note_reminder_cancel(request: Request, reminder_id: int):
-    db = _get("db")
-    if db:
-        await db.cancel_note_reminder(reminder_id)
-    return RedirectResponse("/notes/reminders", status_code=303)
-
-
 @router.get("/partials/food-today", response_class=HTMLResponse)
 async def food_today_partial(request: Request):
     """Today's nutrition breakdown from food_entries."""
     db = _get("db")
     if not db:
         return HTMLResponse("")
-    from datetime import datetime as dt
-    date = dt.now().strftime("%Y-%m-%d")
+    from datetime import datetime as dt, timezone
+    date = dt.now(timezone.utc).strftime("%Y-%m-%d")
     entries = await db.get_food_entries_by_date(date)
     nutrition = await db.get_daily_nutrition(date)
     # Group entries by meal_type
