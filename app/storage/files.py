@@ -22,6 +22,7 @@ class FileRecord:
     size_bytes: int
     mime_type: str
     category: str = "uncategorized"
+    encrypted: bool = False
     is_duplicate: bool = False
     created_at: datetime = field(default_factory=datetime.now)
 
@@ -88,10 +89,11 @@ class FileStorage:
         category: str = "uncategorized",
         naming_template: str | None = None,
         metadata: dict | None = None,
+        encrypt: bool = False,
     ) -> FileRecord:
         """Save bytes via active backend. Returns FileRecord with URI."""
         sha = self._hash_bytes(data)
-        uri = await self._active_backend.write(data, category, original_name)
+        uri = await self._active_backend.write(data, category, original_name, encrypt=encrypt)
 
         return FileRecord(
             id=uuid4().hex,
@@ -101,6 +103,7 @@ class FileStorage:
             size_bytes=len(data),
             mime_type=self._detect_mime(original_name),
             category=category,
+            encrypted=encrypt,
         )
 
     async def save_from_path(
@@ -110,11 +113,12 @@ class FileStorage:
         category: str = "uncategorized",
         naming_template: str | None = None,
         metadata: dict | None = None,
+        encrypt: bool = False,
     ) -> FileRecord:
         """Read file from local path, save via active backend."""
         original_name = original_name or source.name
         data = source.read_bytes()
-        return await self.save_from_bytes(data, original_name, category)
+        return await self.save_from_bytes(data, original_name, category, encrypt=encrypt)
 
     async def read_file(self, uri_or_path) -> bytes:
         """Read file from any backend, auto-detecting by URI scheme."""

@@ -83,3 +83,27 @@ class TestLocalBackendSelectiveEncryption:
         plain_uri = await backend.write(b"plain", "x", "p.txt", encrypt=False)
         assert await backend.read(enc_uri) == b"enc"
         assert await backend.read(plain_uri) == b"plain"
+
+
+class TestFileStorageSelectiveEncryption:
+    @pytest.mark.asyncio
+    async def test_save_from_bytes_encrypt_false_default(self, tmp_dir):
+        from app.storage.backends.local import LocalBackend
+        from app.storage.files import FileStorage
+        key = b"\x04" * 32
+        local = LocalBackend(tmp_dir / "f", encryption_key=key)
+        fs = FileStorage("local", {"local": local})
+        rec = await fs.save_from_bytes(b"plain", "a.txt", category="x")
+        assert rec.encrypted is False
+        assert not Path(rec.stored_path).read_bytes().startswith(b"FAGE\x01")
+
+    @pytest.mark.asyncio
+    async def test_save_from_bytes_encrypt_true(self, tmp_dir):
+        from app.storage.backends.local import LocalBackend
+        from app.storage.files import FileStorage
+        key = b"\x05" * 32
+        local = LocalBackend(tmp_dir / "f", encryption_key=key)
+        fs = FileStorage("local", {"local": local})
+        rec = await fs.save_from_bytes(b"secret", "s.txt", category="x", encrypt=True)
+        assert rec.encrypted is True
+        assert Path(rec.stored_path).read_bytes().startswith(b"FAGE\x01")
