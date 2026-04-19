@@ -39,3 +39,47 @@ class TestSkillYamlEncryptFlag:
         business = engine.get_skill("business")
         assert business is not None
         assert business.encrypt is False
+
+
+class TestLocalBackendSelectiveEncryption:
+    @pytest.mark.asyncio
+    async def test_write_plaintext_when_encrypt_false(self, tmp_dir):
+        from app.storage.backends.local import LocalBackend
+        key = b"\x01" * 32
+        backend = LocalBackend(base_path=tmp_dir / "files", encryption_key=key)
+        uri = await backend.write(b"plain payload", "test", "a.txt", encrypt=False)
+        raw = Path(uri).read_bytes()
+        assert not raw.startswith(b"FAGE\x01")
+        assert raw == b"plain payload"
+
+    @pytest.mark.asyncio
+    async def test_write_encrypted_when_encrypt_true(self, tmp_dir):
+        from app.storage.backends.local import LocalBackend
+        from app.utils.crypto import decrypt_bytes
+        key = b"\x02" * 32
+        backend = LocalBackend(base_path=tmp_dir / "files", encryption_key=key)
+        uri = await backend.write(b"secret payload", "test", "s.txt", encrypt=True)
+        raw = Path(uri).read_bytes()
+        assert raw.startswith(b"FAGE\x01")
+        assert decrypt_bytes(raw, key) == b"secret payload"
+
+    @pytest.mark.asyncio
+    async def test_encrypt_true_without_key_writes_plaintext(self, tmp_dir, caplog):
+        import logging
+        from app.storage.backends.local import LocalBackend
+        backend = LocalBackend(base_path=tmp_dir / "files", encryption_key=None)
+        with caplog.at_level(logging.WARNING):
+            uri = await backend.write(b"hello", "test", "h.txt", encrypt=True)
+        raw = Path(uri).read_bytes()
+        assert raw == b"hello"
+        assert any("no encryption key" in r.message.lower() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_roundtrip_mixed(self, tmp_dir):
+        from app.storage.backends.local import LocalBackend
+        key = b"\x03" * 32
+        backend = LocalBackend(base_path=tmp_dir / "files", encryption_key=key)
+        enc_uri = await backend.write(b"enc", "x", "e.txt", encrypt=True)
+        plain_uri = await backend.write(b"plain", "x", "p.txt", encrypt=False)
+        assert await backend.read(enc_uri) == b"enc"
+        assert await backend.read(plain_uri) == b"plain"

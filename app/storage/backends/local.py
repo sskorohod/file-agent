@@ -44,12 +44,30 @@ class LocalBackend(StorageBackend):
 
     async def write(
         self, data: bytes, category: str, original_name: str,
+        encrypt: bool = False,
     ) -> str:
         target = self._build_path(category, original_name)
+
+        # Check available disk space (require 10% buffer)
+        import shutil
+        free = shutil.disk_usage(target.parent).free
+        if len(data) > free * 0.9:
+            raise IOError(
+                f"Insufficient disk space: need {len(data)} bytes, "
+                f"only {free} available ({target.parent})"
+            )
+
         write_data = data
-        if self._encryption_key:
-            from app.utils.crypto import encrypt_bytes
-            write_data = encrypt_bytes(data, self._encryption_key)
+        if encrypt:
+            if self._encryption_key:
+                from app.utils.crypto import encrypt_bytes
+                write_data = encrypt_bytes(data, self._encryption_key)
+            else:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "encrypt=True requested but no encryption key configured — "
+                    "writing plaintext (%s)", original_name,
+                )
         target.write_bytes(write_data)
         return str(target)  # Bare path for backward compat
 
