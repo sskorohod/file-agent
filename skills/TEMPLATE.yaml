@@ -8,6 +8,7 @@ description: "What this skill handles"
 category: my_category             # storage folder name
 priority: 5                       # higher = checked first (0-100)
 enabled: true
+encrypt: false                    # AES-256-GCM encrypt at rest; true for sensitive docs (passports, SSN, medical), false otherwise
 tags:
   - tag1
   - tag2

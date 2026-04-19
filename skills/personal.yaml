@@ -4,6 +4,7 @@ description: "IDs, passports, certificates, diplomas, personal documents"
 category: personal
 priority: 5
 enabled: true
+encrypt: true
 tags:
   - personal
   - identity
