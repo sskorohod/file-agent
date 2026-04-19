@@ -13,8 +13,13 @@ class StorageBackend(ABC):
     @abstractmethod
     async def write(
         self, data: bytes, category: str, original_name: str,
+        encrypt: bool = False,
     ) -> str:
-        """Write file bytes. Returns URI string (e.g. 's3://bucket/key')."""
+        """Write file bytes. Returns URI string (e.g. 's3://bucket/key').
+
+        encrypt=True applies AES-256-GCM if the backend was initialized with an
+        encryption key; encrypt=False always writes plaintext.
+        """
 
     @abstractmethod
     async def read(self, uri: str) -> bytes:
