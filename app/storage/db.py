@@ -670,6 +670,58 @@ class Database:
             await self._rebuild_fts_safe()
         await self._db.commit()
 
+        # One-shot backfill of files.encrypted for legacy rows
+        try:
+            await self._backfill_encrypted_flag()
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "Backfill encrypted flag failed (non-fatal): %s", e
+            )
+
+    async def _backfill_encrypted_flag(self) -> None:
+        """One-shot: set files.encrypted=1 for legacy local files whose bytes start with FAGE\\x01.
+
+        Guarded by a sentinel row in the secrets table so subsequent startups skip.
+        S3/GDrive rows are left as-is (we don't do ranged fetches at startup); the read
+        path auto-detects the magic header regardless.
+        """
+        sentinel = await self.get_secret("backfill_encrypted_v1")
+        if sentinel:
+            return
+
+        cursor = await self._db.execute(
+            "SELECT id, stored_path FROM files WHERE encrypted = 0"
+        )
+        rows = await cursor.fetchall()
+        flipped = 0
+        for row in rows:
+            stored_path = row[1] or ""
+            if "://" in stored_path:
+                continue  # skip s3:// and gdrive:// — read path auto-detects
+            try:
+                from pathlib import Path as _P
+                p = _P(stored_path)
+                if not p.exists():
+                    continue
+                with open(p, "rb") as fh:
+                    head = fh.read(5)
+                if head == b"FAGE\x01":
+                    await self._db.execute(
+                        "UPDATE files SET encrypted = 1 WHERE id = ?", (row[0],)
+                    )
+                    flipped += 1
+            except Exception:
+                continue  # best-effort; skip and move on
+
+        await self.set_secret("backfill_encrypted_v1", "done")
+        await self._db.commit()
+        if flipped:
+            import logging as _log
+            _log.getLogger(__name__).info(
+                "Backfilled encrypted flag on %d legacy files", flipped
+            )
+
     async def _setup_notes_fts(self):
         """Create notes FTS5 index and triggers if not present."""
         try:

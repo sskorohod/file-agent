@@ -190,3 +190,52 @@ class TestPipelineEncryptFlow:
         rec2 = await step(b"plain", "inv.pdf", cls2, skill_off)
         assert rec2.encrypted is False
         assert not Path(rec2.stored_path).read_bytes().startswith(b"FAGE\x01")
+
+
+class TestBackfillEncrypted:
+    @pytest.mark.asyncio
+    async def test_backfill_flips_flag_for_encrypted_local_file(self, tmp_dir):
+        from app.storage.db import Database
+
+        enc_path = tmp_dir / "enc.bin"
+        enc_path.write_bytes(b"FAGE\x01" + b"whatever")
+
+        plain_path = tmp_dir / "plain.bin"
+        plain_path.write_bytes(b"no magic here")
+
+        db = Database(tmp_dir / "backfill.db")
+        await db.connect()
+
+        await db._db.execute(
+            """INSERT INTO files
+               (id, original_name, stored_path, sha256, size_bytes, mime_type, category, encrypted)
+               VALUES ('e1', 'enc.bin', ?, 'h1', 8, 'application/octet-stream', 'x', 0)""",
+            (str(enc_path),),
+        )
+        await db._db.execute(
+            """INSERT INTO files
+               (id, original_name, stored_path, sha256, size_bytes, mime_type, category, encrypted)
+               VALUES ('p1', 'plain.bin', ?, 'h2', 13, 'application/octet-stream', 'x', 0)""",
+            (str(plain_path),),
+        )
+        await db._db.commit()
+
+        # Force-clear sentinel so backfill runs (connect() may have set it on empty table)
+        await db._db.execute("DELETE FROM secrets WHERE name = 'backfill_encrypted_v1'")
+        await db._db.commit()
+
+        await db._backfill_encrypted_flag()
+
+        e = await db.get_file("e1")
+        p = await db.get_file("p1")
+        assert e["encrypted"] is True
+        assert p["encrypted"] is False
+
+        # Re-running is a no-op (sentinel guards)
+        await db._db.execute("UPDATE files SET encrypted = 0 WHERE id = 'e1'")
+        await db._db.commit()
+        await db._backfill_encrypted_flag()
+        e_again = await db.get_file("e1")
+        assert e_again["encrypted"] is False
+
+        await db.close()
