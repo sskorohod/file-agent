@@ -760,19 +760,20 @@ class Database:
         metadata: dict | None = None,
         priority: str = "",
         document_date: str | None = None,
+        encrypted: bool = False,
     ) -> str:
         await self.db.execute(
             """INSERT INTO files
                (id, original_name, stored_path, sha256, size_bytes, mime_type,
                 category, tags, summary, source, extracted_text, metadata_json, priority,
-                document_date)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                document_date, encrypted)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 id, original_name, str(stored_path), sha256, size_bytes, mime_type,
                 category, json.dumps(tags or []), self._encrypt(summary),
                 source, self._encrypt(extracted_text),
                 self._encrypt(json.dumps(metadata or {})), priority,
-                document_date,
+                document_date, int(bool(encrypted)),
             ),
         )
         await self.db.commit()
@@ -807,11 +808,13 @@ class Database:
         return True
 
     def _decrypt_file_row(self, row: dict) -> dict:
-        """Decrypt sensitive columns in a file row."""
+        """Decrypt sensitive columns in a file row and normalize encrypted flag."""
         if self._enc_key:
             for col in ("extracted_text", "summary", "metadata_json"):
                 if row.get(col):
                     row[col] = self._decrypt(row[col])
+        if "encrypted" in row:
+            row["encrypted"] = bool(row["encrypted"])
         return row
 
     async def get_file(self, id: str) -> dict | None:

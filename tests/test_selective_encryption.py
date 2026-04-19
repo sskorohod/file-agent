@@ -127,3 +127,27 @@ class TestDbEncryptedColumn:
         cursor = await db._db.execute("SELECT encrypted FROM files WHERE id='legacy1'")
         row = await cursor.fetchone()
         assert row[0] == 0
+
+
+class TestDbInsertFileEncrypted:
+    @pytest.mark.asyncio
+    async def test_insert_with_encrypted_true(self, db):
+        await db.insert_file(
+            id="f1", original_name="p.pdf", stored_path="/tmp/p.pdf",
+            sha256="a" * 64, size_bytes=100, mime_type="application/pdf",
+            category="personal", encrypted=True,
+        )
+        row = await db.get_file("f1")
+        assert row is not None
+        assert row["encrypted"] is True
+
+    @pytest.mark.asyncio
+    async def test_insert_with_encrypted_false_default(self, db):
+        await db.insert_file(
+            id="f2", original_name="r.jpg", stored_path="/tmp/r.jpg",
+            sha256="b" * 64, size_bytes=50, mime_type="image/jpeg",
+            category="receipts",
+        )
+        row = await db.get_file("f2")
+        assert row is not None
+        assert row["encrypted"] is False
