@@ -98,11 +98,23 @@ async def lifespan(app: FastAPI):
     parser_factory = ParserFactory(vision_model=vision_model.model if vision_model else None)
     _state["parser_factory"] = parser_factory
 
+    # Cognee sidecar — must be probed before Pipeline so it can be injected.
+    from app.memory import CogneeClient
+    cognee_client = CogneeClient(settings.cognee)
+    await cognee_client.setup()
+    _state["cognee"] = cognee_client
+    if settings.cognee.enabled and not cognee_client.healthy:
+        logger.warning(
+            "Cognee sidecar not reachable at %s — memory features disabled until 'make cognee-start'",
+            settings.cognee.base_url,
+        )
+
     from app.pipeline import Pipeline
     pipeline = Pipeline(
         settings=settings, db=db, file_storage=file_storage,
         vector_store=vector_store, parser_factory=parser_factory,
         llm_router=llm_router, classifier=classifier, skill_engine=skill_engine,
+        cognee_client=cognee_client,
     )
     _state["pipeline"] = pipeline
 
@@ -117,16 +129,6 @@ async def lifespan(app: FastAPI):
     from app.llm.insights import InsightsEngine
     insights_engine = InsightsEngine(llm_router, db)
     _state["insights_engine"] = insights_engine
-
-    from app.memory import CogneeClient
-    cognee_client = CogneeClient(settings.cognee)
-    await cognee_client.setup()
-    _state["cognee"] = cognee_client
-    if settings.cognee.enabled and not cognee_client.healthy:
-        logger.warning(
-            "Cognee sidecar not reachable at %s — memory features disabled until 'make cognee-start'",
-            settings.cognee.base_url,
-        )
 
     tg_app = None
     if settings.telegram.bot_token:

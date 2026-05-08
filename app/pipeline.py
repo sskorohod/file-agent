@@ -10,12 +10,20 @@ from pathlib import Path
 from app.config import Settings
 from app.llm.classifier import ClassificationResult, Classifier
 from app.llm.router import LLMRouter
+from app.memory import CogneeClient, CogneeError
 from app.parser.base import ParseResult
 from app.parser.factory import ParserFactory
 from app.skills.engine import SkillEngine
 from app.storage.db import Database
 from app.storage.files import FileRecord, FileStorage
 from app.storage.vectors import VectorStore
+
+# Categories where cognee ingest brings no value (random screenshots,
+# unparseable junk). Anything else gets sent to the memory layer.
+_COGNEE_SKIP_CATEGORIES = frozenset({"misc", "screenshot_random"})
+
+# Below this many characters, cognify produces noise rather than memory.
+_COGNEE_MIN_TEXT_CHARS = 100
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +157,7 @@ class Pipeline:
         llm_router: LLMRouter,
         classifier: Classifier,
         skill_engine: SkillEngine,
+        cognee_client: CogneeClient | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -158,6 +167,7 @@ class Pipeline:
         self.llm = llm_router
         self.classifier = classifier
         self.skills = skill_engine
+        self.cognee = cognee_client
 
     async def process(
         self,
@@ -299,6 +309,21 @@ class Pipeline:
                     await llm_search.invalidate_cache()
             except Exception:
                 pass
+
+            # Step 9.5: Cognee ingest (non-fatal — never breaks the pipeline).
+            # Skips when sidecar is down, text is too short, or category is junk.
+            if self._should_cognee_ingest(parse_result, classification):
+                try:
+                    await self._log_step(
+                        result, "cognee_ingest",
+                        lambda: self._step_cognee_ingest(
+                            file_record, parse_result, classification,
+                        ),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"cognee_ingest failed for {file_record.id}: {e} — pipeline continues"
+                    )
 
             # Step 10: Refresh category insight (non-blocking)
             try:
@@ -627,3 +652,52 @@ class Pipeline:
             },
             priority=priority,
         )
+
+    # ── Cognee ingest (Phase 2) ─────────────────────────────────────────
+
+    def _should_cognee_ingest(
+        self,
+        parse_result: ParseResult,
+        classification: ClassificationResult,
+    ) -> bool:
+        """Gate before sending text to the cognee sidecar."""
+        if self.cognee is None or not self.cognee.healthy:
+            return False
+        if parse_result is None or parse_result.is_empty:
+            return False
+        if not parse_result.text or len(parse_result.text) < _COGNEE_MIN_TEXT_CHARS:
+            return False
+        if classification and classification.category in _COGNEE_SKIP_CATEGORIES:
+            return False
+        return True
+
+    async def _step_cognee_ingest(
+        self,
+        file_record: FileRecord,
+        parse_result: ParseResult,
+        classification: ClassificationResult,
+    ) -> dict:
+        """Send the document's text to the cognee sidecar.
+
+        Returns a small status dict; raises CogneeError on sidecar failure
+        so the outer ``_log_step`` records the failure in ``processing_log``.
+        The pipeline-level try/except keeps the failure non-fatal.
+        """
+        assert self.cognee is not None  # guarded by _should_cognee_ingest
+
+        dataset = self.cognee.config.default_dataset
+
+        # add() takes the original filename so it surfaces in cognee's
+        # graph nodes; cognify() then runs LLM extraction on the dataset.
+        await self.cognee.add(
+            content=parse_result.text,
+            dataset=dataset,
+            filename=file_record.original_name or f"{file_record.id}.txt",
+        )
+        await self.cognee.cognify(dataset=dataset)
+
+        return {
+            "dataset": dataset,
+            "category": classification.category if classification else "",
+            "text_chars": len(parse_result.text),
+        }
