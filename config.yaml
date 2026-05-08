@@ -81,3 +81,10 @@ database:
 logging:
   level: INFO
   format: '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+cognee:
+  enabled: true
+  base_url: http://127.0.0.1:8765
+  default_dataset: personal
+  request_timeout_s: 60
+  cognify_timeout_s: 300
+  use_for_search: false

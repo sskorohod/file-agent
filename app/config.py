@@ -140,6 +140,18 @@ class LoggingConfig(BaseModel):
     format: str = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 
+class CogneeConfig(BaseModel):
+    """Settings for the Cognee sidecar (see infra/cognee/README.md)."""
+
+    enabled: bool = True
+    base_url: str = "http://127.0.0.1:8765"
+    api_key: str = ""  # bearer token for the sidecar (loaded from COGNEE_API_KEY env)
+    default_dataset: str = "personal"
+    request_timeout_s: float = 60.0
+    cognify_timeout_s: float = 300.0
+    use_for_search: bool = False  # Phase 4 flips this to True
+
+
 # ── Main Settings ───────────────────────────────────────────────────────────
 
 def _load_yaml(path: str | Path) -> dict[str, Any]:
@@ -165,6 +177,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     google_api_key: str = ""
+    cognee_api_key: str = ""
 
     # Sections
     storage: StorageConfig = StorageConfig()
@@ -176,6 +189,7 @@ class Settings(BaseSettings):
     web: WebConfig = WebConfig()
     database: DatabaseConfig = DatabaseConfig()
     logging: LoggingConfig = LoggingConfig()
+    cognee: CogneeConfig = CogneeConfig()
 
     def __init__(self, config_path: str | Path = "config.yaml", **kwargs):
         yaml_data = _load_yaml(config_path)
@@ -186,6 +200,8 @@ class Settings(BaseSettings):
         # Push top-level env tokens into sub-configs
         if self.telegram_bot_token:
             self.telegram.bot_token = self.telegram_bot_token
+        if self.cognee_api_key and not self.cognee.api_key:
+            self.cognee.api_key = self.cognee_api_key
 
     def setup_env_keys(self):
         """Export API keys to environment for litellm to pick up."""

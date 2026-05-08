@@ -118,6 +118,16 @@ async def lifespan(app: FastAPI):
     insights_engine = InsightsEngine(llm_router, db)
     _state["insights_engine"] = insights_engine
 
+    from app.memory import CogneeClient
+    cognee_client = CogneeClient(settings.cognee)
+    await cognee_client.setup()
+    _state["cognee"] = cognee_client
+    if settings.cognee.enabled and not cognee_client.healthy:
+        logger.warning(
+            "Cognee sidecar not reachable at %s — memory features disabled until 'make cognee-start'",
+            settings.cognee.base_url,
+        )
+
     tg_app = None
     if settings.telegram.bot_token:
         from telegram.ext import Application as TgApp
@@ -184,6 +194,11 @@ async def lifespan(app: FastAPI):
         await tg_app.updater.stop()
         await tg_app.stop()
         await tg_app.shutdown()
+    if _state.get("cognee"):
+        try:
+            await _state["cognee"].shutdown()
+        except Exception:
+            pass
     await vector_store.close()
     await db.close()
     logger.info("Shutdown complete")
@@ -423,6 +438,7 @@ async def health():
     vs = get_state("vector_store")
     vector_health = await vs.health_check() if vs else {}
     db = get_state("db")
+    cognee = get_state("cognee")
     return {
         "status": "ok" if db and db._db else "degraded",
         "version": "0.1.0",
@@ -430,6 +446,7 @@ async def health():
         "qdrant": vector_health,
         "telegram": "running" if get_state("tg_app") else "disabled",
         "skills": len(get_state("skill_engine").list_skills()) if get_state("skill_engine") else 0,
+        "cognee": "healthy" if cognee and cognee.healthy else "disabled",
     }
 
 
