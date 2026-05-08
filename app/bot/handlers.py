@@ -877,7 +877,7 @@ class BotHandlers:
         md_path.write_text("\n".join(lines), encoding="utf-8")
 
         # 5. Save to SQLite
-        await db.save_note(
+        note_id = await db.save_note(
             content=summary,
             title=title,
             file_id=linked_file_id,
@@ -885,6 +885,20 @@ class BotHandlers:
             source="voice",
             tags=json_mod.dumps(tags),
         )
+
+        # 5b. Ingest into cognee personal memory (non-fatal if sidecar is down).
+        try:
+            from app.ingestion import ingest_text_to_cognee
+            from app.main import get_state
+            await ingest_text_to_cognee(
+                get_state("cognee"),
+                content=text,  # raw transcription, not the LLM-shortened summary
+                source_type="note",
+                source_id=str(note_id) if note_id else "",
+                filename=f"voice_note_{now.strftime('%Y%m%d_%H%M%S')}.txt",
+            )
+        except Exception as e:
+            logger.debug(f"cognee note ingest skipped: {e}")
 
         # 6. Reply
         reply_parts = [f"📝 **{title}**", "", summary]
@@ -1131,6 +1145,23 @@ class BotHandlers:
             await self.pipeline.db.save_chat_message(chat_id, "user", query)
         except Exception:
             pass
+
+        # Ingest substantive user messages into cognee personal memory.
+        # Skip short queries (e.g. "ok", "/start", file lookups) — they are
+        # noise. Assistant turns are derivative of files already in memory,
+        # so they are not ingested.
+        try:
+            from app.ingestion import ingest_text_to_cognee
+            from app.main import get_state
+            await ingest_text_to_cognee(
+                get_state("cognee"),
+                content=query,
+                source_type="chat",
+                source_id=f"chat_{chat_id}",
+                filename=f"chat_{chat_id}_msg.txt",
+            )
+        except Exception as e:
+            logger.debug(f"cognee chat ingest skipped: {e}")
 
         if self.search_fn:
             try:
