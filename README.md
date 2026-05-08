@@ -28,10 +28,10 @@ FileAgent is a personal AI agent that turns your documents into a searchable, in
 ### How it works
 
 ```
-📱 Telegram / 🌐 Web / 🔌 API / 🤖 MCP
+📱 Telegram / 🌐 Web / 🔌 API / 🤖 MCP / 🧠 Codex+Claude (cognee-mcp)
               ↓
     ┌─────────────────────────┐
-    │   13-Step AI Pipeline   │
+    │   AI Ingest Pipeline    │
     │                         │
     │ 1. Receive & validate   │
     │ 2. Auto-crop (OpenCV)   │
@@ -44,12 +44,19 @@ FileAgent is a personal AI agent that turns your documents into a searchable, in
     │ 9. Store on disk        │
     │ 10. Embed (Gemini 768d) │
     │ 11. Save metadata       │
-    │ 12. Refresh insights    │
-    │ 13. Done ✓              │
+    │ 12. Cognee ingest       │
+    │ 13. Refresh insights    │
     └─────────────────────────┘
               ↓
-    📊 SQLite + 🔍 Qdrant + 💾 Disk
+    📊 SQLite + 🔍 Qdrant + 💾 Disk +
+    🧠 Cognee sidecar (graph + memory)
 ```
+
+**Memory layer** lives in a separate `cognee` process (Apache 2.0,
+graph + vector knowledge memory). Files, voice notes, and substantive
+chat messages all land in a unified `personal` dataset; per-project
+`dev_<id>` datasets are isolated by ACL so external coding agents can
+only see what they're scoped to. See `docs/codex-claude-setup.md`.
 
 ---
 
@@ -109,6 +116,20 @@ FileAgent is a personal AI agent that turns your documents into a searchable, in
 - **Response templates** — Format Telegram responses per document type
 - **Hot reload** — Changes picked up every 30 seconds, no restart needed
 
+### 🧠 Memory Layer (Cognee sidecar)
+- **Graph + vector knowledge memory** — every file, voice note, and
+  user chat message gets cognified into a unified `personal` dataset
+- **Codex / Claude Code / ChatGPT integration** — point any MCP client
+  at `http://127.0.0.1:8766/mcp` and use V2 `recall`/`remember`/`forget`
+- **Per-project isolation** — register a dev project via the HTTP API,
+  ingest its repo, and the agent only sees that project's data; cross-
+  project access is blocked at the cognee permission layer
+- **Sidecar architecture** — cognee runs in its own process and venv,
+  so its dependency tree (lancedb, networkx, fastapi-users, ...) never
+  touches FAG's main runtime
+- See [docs/codex-claude-setup.md](docs/codex-claude-setup.md) for
+  end-to-end setup
+
 ---
 
 ## 🚀 Quick Start
@@ -162,6 +183,29 @@ cp .env.example .env
 # Run
 make dev
 ```
+
+### Optional: Cognee memory sidecar
+
+The cognee sidecar adds graph-based memory and the MCP entry point for
+external coding agents. It is independent of the document pipeline —
+FAG works without it; degrades gracefully when it's down.
+
+```bash
+# Provision .venv-cognee, infra/cognee/.env, install cognee + cognee-mcp
+make cognee-install
+
+# Edit infra/cognee/.env (LLM_API_KEY, OPENAI_API_KEY, etc.)
+$EDITOR infra/cognee/.env
+
+# FAG-facing API server :8765
+make cognee-start
+
+# (Optional) MCP server :8766 for Codex / Claude Code / ChatGPT
+make cognee-mcp-start
+```
+
+See [docs/codex-claude-setup.md](docs/codex-claude-setup.md) for token
+scopes (personal vs per-project) and client configuration snippets.
 
 ---
 
