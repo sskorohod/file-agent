@@ -42,6 +42,15 @@ echo "[cognee-setup] installing cognee==${COGNEE_VERSION} (this may take a few m
 echo "[cognee-setup] installing anthropic SDK (used when LLM_PROVIDER=anthropic)"
 "${VENV_DIR}/bin/pip" install --quiet anthropic
 
+# Phase 6: cognee-mcp lets external agents (Codex / Claude Code / ChatGPT)
+# talk to the sidecar via the Model Context Protocol. We install with
+# --no-deps to avoid the postgres-binary build chain (psycopg2-binary
+# does not have wheels for Python 3.14 on arm64) and pull in only what
+# cognee-mcp actually needs at runtime.
+echo "[cognee-setup] installing cognee-mcp (--no-deps) + fastmcp"
+"${VENV_DIR}/bin/pip" install --quiet --no-deps cognee-mcp
+"${VENV_DIR}/bin/pip" install --quiet "fastmcp>=3.2.0" "mcp>=1.12.0"
+
 mkdir -p "${INFRA_DIR}/data"
 mkdir -p "${INFRA_DIR}/logs"
 

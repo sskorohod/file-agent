@@ -1,5 +1,6 @@
 .PHONY: install dev test lint format clean \
-	cognee-install cognee-start cognee-stop cognee-logs cognee-status cognee-spike2
+	cognee-install cognee-start cognee-stop cognee-logs cognee-status cognee-spike2 \
+	cognee-mcp-start cognee-mcp-stop cognee-mcp-logs
 
 install:
 	pip install -r requirements.txt
@@ -48,3 +49,13 @@ cognee-spike2:
 	@# Runs against a live sidecar via HTTP — no cognee import.
 	@# Use the same Python that runs FAG so httpx is available.
 	python3 scripts/spike2_cognee_e2e.py
+
+# ── cognee-mcp (Phase 6: external agents — Codex, Claude, ChatGPT) ─────────
+cognee-mcp-start:
+	bash infra/cognee/start-mcp.sh
+
+cognee-mcp-stop:
+	bash infra/cognee/stop-mcp.sh
+
+cognee-mcp-logs:
+	tail -f infra/cognee/logs/cognee-mcp.log

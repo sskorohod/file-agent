@@ -34,10 +34,12 @@ fi
 
 mkdir -p "$(dirname "${LOG_FILE}")"
 
-# Load .env (export every KEY=VAL line, ignore comments and blanks).
+# Load .env (export every assignment to children). Process substitution
+# (source <(grep ...)) does not propagate exports reliably in bash 5+, so
+# we source the file directly with `set -a` around it.
 set -a
 # shellcheck disable=SC1090
-source <(grep -Ev '^\s*(#|$)' "${ENV_FILE}")
+. "${ENV_FILE}"
 set +a
 
 # Default state directory — keep cognee state INSIDE the repo (gitignored),
