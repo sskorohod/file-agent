@@ -87,4 +87,4 @@ cognee:
   default_dataset: personal
   request_timeout_s: 60
   cognify_timeout_s: 300
-  use_for_search: false
+  use_for_search: true

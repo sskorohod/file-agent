@@ -119,7 +119,7 @@ async def lifespan(app: FastAPI):
     _state["pipeline"] = pipeline
 
     from app.llm.search import LLMSearch
-    llm_search = LLMSearch(vector_store, llm_router, db=db)
+    llm_search = LLMSearch(vector_store, llm_router, db=db, cognee_client=cognee_client)
     _state["llm_search"] = llm_search
 
     from app.llm.analytics import LLMAnalytics

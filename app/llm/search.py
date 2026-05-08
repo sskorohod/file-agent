@@ -81,10 +81,11 @@ CACHE_TTL_SECONDS = 3600   # 1 hour
 class LLMSearch:
     """RAG search with smart filtering, caching, and conversation memory."""
 
-    def __init__(self, vector_store: VectorStore, llm: LLMRouter, db=None):
+    def __init__(self, vector_store: VectorStore, llm: LLMRouter, db=None, cognee_client=None):
         self.vector_store = vector_store
         self.llm = llm
         self.db = db
+        self.cognee = cognee_client
 
     @property
     def _search_system(self) -> str:
@@ -104,12 +105,29 @@ class LLMSearch:
     ) -> dict:
         """Search documents and generate an answer. Returns {text, file_ids, cached}."""
 
-        # Step 0: Check cache
+        # Step 0: Check cache (shared across both backends).
         if self.db:
             cached = await self._get_cache(query)
             if cached:
                 logger.info(f"Cache hit for: {query[:50]}")
                 return {**cached, "cached": True}
+
+        # Step 0.5: Try cognee first when configured. Graceful fallback to
+        # the vector_store path if anything goes wrong, so search never
+        # silently breaks.
+        if (
+            self.cognee is not None
+            and getattr(self.cognee.config, "use_for_search", False)
+            and self.cognee.healthy
+        ):
+            try:
+                cog_result = await self._answer_via_cognee(query, top_k=top_k)
+                if cog_result is not None:
+                    if self.db:
+                        await self._set_cache(query, cog_result)
+                    return cog_result
+            except Exception as e:
+                logger.warning(f"cognee search failed, falling back to vector_store: {e}")
 
         # Step 1: Semantic search (wider net)
         results = await self.vector_store.search(query, top_k=top_k)
@@ -194,6 +212,37 @@ class LLMSearch:
                 preview = r.text[:200] + "..." if len(r.text) > 200 else r.text
                 lines.append(f"{i}. {r.metadata.get('filename', '?')}\n{preview}")
             return {"text": "\n\n".join(lines), "file_ids": seen_files, "cached": False}
+
+    async def _answer_via_cognee(self, query: str, top_k: int) -> dict | None:
+        """Route a search through cognee.recall (GRAPH_COMPLETION).
+
+        Returns a result dict in the same shape as ``answer`` produces, or
+        ``None`` if cognee gave us nothing usable (so the caller falls back
+        to the vector_store path).
+        """
+        dataset = self.cognee.config.default_dataset
+        hits = await self.cognee.recall(
+            query,
+            dataset=dataset,
+            limit=top_k,
+        )
+        if not hits:
+            return None
+
+        # GRAPH_COMPLETION returns a single LLM-rendered answer in `text`.
+        # We take the first hit's text; further hits (if any) are alternative
+        # phrasings or scoped completions and we ignore them for now.
+        first = hits[0] if isinstance(hits, list) else hits
+        text = ""
+        if isinstance(first, dict):
+            text = first.get("text") or first.get("raw", {}).get("value") or ""
+        if not text:
+            return None
+
+        # cognee owns its data ids — they don't map to FAG file UUIDs, so
+        # the Telegram inline-button keyboard is empty for cognee answers.
+        # The web dashboard search UI tolerates an empty file_ids dict.
+        return {"text": text, "file_ids": {}, "cached": False, "backend": "cognee"}
 
     # ── Cache ────────────────────────────────────────────────────────
 
