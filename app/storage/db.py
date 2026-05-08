@@ -9,7 +9,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -170,6 +170,8 @@ CREATE TABLE IF NOT EXISTS dev_projects (
     name TEXT NOT NULL UNIQUE,
     repo_path TEXT DEFAULT '',
     description TEXT DEFAULT '',
+    cognee_email TEXT DEFAULT '',
+    cognee_token TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -189,10 +191,30 @@ class Database:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(SCHEMA_SQL)
+        await self._migrate_v2_to_v3()
         await self._db.execute(
             "INSERT OR IGNORE INTO schema_version(version) VALUES(?)", (SCHEMA_VERSION,)
         )
         await self._db.commit()
+
+    async def _migrate_v2_to_v3(self):
+        """Phase 5b: dev_projects gains cognee_email + cognee_token.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op on existing tables, so
+        the new columns must be added explicitly. SQLite has no
+        ``IF NOT EXISTS`` clause for ``ALTER TABLE``, so we swallow the
+        ``duplicate column name`` error to keep this idempotent.
+        """
+        for column, ddl in (
+            ("cognee_email", "ALTER TABLE dev_projects ADD COLUMN cognee_email TEXT DEFAULT ''"),
+            ("cognee_token", "ALTER TABLE dev_projects ADD COLUMN cognee_token TEXT DEFAULT ''"),
+        ):
+            try:
+                await self._db.execute(ddl)
+            except Exception as exc:
+                if "duplicate column name" in str(exc).lower():
+                    continue
+                raise
 
     async def close(self):
         if self._db:
@@ -746,3 +768,13 @@ class Database:
         await self.db.execute("DELETE FROM dev_projects WHERE id=?", (project_id,))
         await self.db.commit()
         return True
+
+    async def update_dev_project_cognee_creds(
+        self, project_id: int, *, email: str, token: str,
+    ) -> None:
+        """Store the cognee user credentials for this dev project."""
+        await self.db.execute(
+            "UPDATE dev_projects SET cognee_email=?, cognee_token=? WHERE id=?",
+            (email, token, project_id),
+        )
+        await self.db.commit()

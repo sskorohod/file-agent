@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,11 @@ from pathlib import Path
 from app.memory.cognee_client import CogneeClient, CogneeError
 
 logger = logging.getLogger(__name__)
+
+
+def _project_email(project_id: int) -> str:
+    """Derive the cognee account email for a given project_id."""
+    return f"dev-{project_id}@example.com"
 
 # Extensions cognee should index. Code, configs, docs.
 _INGEST_EXTENSIONS = frozenset({
@@ -79,11 +85,45 @@ class DevIngestor:
     async def register_project(
         self, name: str, repo_path: str = "", description: str = "",
     ) -> dict:
-        """Create a project row. Idempotent on (name)."""
+        """Create a project row + cognee user for it.
+
+        Idempotent on (name). On first creation, registers a fresh cognee
+        account ``dev-<id>@example.com`` whose JWT bearer is stored on the
+        project row. All later ingest/recall for this project use that
+        token, so ACL keeps the project's data isolated from ``personal``
+        and from other projects.
+        """
         existing = await self.db.get_dev_project_by_name(name)
         if existing:
             return existing
+
         project_id = await self.db.create_dev_project(name, repo_path, description)
+
+        # Provision the per-project cognee user. Failure here leaves the
+        # SQLite row in place with empty credentials — ingest will refuse
+        # to run until the credentials are filled in. We do not roll back
+        # the SQLite row because the user can re-attempt registration via
+        # a maintenance command later.
+        if self.cognee.healthy:
+            email = _project_email(project_id)
+            password = secrets.token_urlsafe(32)
+            try:
+                token = await self.cognee.register_and_login(email, password)
+                await self.db.update_dev_project_cognee_creds(
+                    project_id, email=email, token=token,
+                )
+                logger.info("dev project %s: cognee user %s ready", project_id, email)
+            except CogneeError as exc:
+                logger.warning(
+                    "dev project %s: cognee user provisioning failed: %s",
+                    project_id, exc,
+                )
+        else:
+            logger.warning(
+                "dev project %s registered but sidecar is unhealthy — no cognee user provisioned",
+                project_id,
+            )
+
         return await self.db.get_dev_project(project_id)
 
     async def ingest_repo(
@@ -141,6 +181,11 @@ class DevIngestor:
             result.error = "cognee sidecar unhealthy"
             return result
 
+        token = project.get("cognee_token") or ""
+        if not token:
+            result.error = "project has no cognee user (re-register the project)"
+            return result
+
         dataset = result.dataset
         for path in candidates:
             try:
@@ -166,6 +211,7 @@ class DevIngestor:
                     content=content,
                     dataset=dataset,
                     filename=str(rel),
+                    token=token,
                 )
                 result.ingested += 1
             except CogneeError as exc:
@@ -178,7 +224,7 @@ class DevIngestor:
         # One cognify pass at the end is much cheaper than per-file.
         if result.ingested > 0:
             try:
-                await self.cognee.cognify(dataset=dataset)
+                await self.cognee.cognify(dataset=dataset, token=token)
             except CogneeError as exc:
                 logger.warning("cognify failed for %s: %s", dataset, exc)
                 result.error = f"cognify failed: {exc}"
@@ -205,11 +251,21 @@ class DevIngestor:
         if not content or len(content) < 40:
             return False
 
+        token = project.get("cognee_token") or ""
+        if not token:
+            logger.warning(
+                "dev project %s has no cognee user — re-register the project",
+                project_id,
+            )
+            return False
+
         dataset = self.dataset_name(project_id)
         upload_name = f"{source_type}_{source_id or 'note'}.txt"
         try:
-            await self.cognee.add(content=content, dataset=dataset, filename=upload_name)
-            await self.cognee.cognify(dataset=dataset)
+            await self.cognee.add(
+                content=content, dataset=dataset, filename=upload_name, token=token,
+            )
+            await self.cognee.cognify(dataset=dataset, token=token)
         except CogneeError as exc:
             logger.warning(
                 "dev ingest_text failed for project %s/%s: %s",
