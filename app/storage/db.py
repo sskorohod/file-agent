@@ -9,7 +9,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -163,6 +163,14 @@ CREATE TABLE IF NOT EXISTS insights (
     web_research TEXT NOT NULL DEFAULT '',
     document_count INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS dev_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    repo_path TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
@@ -701,3 +709,40 @@ class Database:
         await self.db.execute("DELETE FROM file_folders WHERE folder_id=?", (folder_id,))
         await self.db.execute("DELETE FROM folders WHERE id=?", (folder_id,))
         await self.db.commit()
+
+    # ── Dev Projects (Phase 5: dev memory dataset-per-project) ────────
+
+    async def create_dev_project(
+        self, name: str, repo_path: str = "", description: str = "",
+    ) -> int:
+        cursor = await self.db.execute(
+            "INSERT INTO dev_projects (name, repo_path, description) VALUES (?, ?, ?)",
+            (name, repo_path, description),
+        )
+        await self.db.commit()
+        return cursor.lastrowid or 0
+
+    async def get_dev_project(self, project_id: int) -> dict | None:
+        cursor = await self.db.execute(
+            "SELECT * FROM dev_projects WHERE id=?", (project_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_dev_project_by_name(self, name: str) -> dict | None:
+        cursor = await self.db.execute(
+            "SELECT * FROM dev_projects WHERE name=?", (name,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_dev_projects(self) -> list[dict]:
+        cursor = await self.db.execute(
+            "SELECT * FROM dev_projects ORDER BY id"
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def delete_dev_project(self, project_id: int) -> bool:
+        await self.db.execute("DELETE FROM dev_projects WHERE id=?", (project_id,))
+        await self.db.commit()
+        return True

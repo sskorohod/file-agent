@@ -205,3 +205,118 @@ async def api_delete_file(file_id: str, auth: dict = Depends(verify_api_key)):
 
     await db.delete_file(file_id)
     return {"deleted": True, "file_id": file_id}
+
+
+# ── Dev memory (Phase 5: per-project cognee datasets) ─────────────────
+
+
+def _full_mode_only(auth: dict) -> None:
+    """Restrict an endpoint to API keys with mode='full'."""
+    if auth.get("mode") != "full":
+        raise HTTPException(status_code=403, detail="full-mode API key required")
+
+
+@router.post("/dev/projects")
+async def api_dev_create_project(body: dict, auth: dict = Depends(verify_api_key)):
+    """Register a dev project. Body: {name, repo_path?, description?}.
+
+    Idempotent on ``name``: returns the existing project row if a project
+    with the same name already exists.
+    """
+    _full_mode_only(auth)
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    repo_path = (body.get("repo_path") or "").strip()
+    description = (body.get("description") or "").strip()
+
+    di = _get("dev_ingestor")
+    if not di:
+        raise HTTPException(status_code=503, detail="DevIngestor not available")
+    project = await di.register_project(name, repo_path=repo_path, description=description)
+    return {"project": project, "dataset": di.dataset_name(project["id"])}
+
+
+@router.get("/dev/projects")
+async def api_dev_list_projects(auth: dict = Depends(verify_api_key)):
+    _full_mode_only(auth)
+    db = _get("db")
+    rows = await db.list_dev_projects()
+    di = _get("dev_ingestor")
+    out = []
+    for r in rows:
+        item = dict(r)
+        item["dataset"] = di.dataset_name(r["id"]) if di else f"dev_{r['id']}"
+        out.append(item)
+    return {"projects": out}
+
+
+@router.post("/dev/projects/{project_id}/ingest_repo")
+async def api_dev_ingest_repo(
+    project_id: int,
+    body: dict | None = None,
+    auth: dict = Depends(verify_api_key),
+):
+    """Ingest source files from a directory into ``dev_<project_id>``.
+
+    Body: {repo_path?}. If omitted, uses the project's stored repo_path.
+    """
+    _full_mode_only(auth)
+    di = _get("dev_ingestor")
+    if not di:
+        raise HTTPException(status_code=503, detail="DevIngestor not available")
+    repo_path = (body or {}).get("repo_path")
+    result = await di.ingest_repo(project_id, repo_path=repo_path)
+    if result.error and result.discovered == 0:
+        raise HTTPException(status_code=400, detail=result.error)
+    return {
+        "project_id": result.project_id,
+        "dataset": result.dataset,
+        "discovered": result.discovered,
+        "ingested": result.ingested,
+        "skipped_too_large": result.skipped_too_large,
+        "skipped_unreadable": result.skipped_unreadable,
+        "over_limit": result.over_limit,
+        "error": result.error,
+    }
+
+
+@router.post("/dev/projects/{project_id}/ingest_text")
+async def api_dev_ingest_text(
+    project_id: int,
+    body: dict,
+    auth: dict = Depends(verify_api_key),
+):
+    """Ingest a single decision/postmortem/session log into ``dev_<project_id>``.
+
+    Body: {content, source_type?, source_id?}.
+    """
+    _full_mode_only(auth)
+    content = (body.get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content required")
+    di = _get("dev_ingestor")
+    if not di:
+        raise HTTPException(status_code=503, detail="DevIngestor not available")
+    ok = await di.ingest_text(
+        project_id,
+        content=content,
+        source_type=body.get("source_type") or "decision",
+        source_id=body.get("source_id") or "",
+    )
+    return {"ingested": ok, "dataset": di.dataset_name(project_id)}
+
+
+@router.delete("/dev/projects/{project_id}")
+async def api_dev_delete_project(
+    project_id: int, auth: dict = Depends(verify_api_key),
+):
+    """Remove the project row. Cognee data in dev_<id> is left intact —
+    delete it explicitly via cognee's /forget if you want it gone."""
+    _full_mode_only(auth)
+    db = _get("db")
+    project = await db.get_dev_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+    await db.delete_dev_project(project_id)
+    return {"deleted": True, "project_id": project_id}

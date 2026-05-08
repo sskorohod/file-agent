@@ -99,10 +99,11 @@ async def lifespan(app: FastAPI):
     _state["parser_factory"] = parser_factory
 
     # Cognee sidecar — must be probed before Pipeline so it can be injected.
-    from app.memory import CogneeClient
+    from app.memory import CogneeClient, DevIngestor
     cognee_client = CogneeClient(settings.cognee)
     await cognee_client.setup()
     _state["cognee"] = cognee_client
+    _state["dev_ingestor"] = DevIngestor(db=db, cognee_client=cognee_client)
     if settings.cognee.enabled and not cognee_client.healthy:
         logger.warning(
             "Cognee sidecar not reachable at %s — memory features disabled until 'make cognee-start'",
