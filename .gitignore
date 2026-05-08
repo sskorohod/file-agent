@@ -1,9 +1,15 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-spike/
+.venv-cognee/
 .env
 .env.bak
 data/
+infra/cognee/.env
+infra/cognee/data/
+infra/cognee/cognee.pid
+infra/cognee/cognee-mcp.pid
 *.db
 .pytest_cache/
 .ruff_cache/
