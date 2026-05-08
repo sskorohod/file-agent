@@ -10,13 +10,19 @@ Two key contracts that callers can rely on:
   caller is about to do work that depends on the sidecar, ``self.healthy``
   should already be ``True`` (set by the lifespan probe in ``app/main.py``).
 * When ``cognee.enabled`` is ``False`` or the sidecar is unreachable,
-  every call returns a sentinel result instead of raising. The pipeline
-  treats that as "skip this step" rather than failing the whole ingest.
+  every call raises ``CogneeUnavailable`` instead of returning a sentinel.
+  Callers wrap calls in ``try/except CogneeError`` and treat failure as
+  "skip this step" rather than failing the whole ingest.
 
-The exact REST contract for cognee 1.0.x endpoints is still being verified
-in spike-2 (Phase 1). Methods documented here describe intent — actual paths
-and request bodies will be tightened against ``GET /openapi.json`` of a live
-sidecar before Phase 2 starts using them.
+REST contract — verified against cognee 1.0.8 in spike-2
+(see docs/cognee-spike2-report.md):
+
+* ``POST /api/v1/add`` — **multipart/form-data**. ``data`` is a list of file
+  uploads, ``datasetName`` is a form field. Plain text gets sent as a
+  ``text/plain`` upload with a synthetic filename.
+* ``POST /api/v1/cognify``, ``/search``, ``/recall``, ``/forget`` — JSON,
+  **camelCase** keys (``datasetName``, ``topK``, ``runInBackground``,
+  ``searchType``).
 """
 
 from __future__ import annotations
@@ -108,28 +114,53 @@ class CogneeClient:
         content: str,
         *,
         dataset: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        filename: str = "fag_text.txt",
+        run_in_background: bool = False,
     ) -> dict[str, Any]:
-        """Send raw text to the sidecar for ingestion.
+        """Send raw text to the sidecar for ingestion via multipart upload.
 
         After this call returns, the content is staged but not yet processed
         into the graph — call ``cognify`` to do that.
         """
+        if not self.config.enabled or self._client is None or not self.healthy:
+            raise CogneeUnavailable("sidecar disabled or unhealthy")
         target_dataset = dataset or self.config.default_dataset
-        body: dict[str, Any] = {"data": content, "dataset_name": target_dataset}
-        if metadata:
-            body["metadata"] = metadata
-        return await self._post("/api/v1/add", body)
+        files = [("data", (filename, content.encode("utf-8"), "text/plain"))]
+        form = {
+            "datasetName": target_dataset,
+            "runInBackground": "true" if run_in_background else "false",
+        }
+        try:
+            response = await self._client.post(
+                "/api/v1/add",
+                files=files,
+                data=form,
+                timeout=self.config.cognify_timeout_s,
+            )
+        except httpx.HTTPError as exc:
+            self.healthy = False
+            raise CogneeUnavailable(f"POST /api/v1/add: {exc}") from exc
+        if response.status_code >= 400:
+            raise CogneeError(
+                f"POST /api/v1/add -> HTTP {response.status_code}: {response.text[:500]}"
+            )
+        return response.json() if response.headers.get("content-type", "").startswith("application/json") else {"raw": response.text}
 
-    async def cognify(self, *, dataset: str | None = None) -> dict[str, Any]:
-        """Run the cognification pipeline (LLM extraction → graph + vectors).
-
-        Long-running — uses ``cognify_timeout_s`` instead of the default.
-        """
+    async def cognify(
+        self,
+        *,
+        dataset: str | None = None,
+        run_in_background: bool = False,
+    ) -> dict[str, Any]:
+        """Run the cognification pipeline (LLM extraction → graph + vectors)."""
         target_dataset = dataset or self.config.default_dataset
+        body: dict[str, Any] = {
+            "datasets": [target_dataset],
+            "runInBackground": run_in_background,
+        }
         return await self._post(
             "/api/v1/cognify",
-            {"datasets": [target_dataset]},
+            body,
             timeout=self.config.cognify_timeout_s,
         )
 
@@ -137,15 +168,15 @@ class CogneeClient:
         self,
         query: str,
         *,
-        query_type: str = "GRAPH_COMPLETION",
+        search_type: str = "GRAPH_COMPLETION",
         dataset: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """V1 search API — returns LLM-rendered answers / chunks."""
         body: dict[str, Any] = {
             "query": query,
-            "query_type": query_type,
-            "top_k": limit,
+            "searchType": search_type,
+            "topK": limit,
         }
         if dataset:
             body["datasets"] = [dataset]
@@ -162,9 +193,9 @@ class CogneeClient:
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """v1.0 recall API — preferred over ``search`` for retrieval."""
-        body: dict[str, Any] = {"query": query, "top_k": limit}
+        body: dict[str, Any] = {"query": query, "topK": limit}
         if dataset:
-            body["dataset_name"] = dataset
+            body["datasets"] = [dataset]
         result = await self._post("/api/v1/recall", body)
         if isinstance(result, list):
             return result
@@ -174,13 +205,12 @@ class CogneeClient:
         self,
         *,
         dataset: str | None = None,
-        content_ref: str | None = None,
+        everything: bool = False,
+        memory_only: bool = False,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {}
+        body: dict[str, Any] = {"everything": everything, "memoryOnly": memory_only}
         if dataset:
-            body["dataset_name"] = dataset
-        if content_ref:
-            body["content_ref"] = content_ref
+            body["dataset"] = dataset
         return await self._post("/api/v1/forget", body)
 
     async def list_datasets(self) -> list[dict[str, Any]]:

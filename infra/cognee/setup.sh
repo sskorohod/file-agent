@@ -37,6 +37,11 @@ fi
 echo "[cognee-setup] installing cognee==${COGNEE_VERSION} (this may take a few minutes)"
 "${VENV_DIR}/bin/pip" install --quiet "cognee==${COGNEE_VERSION}"
 
+# Cognee uses the Anthropic SDK directly via instructor (not litellm) when
+# LLM_PROVIDER=anthropic, so the SDK must be installed alongside cognee.
+echo "[cognee-setup] installing anthropic SDK (used when LLM_PROVIDER=anthropic)"
+"${VENV_DIR}/bin/pip" install --quiet anthropic
+
 mkdir -p "${INFRA_DIR}/data"
 mkdir -p "${INFRA_DIR}/logs"
 

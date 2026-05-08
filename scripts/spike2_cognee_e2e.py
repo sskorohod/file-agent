@@ -97,22 +97,24 @@ async def call(
 
 
 async def step_add(client: httpx.AsyncClient) -> dict[str, Any]:
-    section("3. POST /api/v1/add")
-    body = {"data": FIXTURE, "dataset_name": DATASET}
-    code, payload, elapsed = await call(client, "POST", "/api/v1/add", body)
-    print(f"  status={code} elapsed={elapsed:.2f}s")
-    if isinstance(payload, dict):
-        print(f"  payload keys: {list(payload.keys())}")
-    elif isinstance(payload, list):
-        print(f"  list len={len(payload)}")
-    else:
-        print(f"  payload: {str(payload)[:200]}")
-    return {"status_code": code, "elapsed_s": elapsed, "payload_sample": str(payload)[:500]}
+    section("3. POST /api/v1/add (multipart with text fixture)")
+    files = [("data", ("spike2_fixture.txt", FIXTURE.encode("utf-8"), "text/plain"))]
+    form = {"datasetName": DATASET, "runInBackground": "false"}
+    t0 = time.perf_counter()
+    r = await client.post("/api/v1/add", files=files, data=form, timeout=120.0)
+    elapsed = time.perf_counter() - t0
+    try:
+        payload = r.json()
+    except Exception:
+        payload = r.text[:500]
+    print(f"  status={r.status_code} elapsed={elapsed:.2f}s")
+    print(f"  payload: {str(payload)[:300]}")
+    return {"status_code": r.status_code, "elapsed_s": elapsed, "payload_sample": str(payload)[:500]}
 
 
 async def step_cognify(client: httpx.AsyncClient) -> dict[str, Any]:
     section("4. POST /api/v1/cognify")
-    body = {"datasets": [DATASET]}
+    body = {"datasets": [DATASET], "runInBackground": False}
     code, payload, elapsed = await call(client, "POST", "/api/v1/cognify", body, timeout=300.0)
     print(f"  status={code} elapsed={elapsed:.2f}s")
     print(f"  payload: {str(payload)[:300]}")
@@ -121,7 +123,12 @@ async def step_cognify(client: httpx.AsyncClient) -> dict[str, Any]:
 
 async def step_search(client: httpx.AsyncClient) -> dict[str, Any]:
     section("5a. POST /api/v1/search")
-    body = {"query": QUERY, "query_type": "GRAPH_COMPLETION", "datasets": [DATASET], "top_k": 5}
+    body = {
+        "query": QUERY,
+        "searchType": "GRAPH_COMPLETION",
+        "datasets": [DATASET],
+        "topK": 5,
+    }
     code, payload, elapsed = await call(client, "POST", "/api/v1/search", body, timeout=120.0)
     print(f"  status={code} elapsed={elapsed:.2f}s")
     print(f"  payload sample: {str(payload)[:400]}")
@@ -130,7 +137,7 @@ async def step_search(client: httpx.AsyncClient) -> dict[str, Any]:
 
 async def step_recall(client: httpx.AsyncClient) -> dict[str, Any]:
     section("5b. POST /api/v1/recall")
-    body = {"query": QUERY, "dataset_name": DATASET, "top_k": 5}
+    body = {"query": QUERY, "datasets": [DATASET], "topK": 5}
     code, payload, elapsed = await call(client, "POST", "/api/v1/recall", body, timeout=120.0)
     print(f"  status={code} elapsed={elapsed:.2f}s")
     print(f"  payload sample: {str(payload)[:400]}")
@@ -169,7 +176,7 @@ async def step_qdrant() -> dict[str, Any]:
 async def step_forget(client: httpx.AsyncClient) -> dict[str, Any]:
     section("7. POST /api/v1/forget (cleanup)")
     code, payload, elapsed = await call(
-        client, "POST", "/api/v1/forget", {"dataset_name": DATASET}
+        client, "POST", "/api/v1/forget", {"dataset": DATASET}
     )
     print(f"  status={code} elapsed={elapsed:.2f}s payload={str(payload)[:200]}")
     return {"status_code": code, "elapsed_s": elapsed}
