@@ -2,6 +2,8 @@
 
 Run against `http://127.0.0.1:8765` on 2026-05-07 23:56:27 PDT.
 
+Russian version: [cognee-spike2-report.ru.md](cognee-spike2-report.ru.md).
+
 ## Dataset
 - Name: `spike2`
 - Fixture text: `'Note about Fixar CRM scheduling rules. The user prefers a 3-hour scheduling window when offering appointment slots to clients. The primary location is the Vancouver office. Reminders should be sent the day before at 9 AM Pacific.'`

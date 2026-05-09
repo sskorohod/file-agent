@@ -3,6 +3,8 @@
 Honest review of the cognee migration after Phases 0–7b. Verified against
 the actual code on `spike/cognee-compat`, not against my memory of it.
 
+Russian version: [architecture-audit-2026-05-08.ru.md](architecture-audit-2026-05-08.ru.md).
+
 ## TL;DR
 
 The migration **works**, but it's been bolted on top of the legacy stack

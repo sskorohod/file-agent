@@ -3,6 +3,8 @@
 This is the operator's path from "FAG is running" to "Codex can read and write
 the memory graph". It assumes Phases 0–6 of the cognee migration are done.
 
+Russian version: [codex-claude-setup.ru.md](codex-claude-setup.ru.md).
+
 ## Architecture (recap)
 
 ```

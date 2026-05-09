@@ -4,6 +4,8 @@
 **Date:** 2026-05-07
 **Goal:** confirm whether Cognee 1.0.x can be integrated into FAG and how (embedded library vs sidecar service).
 
+Russian version: [cognee-spike-report.ru.md](cognee-spike-report.ru.md).
+
 ## TL;DR
 
 ✅ **Decision: Cognee runs as a sidecar HTTP service in its own venv.**
