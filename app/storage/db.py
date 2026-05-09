@@ -9,7 +9,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -164,6 +164,16 @@ CREATE TABLE IF NOT EXISTS insights (
     document_count INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS dev_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    repo_path TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    cognee_email TEXT DEFAULT '',
+    cognee_token TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -181,10 +191,30 @@ class Database:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(SCHEMA_SQL)
+        await self._migrate_v2_to_v3()
         await self._db.execute(
             "INSERT OR IGNORE INTO schema_version(version) VALUES(?)", (SCHEMA_VERSION,)
         )
         await self._db.commit()
+
+    async def _migrate_v2_to_v3(self):
+        """Phase 5b: dev_projects gains cognee_email + cognee_token.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op on existing tables, so
+        the new columns must be added explicitly. SQLite has no
+        ``IF NOT EXISTS`` clause for ``ALTER TABLE``, so we swallow the
+        ``duplicate column name`` error to keep this idempotent.
+        """
+        for column, ddl in (
+            ("cognee_email", "ALTER TABLE dev_projects ADD COLUMN cognee_email TEXT DEFAULT ''"),
+            ("cognee_token", "ALTER TABLE dev_projects ADD COLUMN cognee_token TEXT DEFAULT ''"),
+        ):
+            try:
+                await self._db.execute(ddl)
+            except Exception as exc:
+                if "duplicate column name" in str(exc).lower():
+                    continue
+                raise
 
     async def close(self):
         if self._db:
@@ -229,9 +259,18 @@ class Database:
         await self.db.commit()
         return id
 
+    _ALLOWED_UPDATE_COLUMNS = frozenset({
+        "original_name", "category", "tags", "summary", "extracted_text",
+        "metadata_json", "priority", "source", "updated_at",
+    })
+
     async def update_file(self, id: str, **fields) -> bool:
         if not fields:
             return False
+        # Validate column names against allowlist
+        for k in fields:
+            if k not in self._ALLOWED_UPDATE_COLUMNS and k != "updated_at":
+                raise ValueError(f"Invalid column name: {k}")
         # Serialize lists/dicts
         for k, v in fields.items():
             if isinstance(v, (list, dict)):
@@ -691,4 +730,51 @@ class Database:
     async def delete_folder(self, folder_id: int):
         await self.db.execute("DELETE FROM file_folders WHERE folder_id=?", (folder_id,))
         await self.db.execute("DELETE FROM folders WHERE id=?", (folder_id,))
+        await self.db.commit()
+
+    # ── Dev Projects (Phase 5: dev memory dataset-per-project) ────────
+
+    async def create_dev_project(
+        self, name: str, repo_path: str = "", description: str = "",
+    ) -> int:
+        cursor = await self.db.execute(
+            "INSERT INTO dev_projects (name, repo_path, description) VALUES (?, ?, ?)",
+            (name, repo_path, description),
+        )
+        await self.db.commit()
+        return cursor.lastrowid or 0
+
+    async def get_dev_project(self, project_id: int) -> dict | None:
+        cursor = await self.db.execute(
+            "SELECT * FROM dev_projects WHERE id=?", (project_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_dev_project_by_name(self, name: str) -> dict | None:
+        cursor = await self.db.execute(
+            "SELECT * FROM dev_projects WHERE name=?", (name,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def list_dev_projects(self) -> list[dict]:
+        cursor = await self.db.execute(
+            "SELECT * FROM dev_projects ORDER BY id"
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def delete_dev_project(self, project_id: int) -> bool:
+        await self.db.execute("DELETE FROM dev_projects WHERE id=?", (project_id,))
+        await self.db.commit()
+        return True
+
+    async def update_dev_project_cognee_creds(
+        self, project_id: int, *, email: str, token: str,
+    ) -> None:
+        """Store the cognee user credentials for this dev project."""
+        await self.db.execute(
+            "UPDATE dev_projects SET cognee_email=?, cognee_token=? WHERE id=?",
+            (email, token, project_id),
+        )
         await self.db.commit()

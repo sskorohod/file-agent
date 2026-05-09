@@ -42,9 +42,7 @@ async def login(request: Request, login: str = Form(...), password: str = Form(.
     password_ok = settings.web.password_hash and bcrypt.checkpw(
         password.encode(), settings.web.password_hash.encode()
     )
-    _log.info(f"Login attempt: login_ok={login_ok}, password_ok={password_ok}, "
-              f"input_login={login!r}, expected_login={settings.web.login!r}, "
-              f"hash_len={len(settings.web.password_hash)}")
+    _log.info(f"Login attempt: success={login_ok and password_ok}")
     if login_ok and password_ok:
         request.session["authenticated"] = True
         return RedirectResponse("/", status_code=303)
@@ -238,7 +236,12 @@ async def file_download(file_id: str, inline: bool = False):
     file = await db.get_file(file_id) if db else None
     if not file:
         return HTMLResponse("File not found", status_code=404)
-    file_path = Path(file["stored_path"])
+    file_path = Path(file["stored_path"]).resolve()
+    # Path traversal guard
+    from app.config import get_settings as _gs
+    base = _gs().storage.resolved_path
+    if not file_path.is_relative_to(base):
+        return HTMLResponse("Access denied", status_code=403)
     if not file_path.exists():
         return HTMLResponse("File not found on disk", status_code=404)
     mime = file.get("mime_type", "application/octet-stream")
@@ -472,7 +475,9 @@ async def save_provider_keys(request: Request):
     from app.config import get_settings
     from app.utils.crypto import encrypt
     db = _get("db")
-    session_secret = get_settings().web.session_secret or "default-secret"
+    session_secret = get_settings().web.session_secret
+    if not session_secret:
+        return RedirectResponse("/settings", status_code=303)  # Can't encrypt without secret
 
     form = await request.form()
     KEY_MAP = {

@@ -59,7 +59,10 @@ async def lifespan(app: FastAPI):
     logger.info(f"Database ready: {settings.database.path}")
 
     # Load encrypted secrets from DB → environment (supplement .env)
-    await _load_secrets_to_env(db, settings.web.session_secret or "default-secret")
+    if settings.web.session_secret:
+        await _load_secrets_to_env(db, settings.web.session_secret)
+    else:
+        logger.warning("WEB__SESSION_SECRET not set — encrypted secrets will NOT be loaded from DB")
 
     from app.storage.files import FileStorage
     file_storage = FileStorage(
@@ -95,16 +98,29 @@ async def lifespan(app: FastAPI):
     parser_factory = ParserFactory(vision_model=vision_model.model if vision_model else None)
     _state["parser_factory"] = parser_factory
 
+    # Cognee sidecar — must be probed before Pipeline so it can be injected.
+    from app.memory import CogneeClient, DevIngestor
+    cognee_client = CogneeClient(settings.cognee)
+    await cognee_client.setup()
+    _state["cognee"] = cognee_client
+    _state["dev_ingestor"] = DevIngestor(db=db, cognee_client=cognee_client)
+    if settings.cognee.enabled and not cognee_client.healthy:
+        logger.warning(
+            "Cognee sidecar not reachable at %s — memory features disabled until 'make cognee-start'",
+            settings.cognee.base_url,
+        )
+
     from app.pipeline import Pipeline
     pipeline = Pipeline(
         settings=settings, db=db, file_storage=file_storage,
         vector_store=vector_store, parser_factory=parser_factory,
         llm_router=llm_router, classifier=classifier, skill_engine=skill_engine,
+        cognee_client=cognee_client,
     )
     _state["pipeline"] = pipeline
 
     from app.llm.search import LLMSearch
-    llm_search = LLMSearch(vector_store, llm_router, db=db)
+    llm_search = LLMSearch(vector_store, llm_router, db=db, cognee_client=cognee_client)
     _state["llm_search"] = llm_search
 
     from app.llm.analytics import LLMAnalytics
@@ -181,6 +197,11 @@ async def lifespan(app: FastAPI):
         await tg_app.updater.stop()
         await tg_app.stop()
         await tg_app.shutdown()
+    if _state.get("cognee"):
+        try:
+            await _state["cognee"].shutdown()
+        except Exception:
+            pass
     await vector_store.close()
     await db.close()
     logger.info("Shutdown complete")
@@ -341,6 +362,34 @@ from app.web.auth import AuthMiddleware
 
 _settings = get_settings()
 
+
+# Security headers middleware
+class SecurityHeadersMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = dict(message.get("headers", []))
+                extra = [
+                    (b"x-frame-options", b"DENY"),
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"referrer-policy", b"strict-origin-when-cross-origin"),
+                    (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+                ]
+                message["headers"] = list(message.get("headers", [])) + extra
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+
 # Auth middleware (checks session cookie)
 app.add_middleware(AuthMiddleware)
 
@@ -378,11 +427,21 @@ app.mount("/mcp/sse", mcp.sse_app())                # Legacy SSE transport
 app.mount("/mcp", mcp.streamable_http_app())         # Streamable HTTP (Codex, Claude Code)
 
 
+# Global exception handler — prevent stack trace leaks
+from fastapi.responses import JSONResponse as _JSONResp
+
+@app.exception_handler(Exception)
+async def _global_error_handler(request, exc):
+    logger.error(f"Unhandled error: {exc}", exc_info=True)
+    return _JSONResp(status_code=500, content={"detail": "Internal server error"})
+
+
 @app.get("/health")
 async def health():
     vs = get_state("vector_store")
     vector_health = await vs.health_check() if vs else {}
     db = get_state("db")
+    cognee = get_state("cognee")
     return {
         "status": "ok" if db and db._db else "degraded",
         "version": "0.1.0",
@@ -390,6 +449,7 @@ async def health():
         "qdrant": vector_health,
         "telegram": "running" if get_state("tg_app") else "disabled",
         "skills": len(get_state("skill_engine").list_skills()) if get_state("skill_engine") else 0,
+        "cognee": "healthy" if cognee and cognee.healthy else "disabled",
     }
 
 

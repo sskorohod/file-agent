@@ -50,10 +50,14 @@ llm:
     \ dates, names, numbers, amounts\r\n- If the document has action items or deadlines\
     \ — mention them\r\n- Respond in the same language as the question\r\n- Do NOT\
     \ mention multiple documents — pick the best one"
-  classification_prompt: "You are a document classification system.\r\n\r\nRules:\r\
-    \n- summary: два коротких предложения на русском языке. Только ключевые факты.\r\
-    \n- tags: 2-4 relevant tags, lowercase\r\n- document_type: specific type (e.g.\
-    \ lab_result, invoice, passport)"
+  classification_prompt: |
+    You are a document classification system.
+
+    Rules:
+    - summary: 2-3 коротких предложения на русском про НАЗНАЧЕНИЕ ("для чего этот документ нужен пользователю") + 1-2 ключевых факта. Не пересказывай весь документ — оставайся компактным.
+    - expiry_date: если документ явно содержит срок действия / дату окончания — укажи YYYY-MM-DD. Иначе пустая строка.
+    - tags: 2-4 relevant tags, lowercase.
+    - document_type: specific type (e.g. lab_result, invoice, passport).
 qdrant:
   host: localhost
   port: 6333
@@ -81,3 +85,13 @@ database:
 logging:
   level: INFO
   format: '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+cognee:
+  enabled: true
+  base_url: http://127.0.0.1:8765
+  # Aligned with cognee-mcp's hardcoded default — Codex / Claude Code
+  # writes via remember land here too, so FAG and external agents share
+  # one personal scope.
+  default_dataset: main_dataset
+  request_timeout_s: 60
+  cognify_timeout_s: 300
+  use_for_search: true

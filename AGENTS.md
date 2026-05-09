@@ -1,4 +1,4 @@
-# CLAUDE.md — AI File Intelligence Agent
+# AGENTS.md — AI File Intelligence Agent
 
 ## Project Overview
 

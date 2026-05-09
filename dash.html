@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>DataStore - Dashboard</title>
+<!-- Tailwind CSS CDN with plugins -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            'card-bg': '#121212',
+            'panel-bg': '#0a0a0a',
+            'border-subtle': '#1f1f1f',
+            'brand-purple': '#a855f7',
+            'brand-blue': '#3b82f6',
+            'brand-green': '#22c55e',
+          }
+        }
+      }
+    }
+  </script>
+<style data-purpose="custom-styling">
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #050505;
+      color: #e5e7eb;
+    }
+
+    /* Glassmorphism card effect */
+    .glass-card {
+      background: rgba(18, 18, 18, 0.7);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 0.75rem;
+    }
+
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #2d2d2d;
+      border-radius: 10px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #444;
+    }
+
+    /* Progress Bar Gradients */
+    .progress-purple { background: linear-gradient(90deg, #6366f1, #a855f7); }
+    .progress-green { background: linear-gradient(90deg, #10b981, #22c55e); }
+    .progress-blue { background: linear-gradient(90deg, #3b82f6, #06b6d4); }
+    .progress-orange { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+  </style>
+</head>
+<body class="min-h-screen p-6">
+<!-- BEGIN: MainHeader -->
+<header class="flex justify-between items-center mb-8" data-purpose="header">
+<h1 class="text-3xl font-bold tracking-tight">Dashboard</h1>
+<div class="flex items-center gap-2 px-3 py-1 bg-green-900/20 border border-green-500/30 rounded-full">
+<span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+<span class="text-xs font-semibold text-green-400 uppercase">Online</span>
+</div>
+</header>
+<!-- END: MainHeader -->
+<!-- BEGIN: SummaryStats -->
+<section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-8" data-purpose="summary-stats">
+<!-- Files Card -->
+<div class="glass-card p-5 border-l-4 border-brand-purple">
+<p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Files</p>
+<div class="flex items-baseline gap-2">
+<span class="text-3xl font-bold text-brand-purple">21</span>
+<span class="text-xs text-gray-500">4.1 MB</span>
+</div>
+</div>
+<!-- Vectors Card -->
+<div class="glass-card p-5 border-l-4 border-brand-blue">
+<p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Vectors</p>
+<div class="flex items-baseline gap-2">
+<span class="text-3xl font-bold text-brand-blue">44</span>
+<span class="text-xs text-gray-500">points</span>
+</div>
+</div>
+<!-- Queries Card -->
+<div class="glass-card p-5 border-l-4 border-brand-green">
+<p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Queries</p>
+<div class="flex items-baseline gap-2">
+<span class="text-3xl font-bold text-brand-green">14</span>
+<span class="text-xs text-gray-500">today · 27 total</span>
+</div>
+</div>
+<!-- LLM Calls Card -->
+<div class="glass-card p-5 border-l-4 border-yellow-500">
+<p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">LLM Calls</p>
+<div class="flex items-baseline gap-2">
+<span class="text-3xl font-bold text-yellow-500">101</span>
+<span class="text-xs text-gray-500">11 today</span>
+</div>
+</div>
+<!-- Reminders/Errors Card -->
+<div class="glass-card p-5 border-l-4 border-red-500">
+<div class="flex justify-between">
+<div>
+<p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Reminders</p>
+<span class="text-3xl font-bold text-red-500">3</span>
+</div>
+<div class="text-right">
+<p class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">Errors</p>
+<span class="text-3xl font-bold text-green-500">0</span>
+</div>
+</div>
+</div>
+</section>
+<!-- END: SummaryStats -->
+<!-- BEGIN: MainContentArea -->
+<main class="grid grid-cols-12 gap-6" data-purpose="main-layout">
+<!-- Left Column: Activity Log -->
+<section class="col-span-12 lg:col-span-4 glass-card p-6" data-purpose="activity-log">
+<div class="flex justify-between items-center mb-6">
+<h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400">Activity</h2>
+<span class="px-2 py-0.5 text-[10px] bg-gray-800 rounded uppercase font-bold text-gray-400">live</span>
+</div>
+<div class="space-y-4 max-h-[600px] overflow-y-auto pr-2">
+<!-- Activity items generated from provided image context -->
+<div class="flex items-center justify-between group cursor-pointer">
+<div class="flex items-center gap-3">
+<div class="p-2 bg-blue-500/10 rounded-lg text-blue-400">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</div>
+<span class="text-sm text-gray-300 group-hover:text-white transition-colors truncate max-w-[200px]">покажи какие есть документы по u4u</span>
+</div>
+<span class="text-xs text-gray-600">06:24</span>
+</div>
+<div class="flex items-center justify-between group cursor-pointer">
+<div class="flex items-center gap-3">
+<div class="p-2 bg-blue-500/10 rounded-lg text-blue-400">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</div>
+<span class="text-sm text-gray-300 group-hover:text-white transition-colors truncate max-w-[200px]">найди какие лекарства мне выписывали</span>
+</div>
+<span class="text-xs text-gray-600">06:24</span>
+</div>
+<!-- Repeated items for visual fill -->
+<div class="flex items-center justify-between group cursor-pointer">
+<div class="flex items-center gap-3">
+<div class="p-2 bg-blue-500/10 rounded-lg text-blue-400">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</div>
+<span class="text-sm text-gray-300">найди какие лекарства мне выписывали</span>
+</div>
+<span class="text-xs text-gray-600">06:23</span>
+</div>
+<div class="flex items-center justify-between group cursor-pointer">
+<div class="flex items-center gap-3">
+<div class="p-2 bg-blue-500/10 rounded-lg text-blue-400">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</div>
+<span class="text-sm text-gray-300">найди какие лекарства мне выписывали</span>
+</div>
+<span class="text-xs text-gray-600">06:22</span>
+</div>
+<div class="flex items-center justify-between group cursor-pointer">
+<div class="flex items-center gap-3">
+<div class="p-2 bg-blue-500/10 rounded-lg text-blue-400">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</div>
+<span class="text-sm text-gray-300">найди какие лекарства мне выписывали</span>
+</div>
+<span class="text-xs text-gray-600">06:19</span>
+</div>
+<!-- Additional skeleton items -->
+<div class="flex items-center justify-between opacity-50">
+<div class="flex items-center gap-3">
+<div class="p-2 bg-blue-500/5 rounded-lg text-blue-400/50">
+<svg class="w-4 h-4" fill="none" stroke="currentColor" viewbox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+</div>
+<span class="text-sm text-gray-500">покажи результаты анализов</span>
+</div>
+<span class="text-xs text-gray-700">06:15</span>
+</div>
+</div>
+</section>
+<!-- Center Column: Categories & Messaging -->
+<section class="col-span-12 lg:col-span-4 space-y-6" data-purpose="categories-and-channels">
+<div class="glass-card p-6 h-full">
+<h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-6">Categories</h2>
+<div class="space-y-6">
+<div class="space-y-2">
+<div class="flex justify-between text-xs font-medium">
+<span class="text-gray-300">business</span>
+<span class="text-gray-500">8</span>
+</div>
+<div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+<div class="progress-purple h-full" style="width: 80%"></div>
+</div>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between text-xs font-medium">
+<span class="text-gray-300">personal</span>
+<span class="text-gray-500">6</span>
+</div>
+<div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+<div class="progress-purple h-full" style="width: 60%"></div>
+</div>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between text-xs font-medium">
+<span class="text-gray-300">health</span>
+<span class="text-gray-500">4</span>
+</div>
+<div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+<div class="progress-purple h-full" style="width: 40%"></div>
+</div>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between text-xs font-medium">
+<span class="text-gray-300">uncategorized</span>
+<span class="text-gray-500">3</span>
+</div>
+<div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+<div class="progress-purple h-full" style="width: 30%"></div>
+</div>
+</div>
+</div>
+<div class="mt-8 pt-8 border-t border-white/5">
+<div class="flex items-center gap-2 bg-gray-800/50 hover:bg-gray-800 transition-colors w-max p-2 px-3 rounded-lg cursor-pointer">
+<svg class="w-4 h-4 text-blue-400" fill="currentColor" viewbox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15.15-.3.26-.44.37-1.46.99-2.92 1.98-4.38 2.97-.47.32-.95.63-1.42.94-.38.25-.76.51-1.14.76-.23.15-.46.3-.69.46-.2.13-.33.28-.35.5-.02.24.11.41.34.46.31.07.63.13.94.2.53.11 1.05.23 1.58.34.09.02.14.07.18.15.15.42.31.84.46 1.25.17.47.34.93.51 1.4.05.13.11.23.23.3.18.1.37.04.5-.09.11-.11.2-.24.28-.37.33-.53.66-1.07.99-1.6.09-.15.2-.24.38-.28.98-.21 1.95-.42 2.93-.63.85-.18 1.69-.36 2.54-.54.34-.07.57-.31.6-.66.03-.33-.18-.58-.5-.65-1.59-.33-3.17-.66-4.76-.99-.34-.07-.68-.14-1.01-.21-.07-.01-.1-.04-.12-.1-.23-.62-.45-1.24-.68-1.85-.19-.51-.38-1.01-.57-1.52-.08-.22-.22-.35-.46-.38-.24-.03-.41.07-.51.27z"></path></svg>
+<span class="text-xs font-bold text-gray-200">21</span>
+<span class="text-[10px] text-gray-500 uppercase tracking-tighter">telegram</span>
+</div>
+</div>
+</div>
+</section>
+<!-- Right Column: AI Usage -->
+<section class="col-span-12 lg:col-span-4 glass-card p-6" data-purpose="ai-usage">
+<h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-6">AI Usage</h2>
+<!-- Session Stats -->
+<div class="grid grid-cols-3 gap-3 mb-8">
+<div class="bg-white/5 p-3 rounded-xl border border-white/5">
+<p class="text-[10px] uppercase text-gray-500 mb-1">Session</p>
+<div class="flex items-baseline gap-1">
+<span class="text-xl font-bold">0</span>
+<span class="text-[10px] text-gray-600">calls</span>
+</div>
+</div>
+<div class="bg-white/5 p-3 rounded-xl border border-white/5">
+<p class="text-[10px] uppercase text-gray-500 mb-1">All Time</p>
+<div class="flex items-baseline gap-1">
+<span class="text-xl font-bold">101</span>
+<span class="text-[10px] text-gray-600">calls</span>
+</div>
+</div>
+<div class="bg-white/5 p-3 rounded-xl border border-white/5">
+<p class="text-[10px] uppercase text-gray-500 mb-1">Today</p>
+<div class="flex items-baseline gap-1">
+<span class="text-xl font-bold">11</span>
+<span class="text-[10px] text-gray-600">calls</span>
+</div>
+</div>
+</div>
+<!-- Models Breakdown -->
+<div class="space-y-4 max-h-[500px] overflow-y-auto pr-2">
+<!-- Whisper -->
+<div class="space-y-1">
+<div class="flex justify-between text-xs">
+<span class="font-medium">whisper</span>
+<span class="text-gray-500">3 calls</span>
+</div>
+<div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+<div class="progress-orange h-full" style="width: 15%"></div>
+</div>
+<p class="text-[10px] text-gray-600">whisper-1</p>
+</div>
+<!-- Search Claude -->
+<div class="space-y-1">
+<div class="flex justify-between text-xs">
+<span class="font-medium">search</span>
+<span class="text-gray-500">19 calls</span>
+</div>
+<div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+<div class="progress-green h-full" style="width: 85%"></div>
+</div>
+<p class="text-[10px] text-gray-600">claude-sonnet-4-20250514</p>
+</div>
+<!-- Extraction Claude -->
+<div class="space-y-1">
+<div class="flex justify-between text-xs">
+<span class="font-medium">extraction</span>
+<span class="text-gray-500">16 calls</span>
+</div>
+<div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+<div class="progress-blue h-full" style="width: 70%"></div>
+</div>
+<p class="text-[10px] text-gray-600">claude-sonnet-4-20250514</p>
+</div>
+<!-- Analysis GPT-5.4 -->
+<div class="space-y-1">
+<div class="flex justify-between text-xs">
+<span class="font-medium">analysis</span>
+<span class="text-gray-500">16 calls</span>
+</div>
+<div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+<div class="progress-purple h-full" style="width: 70%"></div>
+</div>
+<p class="text-[10px] text-gray-600">gpt-5.4</p>
+</div>
+<!-- Add more rows based on image -->
+<div class="space-y-1">
+<div class="flex justify-between text-xs">
+<span class="font-medium">classification</span>
+<span class="text-gray-500">22 calls</span>
+</div>
+<div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+<div class="progress-purple h-full" style="width: 95%"></div>
+</div>
+<p class="text-[10px] text-gray-600">claude-3-haiku-20240307</p>
+</div>
+</div>
+</section>
+</main>
+<!-- END: MainContentArea -->
+<!-- BEGIN: BottomGrid -->
+<section class="grid grid-cols-12 gap-6 mt-6" data-purpose="reminders-and-system">
+<!-- Upcoming Reminders -->
+<div class="col-span-12 lg:col-span-7 glass-card p-6" data-purpose="reminders">
+<div class="flex justify-between items-center mb-6">
+<h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400">Upcoming Reminders</h2>
+<span class="w-6 h-6 flex items-center justify-center bg-orange-500/20 text-orange-500 rounded text-[10px] font-bold">3</span>
+</div>
+<div class="space-y-6">
+<!-- Reminder Item 1 -->
+<div class="flex items-start justify-between border-b border-white/5 pb-4">
+<div class="flex gap-4">
+<div class="mt-1 w-2 h-2 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]"></div>
+<div>
+<p class="text-sm font-medium">photo_AQADChVrg8oAARBKfg.jpg</p>
+<p class="text-[10px] text-gray-500">Срок действия истекает: 2026-06-30 (напоминание за 14 дн.)</p>
+</div>
+</div>
+<div class="text-right">
+<p class="text-sm font-bold text-gray-300">2026-06-16</p>
+<span class="text-[10px] px-2 py-0.5 bg-indigo-500/10 text-indigo-400 rounded">uncategorized</span>
+</div>
+</div>
+<!-- Reminder Item 2 -->
+<div class="flex items-start justify-between border-b border-white/5 pb-4">
+<div class="flex gap-4">
+<div class="mt-1 w-2 h-2 rounded-full bg-gray-600"></div>
+<div>
+<p class="text-sm font-medium">05_Exhibit_B_Passport.pdf</p>
+<p class="text-[10px] text-gray-500">Срок действия истекает: 2028-06-28 (напоминание за 180 дн.)</p>
+</div>
+</div>
+<div class="text-right">
+<p class="text-sm font-bold text-gray-300">2027-12-31</p>
+<span class="text-[10px] px-2 py-0.5 bg-purple-500/10 text-purple-400 rounded">personal</span>
+</div>
+</div>
+<!-- Reminder Item 3 -->
+<div class="flex items-start justify-between">
+<div class="flex gap-4">
+<div class="mt-1 w-2 h-2 rounded-full bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]"></div>
+<div>
+<p class="text-sm font-medium">photo_AQADexdrG8oAARBKfg.jpg</p>
+<p class="text-[10px] text-gray-500">Срок действия истекает: 2028-11-27 (напоминание за 60 дн.)</p>
+</div>
+</div>
+<div class="text-right">
+<p class="text-sm font-bold text-gray-300">2028-09-28</p>
+<span class="text-[10px] px-2 py-0.5 bg-purple-500/10 text-purple-400 rounded">personal</span>
+</div>
+</div>
+</div>
+</div>
+<!-- System Status -->
+<div class="col-span-12 lg:col-span-5 glass-card p-6" data-purpose="system-status">
+<h2 class="text-sm font-semibold uppercase tracking-widest text-gray-400 mb-6">System</h2>
+<div class="space-y-4">
+<div class="flex justify-between items-center text-xs">
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 bg-green-500 rounded-full"></span>
+<span class="text-gray-300">Qdrant</span>
+</div>
+<span class="text-gray-500">file_agent_v2 · 44 pts · 768d</span>
+</div>
+<div class="flex justify-between items-center text-xs">
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 bg-purple-500 rounded-full"></span>
+<span class="text-gray-300">Storage</span>
+</div>
+<span class="text-gray-500">21 files · 4.1 MB</span>
+</div>
+<div class="flex justify-between items-center text-xs">
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 bg-blue-500 rounded-full"></span>
+<span class="text-gray-300">Embedding</span>
+</div>
+<span class="text-gray-500">gemini-embedding-2-preview</span>
+</div>
+</div>
+<div class="mt-8">
+<div class="flex justify-between items-center mb-4">
+<h3 class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Pipeline</h3>
+<a class="text-[10px] text-blue-400 hover:underline" href="#">logs →</a>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between items-center text-[11px]">
+<div class="flex items-center gap-2">
+<span class="w-1.5 h-1.5 bg-green-500/60 rounded-full"></span>
+<span class="text-gray-400">save_meta</span>
+</div>
+<span class="font-mono text-gray-600">4ms</span>
+</div>
+<div class="flex justify-between items-center text-[11px]">
+<div class="flex items-center gap-2">
+<span class="w-1.5 h-1.5 bg-green-500/60 rounded-full"></span>
+<span class="text-gray-400">save_meta</span>
+</div>
+<span class="font-mono text-gray-600">1ms</span>
+</div>
+<div class="flex justify-between items-center text-[11px]">
+<div class="flex items-center gap-2">
+<span class="w-1.5 h-1.5 bg-green-500/60 rounded-full"></span>
+<span class="text-gray-400">save_meta</span>
+</div>
+<span class="font-mono text-gray-600">1ms</span>
+</div>
+<div class="flex justify-between items-center text-[11px]">
+<div class="flex items-center gap-2">
+<span class="w-1.5 h-1.5 bg-green-500/60 rounded-full"></span>
+<span class="text-gray-400">save_meta</span>
+</div>
+<span class="font-mono text-gray-600">1ms</span>
+</div>
+<div class="flex justify-between items-center text-[11px]">
+<div class="flex items-center gap-2">
+<span class="w-1.5 h-1.5 bg-green-500/60 rounded-full"></span>
+<span class="text-gray-400">save_meta</span>
+</div>
+<span class="font-mono text-gray-600">1ms</span>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- END: BottomGrid -->
+</body></html>

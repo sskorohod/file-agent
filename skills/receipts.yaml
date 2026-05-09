@@ -41,12 +41,10 @@ routing_rules:
 naming_template: "{date}_{vendor}_{amount}"
 
 response_template: |
-  🧾 {document_type}
-  🏪 {vendor}
-  💰 {amount}
+  📁 {category} · 📄 {document_type}
+  🎯 {summary}
+  💰 {amount} · {vendor}
   📅 {date}
-  {priority_badge} {priority}
-  📝 {summary}
 
 extraction:
   fields:
@@ -66,10 +64,14 @@ extraction:
       description: "Важность: high (возврат/гарантия/крупная сумма), medium (средняя покупка), low (мелкая покупка). Одно слово."
       required: true
     - name: summary
-      description: "Описание на русском: что куплено, где, на какую сумму, способ оплаты. 2-3 предложения."
+      description: >
+        2-3 коротких предложения на русском про НАЗНАЧЕНИЕ чека
+        ("для чего нужен") + 1-2 ключевых факта (что куплено, сумма).
+        Не пересказывай весь чек — оставайся компактным.
       required: true
   custom_prompt: >
     Извлеки данные из чека. Отвечай на русском.
-    summary — что куплено, где, сумма, способ оплаты.
+    summary — 2-3 коротких предложения про НАЗНАЧЕНИЕ чека (для чего нужен)
+    + 1-2 ключевых факта. Например: "Чек для возврата товара. Куплены AirPods Pro 2 в Apple Store за $268."
     priority — high если крупная покупка (>$100/10000₽) или может понадобиться
     для возврата/гарантии, medium для обычных покупок, low для мелких.
