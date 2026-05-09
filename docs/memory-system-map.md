@@ -4,6 +4,8 @@ A navigable reference for the memory architecture. Each station is a
 discrete decision area we can discuss, refine, and commit independently.
 Use this as a checklist while iterating.
 
+Russian version: [memory-system-map.ru.md](memory-system-map.ru.md).
+
 Companion docs:
 
 - [architecture-audit-2026-05-08.md](architecture-audit-2026-05-08.md) — known problems, by severity
