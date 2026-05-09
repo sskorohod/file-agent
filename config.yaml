@@ -50,10 +50,14 @@ llm:
     \ dates, names, numbers, amounts\r\n- If the document has action items or deadlines\
     \ — mention them\r\n- Respond in the same language as the question\r\n- Do NOT\
     \ mention multiple documents — pick the best one"
-  classification_prompt: "You are a document classification system.\r\n\r\nRules:\r\
-    \n- summary: два коротких предложения на русском языке. Только ключевые факты.\r\
-    \n- tags: 2-4 relevant tags, lowercase\r\n- document_type: specific type (e.g.\
-    \ lab_result, invoice, passport)"
+  classification_prompt: |
+    You are a document classification system.
+
+    Rules:
+    - summary: 1 короткое предложение на русском про НАЗНАЧЕНИЕ ("для чего этот документ нужен пользователю"). Не пересказывай содержание.
+    - expiry_date: если документ явно содержит срок действия / дату окончания — укажи YYYY-MM-DD. Иначе пустая строка.
+    - tags: 2-4 relevant tags, lowercase.
+    - document_type: specific type (e.g. lab_result, invoice, passport).
 qdrant:
   host: localhost
   port: 6333

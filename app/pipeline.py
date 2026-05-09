@@ -97,12 +97,20 @@ class PipelineResult:
                 text = self.skill_response_template.format_map(
                     type('SafeDict', (dict,), {'__missing__': lambda self, k: ''})(fields)
                 )
-                # Remove lines where all dynamic content is empty (e.g. "💰 " or "📅  · Срок: ")
+                # Remove lines where all dynamic content is empty.
+                # Two patterns to drop:
+                #  • lines that have NO word-chars after format (e.g. "💰 ", "📅 · ")
+                #  • lines that end with ":" or "·" (label without value, e.g.
+                #    "📅 Действует до: " when expiry_date is empty)
                 import re
                 cleaned = []
                 for line in text.split('\n'):
-                    stripped = re.sub(r'[^\w]', '', line)
-                    if stripped or not line.strip():  # keep non-empty content + blank separators
+                    rstripped = line.rstrip()
+                    if rstripped and rstripped[-1] in ":·":
+                        # Label was emitted but its value is empty — drop the line.
+                        continue
+                    word_only = re.sub(r'[^\w]', '', line)
+                    if word_only or not line.strip():
                         cleaned.append(line)
                 text = '\n'.join(cleaned)
                 # Collapse multiple blank lines
@@ -115,26 +123,24 @@ class PipelineResult:
             except Exception:
                 pass  # fallback to default format
 
-        # Default format (no skill template)
+        # Default format (no skill template).
+        # Compact 4-line layout: category · type / purpose / expiry.
         parts = []
         if self.classification:
             c = self.classification
-            parts.append(f"📁 {c.category}")
+            head_bits = [f"📁 {c.category}"] if c.category else []
             if c.document_type:
-                parts.append(f"📄 {c.document_type}")
+                head_bits.append(f"📄 {c.document_type}")
+            if head_bits:
+                parts.append(" · ".join(head_bits))
             if c.summary:
-                parts.append(f"\n📝 {c.summary}")
-        # Show extracted fields even without template
-        if self.extracted_fields:
-            ef = self.extracted_fields
-            if ef.get("importance"):
-                parts.append(f"\n⚠️ {ef['importance']}")
-            if ef.get("action_required"):
-                parts.append(f"\n✅ {ef['action_required']}")
-            if ef.get("related_documents"):
-                parts.append(f"\n📎 Связанные: {ef['related_documents']}")
-            if ef.get("storage_advice"):
-                parts.append(f"\n💾 {ef['storage_advice']}")
+                parts.append(f"🎯 {c.summary}")
+            # Pull expiry from classifier first, fall back to skill extraction.
+            expiry = c.expiry_date or ""
+            if not expiry and self.extracted_fields:
+                expiry = (self.extracted_fields.get("expiry_date") or "").strip()
+            if expiry:
+                parts.append(f"📅 Действует до: {expiry}")
         if self.semantic_duplicate_of:
             sd = self.semantic_duplicate_of
             parts.append(

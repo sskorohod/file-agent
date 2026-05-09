@@ -83,9 +83,12 @@ class LLMConfig(BaseModel):
     classification_prompt: str = (
         "You are a document classification system.\n\n"
         "Rules:\n"
-        "- summary: 1 короткое предложение на русском языке. Только ключевой факт.\n"
-        "- tags: 2-4 relevant tags, lowercase\n"
-        "- document_type: specific type (e.g. lab_result, invoice, passport)"
+        "- summary: 1 короткое предложение на русском про НАЗНАЧЕНИЕ "
+        "(\"для чего этот документ нужен пользователю\"). Не пересказывай содержание.\n"
+        "- expiry_date: если документ явно содержит срок действия / дату окончания — "
+        "укажи YYYY-MM-DD. Иначе пустая строка.\n"
+        "- tags: 2-4 relevant tags, lowercase.\n"
+        "- document_type: specific type (e.g. lab_result, invoice, passport)."
     )
 
 
