@@ -19,7 +19,7 @@ Available categories:
 Rules:
 - FIRST determine what this document ACTUALLY is. Read the content carefully.
 - document_type: be PRECISE and SPECIFIC. Examples: passport, driver_license, lab_result, invoice, marketing_guide, business_plan, contract, pay_stub, tax_form, educational_material, manual, presentation, report, letter, certificate
-- summary: 1 короткое предложение на русском, отвечающее на вопрос "ДЛЯ ЧЕГО этот документ нужен пользователю". Не пересказывай содержимое — назови назначение.
+- summary: 2-3 коротких предложения на русском про НАЗНАЧЕНИЕ документа ("для чего он нужен пользователю") + 1-2 ключевых факта (кто/что/когда). Не пересказывай весь документ — оставайся компактным.
 - expiry_date: если в документе явно указан срок действия / дата окончания — укажи в формате YYYY-MM-DD. Если нет — пустая строка.
 - tags: 3-5 relevant tags, lowercase
 - DO NOT force-fit the document. If it's a guide about marketing — say so. If it's a receipt — say so. Be honest about what you see.
@@ -29,7 +29,7 @@ Respond ONLY with valid JSON, no markdown fences:
   "category": "<category_name>",
   "confidence": <0.0-1.0>,
   "tags": ["tag1", "tag2", "tag3"],
-  "summary": "<one short Russian sentence about purpose>",
+  "summary": "<2-3 short Russian sentences: purpose + key facts>",
   "document_type": "<specific_type>",
   "expiry_date": "<YYYY-MM-DD or empty>"
 }}
@@ -55,7 +55,7 @@ class ClassificationResult:
     category: str
     confidence: float
     tags: list[str]
-    summary: str               # 1-sentence purpose, not a long description
+    summary: str               # 2-3 sentences: purpose + key facts
     document_type: str
     expiry_date: str = ""      # YYYY-MM-DD if the document carries one
     skill_name: str | None = None
@@ -152,7 +152,7 @@ class Classifier:
             "Respond ONLY with valid JSON, no markdown fences:\n"
             '{{\n  "category": "<category_name>",\n  "confidence": <0.0-1.0>,\n'
             '  "tags": ["tag1", "tag2"],\n'
-            '  "summary": "<one short Russian sentence about purpose>",\n'
+            '  "summary": "<2-3 short Russian sentences: purpose + key facts>",\n'
             '  "document_type": "<specific_type>",\n'
             '  "expiry_date": "<YYYY-MM-DD or empty>"\n}}'
         )
