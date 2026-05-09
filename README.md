@@ -54,9 +54,11 @@ FileAgent is a personal AI agent that turns your documents into a searchable, in
 
 **Memory layer** lives in a separate `cognee` process (Apache 2.0,
 graph + vector knowledge memory). Files, voice notes, and substantive
-chat messages all land in a unified `personal` dataset; per-project
-`dev_<id>` datasets are isolated by ACL so external coding agents can
-only see what they're scoped to. See `docs/codex-claude-setup.md`.
+chat messages all land in a unified `main_dataset` (the same default
+cognee-mcp uses, so external agents writing via `remember` join the
+same scope). Per-project `dev_<id>` datasets are isolated by ACL so
+external coding agents can only see what they're scoped to. See
+`docs/codex-claude-setup.md`.
 
 ---
 
@@ -118,9 +120,10 @@ only see what they're scoped to. See `docs/codex-claude-setup.md`.
 
 ### 🧠 Memory Layer (Cognee sidecar)
 - **Graph + vector knowledge memory** — every file, voice note, and
-  user chat message gets cognified into a unified `personal` dataset
-- **Codex / Claude Code / ChatGPT integration** — point any MCP client
-  at `http://127.0.0.1:8766/mcp` and use V2 `recall`/`remember`/`forget`
+  user chat message gets cognified into the unified `main_dataset`
+- **Codex / Claude Code / ChatGPT integration** — register the
+  `cognee-mcp` binary as an MCP server (stdio transport recommended for
+  Codex) and use V2 `recall`/`remember`/`forget`
 - **Per-project isolation** — register a dev project via the HTTP API,
   ingest its repo, and the agent only sees that project's data; cross-
   project access is blocked at the cognee permission layer

@@ -76,11 +76,13 @@ Telegram/Web/HTTP/MCP → FAG (port 8000) → Pipeline → Storage + Cognee
 - Step 6: bytes → FileStorage → permanent path + SHA-256
 - Step 7: bytes + text → Gemini Embedding → Qdrant (FAG `file_agent_v2`)
 - Step 8: all metadata → SQLite
-- Step 9.5: extracted_text → cognee `personal` (graph + vector via sidecar)
+- Step 9.5: extracted_text → cognee `main_dataset` (graph + vector via sidecar)
 
 Voice notes and substantive Telegram chat queries reuse the cognee
-ingest path through `app/ingestion/text_ingest.py` — same `personal`
-dataset, no document pipeline needed.
+ingest path through `app/ingestion/text_ingest.py` — same `main_dataset`
+dataset, no document pipeline needed. The default name `main_dataset`
+matches cognee-mcp's hardcoded default, so external agents (Codex,
+Claude Code) writing via `remember` land in the same scope.
 
 ### Embedding (Gemini 2 multimodal)
 - Provider: `gemini-embedding-2-preview` via `google-genai` SDK

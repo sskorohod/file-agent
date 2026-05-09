@@ -84,7 +84,10 @@ logging:
 cognee:
   enabled: true
   base_url: http://127.0.0.1:8765
-  default_dataset: personal
+  # Aligned with cognee-mcp's hardcoded default — Codex / Claude Code
+  # writes via remember land here too, so FAG and external agents share
+  # one personal scope.
+  default_dataset: main_dataset
   request_timeout_s: 60
   cognify_timeout_s: 300
   use_for_search: true

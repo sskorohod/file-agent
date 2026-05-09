@@ -146,7 +146,10 @@ class CogneeConfig(BaseModel):
     enabled: bool = True
     base_url: str = "http://127.0.0.1:8765"
     api_key: str = ""  # bearer token for the sidecar (loaded from COGNEE_API_KEY env)
-    default_dataset: str = "personal"
+    # Aligned with cognee-mcp's hardcoded default so external agents
+    # (Codex, Claude Code) and FAG share one personal scope without
+    # forcing every tool call to specify dataset_name.
+    default_dataset: str = "main_dataset"
     request_timeout_s: float = 60.0
     cognify_timeout_s: float = 300.0
     use_for_search: bool = False  # Phase 4 flips this to True

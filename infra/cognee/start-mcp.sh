@@ -53,6 +53,10 @@ API_URL="${COGNEE_MCP_API_URL:-http://${HTTP_API_HOST:-127.0.0.1}:${HTTP_API_POR
 MCP_HOST="${COGNEE_MCP_HOST:-127.0.0.1}"
 MCP_PORT="${COGNEE_MCP_PORT:-8766}"
 MCP_PATH="${COGNEE_MCP_PATH:-/mcp}"
+# Codex's rmcp client and FastMCP's streamable HTTP transport have a
+# protocol mismatch — tool calls arrive at the server but the response
+# never makes it back. SSE works for both Codex and Claude Code.
+MCP_TRANSPORT="${COGNEE_MCP_TRANSPORT:-sse}"
 
 if [[ -z "${COGNEE_MCP_API_TOKEN:-}" ]]; then
     echo "WARNING: COGNEE_MCP_API_TOKEN is empty. The MCP server will not be able"
@@ -61,27 +65,36 @@ if [[ -z "${COGNEE_MCP_API_TOKEN:-}" ]]; then
 fi
 
 echo "[cognee-mcp-start] proxying to ${API_URL}"
+echo "[cognee-mcp-start] transport: ${MCP_TRANSPORT}"
 echo "[cognee-mcp-start] listening on http://${MCP_HOST}:${MCP_PORT}${MCP_PATH}"
 echo "[cognee-mcp-start] log: ${LOG_FILE}"
 
 cd "${INFRA_DIR}"
-nohup "${VENV_DIR}/bin/cognee-mcp" \
-    --transport http \
-    --host "${MCP_HOST}" \
-    --port "${MCP_PORT}" \
-    --path "${MCP_PATH}" \
-    --api-url "${API_URL}" \
-    --api-token "${COGNEE_MCP_API_TOKEN:-}" \
-    --no-migration \
+# SSE transport ignores --path; URL clients use is /sse.
+START_ARGS=(
+    --transport "${MCP_TRANSPORT}"
+    --host "${MCP_HOST}"
+    --port "${MCP_PORT}"
+    --api-url "${API_URL}"
+    --api-token "${COGNEE_MCP_API_TOKEN:-}"
+    --no-migration
+)
+if [[ "${MCP_TRANSPORT}" == "http" ]]; then
+    START_ARGS+=(--path "${MCP_PATH}")
+fi
+
+nohup "${VENV_DIR}/bin/cognee-mcp" "${START_ARGS[@]}" \
     >>"${LOG_FILE}" 2>&1 &
 
 NEW_PID=$!
 echo "${NEW_PID}" >"${PID_FILE}"
 echo "[cognee-mcp-start] pid ${NEW_PID}"
 
+PROBE_PATH="${MCP_PATH}"
+[[ "${MCP_TRANSPORT}" == "sse" ]] && PROBE_PATH="/sse"
 for _ in $(seq 1 30); do
-    if curl -sS -m 1 "http://${MCP_HOST}:${MCP_PORT}${MCP_PATH}" -H 'accept: text/event-stream' >/dev/null 2>&1; then
-        echo "[cognee-mcp-start] ready at http://${MCP_HOST}:${MCP_PORT}${MCP_PATH}"
+    if curl -sS -m 1 "http://${MCP_HOST}:${MCP_PORT}${PROBE_PATH}" -H 'accept: text/event-stream' --max-time 1 >/dev/null 2>&1; then
+        echo "[cognee-mcp-start] ready at http://${MCP_HOST}:${MCP_PORT}${PROBE_PATH}"
         exit 0
     fi
     sleep 1
