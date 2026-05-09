@@ -50,6 +50,10 @@ class SkillDefinition(BaseModel):
     tags: list[str] = []
     enabled: bool = True
     priority: int = 0  # higher = checked first
+    # When true, every document matched by this skill is treated as
+    # `sensitive` regardless of the LLM's per-document signal —
+    # encrypted on disk, opening requires PIN.
+    encrypt: bool = False
 
     @property
     def effective_display_name(self) -> str:

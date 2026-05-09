@@ -511,7 +511,14 @@ class Pipeline:
         classification: ClassificationResult,
         skill,
     ) -> FileRecord:
-        """Save file to permanent categorized storage."""
+        """Save file to permanent categorized storage.
+
+        For sensitive documents (passport, SSN, medical records, etc.)
+        the bytes are AES-256-GCM-encrypted with the system key on the
+        way to disk. ``summary`` and ``extracted_text`` stay plain so
+        the document remains searchable. Opening the file is gated by
+        a PIN check (Sprint C).
+        """
         # Auto-rename generic scan filenames to meaningful names
         import re
         stem = Path(filename).stem.lower()
@@ -522,14 +529,24 @@ class Pipeline:
             from datetime import datetime
             filename = f"{doc_type}_{datetime.now().strftime('%Y%m%d')}{ext}"
 
-        metadata = {
-            "document_type": classification.document_type,
-            "source": "telegram",
-        }
+        encrypt_with: bytes | None = None
+        if classification.sensitive:
+            try:
+                from app.main import get_state
+                encrypt_with = get_state("system_key")
+            except Exception:
+                encrypt_with = None
+            if encrypt_with is None:
+                logger.warning(
+                    "sensitive document but no system_key in state — "
+                    "writing plaintext (encryption skipped)"
+                )
+
         return await self.file_storage.save_from_bytes(
             data=data,
             original_name=filename,
             category=classification.category,
+            encrypt_with=encrypt_with,
         )
 
     async def _step_embed(
@@ -657,6 +674,7 @@ class Pipeline:
                 "extracted_fields": self._current_extracted_fields or {},
             },
             priority=priority,
+            sensitive=classification.sensitive,
         )
 
     # ── Cognee ingest (Phase 2) ─────────────────────────────────────────

@@ -86,22 +86,55 @@ class FileStorage:
         category: str = "uncategorized",
         naming_template: str | None = None,
         metadata: dict | None = None,
+        encrypt_with: bytes | None = None,
     ) -> FileRecord:
-        """Save bytes to storage, checking for duplicates."""
+        """Save bytes to storage, checking for duplicates.
+
+        ``encrypt_with``: if a 32-byte system key is passed, the bytes
+        are AES-256-GCM-encrypted (FAGB magic) before being written.
+        ``sha256`` and ``size_bytes`` keep referring to the *plaintext*
+        — that way dedup, search relevance, and disk-usage stats stay
+        consistent regardless of whether a file is encrypted.
+        """
         sha = self._hash_bytes(data)
+        plaintext_size = len(data)
         target = self._build_storage_path(category, original_name, naming_template, metadata)
 
-        target.write_bytes(data)
+        on_disk = data
+        if encrypt_with is not None:
+            from app.utils.crypto import encrypt_bytes
+            on_disk = encrypt_bytes(data, encrypt_with)
+
+        target.write_bytes(on_disk)
 
         return FileRecord(
             id=uuid4().hex,
             original_name=original_name,
             stored_path=target,
             sha256=sha,
-            size_bytes=len(data),
+            size_bytes=plaintext_size,
             mime_type=self._detect_mime(original_name),
             category=category,
         )
+
+    async def read_bytes(
+        self, stored_path: Path, decrypt_with: bytes | None = None,
+    ) -> bytes:
+        """Read raw bytes off disk, optionally decrypting with the system key.
+
+        If ``decrypt_with`` is None and the file is FAGB-encrypted, the raw
+        ciphertext bytes are returned (caller must decide what to do).
+        If ``decrypt_with`` is given and the file is FAGB-encrypted, the
+        plaintext is returned. Plain files pass through unchanged.
+        """
+        from app.utils.crypto import decrypt_bytes, is_encrypted_blob
+
+        blob = Path(stored_path).read_bytes()
+        if not is_encrypted_blob(blob):
+            return blob
+        if decrypt_with is None:
+            return blob  # caller asked for raw ciphertext
+        return decrypt_bytes(blob, decrypt_with)
 
     async def save_from_path(
         self,
