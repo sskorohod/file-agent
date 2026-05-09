@@ -71,6 +71,20 @@ async def lifespan(app: FastAPI):
     )
     _state["file_storage"] = file_storage
 
+    # System key — used by pipeline._step_store to encrypt sensitive
+    # documents on disk. Generated on first start, persisted in
+    # data/.system_key (mode 0600). Never leaves the process.
+    from app.utils.crypto import load_or_create_system_key
+    try:
+        _state["system_key"] = load_or_create_system_key()
+        logger.info("System key loaded — sensitive document encryption available")
+    except Exception as exc:
+        logger.warning(
+            f"Could not initialize system key ({exc}); sensitive uploads "
+            "will fall back to plaintext"
+        )
+        _state["system_key"] = None
+
     from app.storage.vectors import VectorStore
     vector_store = VectorStore(settings.qdrant, settings.embedding, google_api_key=settings.google_api_key)
     try:

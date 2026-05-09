@@ -270,6 +270,55 @@
   </script>
 </div>
 
+{# ── Security (PIN for sensitive documents) ── #}
+<div class="card mb-4 border-l-2 border-l-warn">
+  <h3 class="card-header">🔒 Security · Sensitive Documents PIN</h3>
+  <p class="text-xs text-txt-3 mb-4">
+    Documents flagged <code class="font-mono">sensitive</code> (passports, IDs, SSN, contracts, PII)
+    are AES-256-GCM-encrypted on disk. Opening one in Telegram requires this PIN.
+    {% if pin_is_set %}
+      <span class="badge badge-ok">PIN set</span>
+    {% else %}
+      <span class="badge badge-warn">PIN not set</span> — Telegram open of sensitive files is blocked.
+    {% endif %}
+    {% if sensitive_count %}
+      Currently <b>{{ sensitive_count }}</b> sensitive file(s) on disk.
+    {% endif %}
+  </p>
+
+  {% set q = request.query_params.get('pin') %}
+  {% if q == 'ok' %}<div class="mb-3 px-3 py-2 rounded bg-ok-bg border border-ok/20 text-ok text-xs">PIN saved.</div>
+  {% elif q == 'cleared' %}<div class="mb-3 px-3 py-2 rounded bg-warn-bg border border-warn/20 text-warn text-xs">PIN cleared.</div>
+  {% elif q == 'invalid' %}<div class="mb-3 px-3 py-2 rounded bg-err-bg border border-err/20 text-err text-xs">PIN must be 4–6 digits.</div>
+  {% elif q == 'mismatch' %}<div class="mb-3 px-3 py-2 rounded bg-err-bg border border-err/20 text-err text-xs">New PIN and confirmation didn't match.</div>
+  {% elif q == 'wrong_current' %}<div class="mb-3 px-3 py-2 rounded bg-err-bg border border-err/20 text-err text-xs">Current PIN is wrong.</div>
+  {% endif %}
+
+  <form method="POST" action="/settings/pin/set" class="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-2xl">
+    {% if pin_is_set %}
+    <div>
+      <label class="text-xs font-medium text-txt-2 mb-1.5 block">Current PIN</label>
+      <input type="password" name="current_pin" inputmode="numeric" pattern="[0-9]{4,6}" maxlength="6" class="input-sm" autocomplete="off" required>
+    </div>
+    {% endif %}
+    <div>
+      <label class="text-xs font-medium text-txt-2 mb-1.5 block">New PIN (4–6 digits)</label>
+      <input type="password" name="new_pin" inputmode="numeric" pattern="[0-9]{4,6}" maxlength="6" class="input-sm" autocomplete="new-password" required>
+    </div>
+    <div>
+      <label class="text-xs font-medium text-txt-2 mb-1.5 block">Confirm</label>
+      <input type="password" name="confirm_pin" inputmode="numeric" pattern="[0-9]{4,6}" maxlength="6" class="input-sm" autocomplete="new-password" required>
+    </div>
+    <div class="sm:col-span-3 flex items-center gap-3">
+      <button type="submit" class="btn-primary btn-sm">{% if pin_is_set %}Change PIN{% else %}Set PIN{% endif %}</button>
+      {% if pin_is_set %}
+      <button type="submit" formaction="/settings/pin/clear" class="btn-danger btn-sm" onclick="return confirm('Clear PIN? Sensitive files will be unopenable from Telegram until a new PIN is set.')">Clear PIN</button>
+      {% endif %}
+      <span class="text-[10px] text-txt-3">Argon2id-hashed; PIN is authorization, not key material.</span>
+    </div>
+  </form>
+</div>
+
 {# ── Storage ── #}
 <div class="card">
   <h3 class="card-header">Storage & Embedding</h3>

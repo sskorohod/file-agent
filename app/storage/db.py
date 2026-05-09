@@ -9,7 +9,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS files (
     extracted_text TEXT,
     metadata_json TEXT DEFAULT '{}',
     priority TEXT DEFAULT '',
+    sensitive INTEGER DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -192,6 +193,7 @@ class Database:
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(SCHEMA_SQL)
         await self._migrate_v2_to_v3()
+        await self._migrate_v3_to_v4()
         await self._db.execute(
             "INSERT OR IGNORE INTO schema_version(version) VALUES(?)", (SCHEMA_VERSION,)
         )
@@ -214,6 +216,24 @@ class Database:
             except Exception as exc:
                 if "duplicate column name" in str(exc).lower():
                     continue
+                raise
+
+    async def _migrate_v3_to_v4(self):
+        """Sprint B: files gains a ``sensitive`` flag.
+
+        The flag is set during the classification step for documents the
+        LLM (or a matching skill) marks as containing PII / restricted
+        content. When ``sensitive=1``, the bytes of the file on disk are
+        AES-256-GCM-encrypted with the system key (FAGB magic) — but
+        ``summary`` and ``extracted_text`` stay plain so the document is
+        still searchable. Opening the file requires PIN auth (Sprint C).
+        """
+        try:
+            await self._db.execute(
+                "ALTER TABLE files ADD COLUMN sensitive INTEGER DEFAULT 0"
+            )
+        except Exception as exc:
+            if "duplicate column name" not in str(exc).lower():
                 raise
 
     async def close(self):
@@ -244,16 +264,18 @@ class Database:
         extracted_text: str = "",
         metadata: dict | None = None,
         priority: str = "",
+        sensitive: bool = False,
     ) -> str:
         await self.db.execute(
             """INSERT INTO files
                (id, original_name, stored_path, sha256, size_bytes, mime_type,
-                category, tags, summary, source, extracted_text, metadata_json, priority)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                category, tags, summary, source, extracted_text, metadata_json,
+                priority, sensitive)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 id, original_name, str(stored_path), sha256, size_bytes, mime_type,
                 category, json.dumps(tags or []), summary, source, extracted_text,
-                json.dumps(metadata or {}), priority,
+                json.dumps(metadata or {}), priority, 1 if sensitive else 0,
             ),
         )
         await self.db.commit()
@@ -261,7 +283,7 @@ class Database:
 
     _ALLOWED_UPDATE_COLUMNS = frozenset({
         "original_name", "category", "tags", "summary", "extracted_text",
-        "metadata_json", "priority", "source", "updated_at",
+        "metadata_json", "priority", "source", "sensitive", "updated_at",
     })
 
     async def update_file(self, id: str, **fields) -> bool:

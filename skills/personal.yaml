@@ -4,6 +4,9 @@ description: "IDs, passports, certificates, diplomas, personal documents"
 category: personal
 priority: 5
 enabled: true
+# All personal documents (passports, IDs, immigration paperwork) carry
+# PII — force-encrypt them on disk regardless of what the LLM says.
+encrypt: true
 tags:
   - personal
   - identity
