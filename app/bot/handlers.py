@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
@@ -629,13 +630,86 @@ class BotHandlers:
 
     @owner_only
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle text messages — analytics or semantic search."""
+        """Handle text messages — PIN entry, then analytics or semantic search."""
         query = update.message.text.strip()
         if not query:
             return
 
+        # PIN entry path — if a sensitive file is awaiting unlock, treat
+        # the next text message as the PIN attempt.
+        pending = context.user_data.get("pending_open")
+        if pending:
+            await self._handle_pin_attempt(update, context, query, pending)
+            return
+
         # All free text goes to search. Use /analytics for analytics.
         await self._do_search(update, query, context)
+
+    async def _handle_pin_attempt(self, update, context, pin_attempt, pending):
+        """Verify PIN, decrypt + send file on success, rate-limit on failure."""
+        from app.utils.crypto import verify_pin
+
+        # Lockout check.
+        locked_until = context.user_data.get("pin_locked_until", 0)
+        if time.time() < locked_until:
+            wait_min = int((locked_until - time.time()) / 60) + 1
+            await update.message.reply_text(
+                f"🚫 Слишком много неверных попыток. Подожди ~{wait_min} мин."
+            )
+            return
+
+        # Stale prompt (older than 5 min) — drop it.
+        if time.time() - pending.get("asked_at", 0) > 300:
+            context.user_data.pop("pending_open", None)
+            await update.message.reply_text("⏱ Запрос устарел. Нажми кнопку файла ещё раз.")
+            return
+
+        db = self.pipeline.db
+        pin_hash = await db.get_secret("PIN_HASH") if db else None
+        if not pin_hash:
+            context.user_data.pop("pending_open", None)
+            await update.message.reply_text("🔒 PIN не задан. Установи в /settings.")
+            return
+
+        if not verify_pin(pin_attempt, pin_hash):
+            pending["attempts"] = pending.get("attempts", 0) + 1
+            if pending["attempts"] >= 3:
+                # Block for 1 hour.
+                context.user_data["pin_locked_until"] = time.time() + 3600
+                context.user_data.pop("pending_open", None)
+                await update.message.reply_text(
+                    "🚫 3 неверных попытки. Открытие заблокировано на 1 час."
+                )
+            else:
+                left = 3 - pending["attempts"]
+                await update.message.reply_text(
+                    f"❌ Неверный PIN. Осталось попыток: {left}."
+                )
+            # Best-effort: try to delete the user's PIN message so it doesn't linger.
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            return
+
+        # Success — clear state, decrypt and send.
+        file_id = pending["file_id"]
+        context.user_data.pop("pending_open", None)
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        file = await db.get_file(file_id)
+        if not file or not file.get("stored_path") or not Path(file["stored_path"]).exists():
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ Файл больше недоступен.",
+            )
+            return
+        await self._send_file_to_user(
+            context, update.effective_chat.id, file, decrypt=True
+        )
 
     @owner_only
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1001,11 +1075,55 @@ class BotHandlers:
             await query.answer("❌ Файл удалён с диска", show_alert=True)
             return
 
-        await context.bot.send_document(
-            chat_id=query.message.chat_id,
-            document=open(file_path, "rb"),
-            filename=file.get("original_name", file_path.name),
-        )
+        # Sensitive (encrypted) → require PIN before sending.
+        if file.get("sensitive"):
+            db_obj = self.pipeline.db
+            pin_hash = await db_obj.get_secret("PIN_HASH") if db_obj else None
+            if not pin_hash:
+                await query.answer(
+                    "🔒 PIN не задан. Открой /settings → Security и установи PIN.",
+                    show_alert=True,
+                )
+                return
+            # Stash the pending file id; next text message is interpreted as PIN.
+            context.user_data["pending_open"] = {
+                "file_id": file_id,
+                "asked_at": time.time(),
+                "attempts": 0,
+            }
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"🔒 *{file.get('original_name', 'файл')}* — sensitive.\n"
+                    "Введи PIN сообщением, чтобы открыть."
+                ),
+                parse_mode="Markdown",
+            )
+            return
+
+        await self._send_file_to_user(context, query.message.chat_id, file)
+
+    async def _send_file_to_user(self, context, chat_id: int, file: dict, *, decrypt: bool = False):
+        """Send a file (optionally decrypting on-the-fly)."""
+        file_path = Path(file["stored_path"])
+        filename = file.get("original_name", file_path.name)
+
+        if decrypt:
+            try:
+                from app.main import get_state
+                key = get_state("system_key")
+            except Exception:
+                key = None
+            data = await self.pipeline.file_storage.read_bytes(file_path, decrypt_with=key)
+            buf = BytesIO(data)
+            buf.name = filename
+            await context.bot.send_document(chat_id=chat_id, document=buf, filename=filename)
+        else:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=open(file_path, "rb"),
+                filename=filename,
+            )
 
     async def _cascade_delete(self, file_id: str):
         """Delete file from disk + Qdrant + SQLite."""
@@ -1172,14 +1290,28 @@ class BotHandlers:
                 file_ids = result.get("file_ids", {}) if isinstance(result, dict) else {}
 
                 # Build inline keyboard with file buttons
+                # Look up sensitive flag per file so we can prefix with 🔒.
+                sensitive_ids: set[str] = set()
+                if file_ids:
+                    try:
+                        placeholders = ",".join("?" * len(file_ids))
+                        cur = await self.pipeline.db.db.execute(
+                            f"SELECT id FROM files WHERE sensitive=1 AND id IN ({placeholders})",
+                            tuple(file_ids.keys()),
+                        )
+                        sensitive_ids = {row[0] for row in await cur.fetchall()}
+                    except Exception:
+                        sensitive_ids = set()
+
                 keyboard = []
                 for fid, fname in file_ids.items():
                     short_key = fid[:8]
                     self._pending_files[f"fs:{short_key}"] = fid
                     # Show filename, trim to fit Telegram button limit
                     label = fname[:40] if len(fname) <= 40 else fname[:37] + "..."
+                    icon = "🔒" if fid in sensitive_ids else "📎"
                     keyboard.append(
-                        InlineKeyboardButton(f"📎 {label}", callback_data=f"file:s:{short_key}")
+                        InlineKeyboardButton(f"{icon} {label}", callback_data=f"file:s:{short_key}")
                     )
 
                 reply_markup = None

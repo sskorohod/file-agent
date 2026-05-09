@@ -461,11 +461,56 @@ async def settings_page(request: Request):
         "google": mask_key(os.environ.get("GOOGLE_API_KEY", "")),
         "qdrant": mask_key(os.environ.get("QDRANT__API_KEY", settings.qdrant.api_key or "")),
     }
+    pin_is_set = bool(await db.get_secret("PIN_HASH")) if db else False
+    sensitive_count = 0
+    if db:
+        try:
+            cur = await db.db.execute("SELECT COUNT(*) FROM files WHERE sensitive=1")
+            row = await cur.fetchone()
+            sensitive_count = row[0] if row else 0
+        except Exception:
+            sensitive_count = 0
     return templates.TemplateResponse("settings.html", {
         "request": request, "page": "settings", "settings": settings,
         "qdrant_health": qdrant_health, "api_keys": api_keys, "new_key": None,
         "provider_keys": provider_keys,
+        "pin_is_set": pin_is_set,
+        "sensitive_count": sensitive_count,
     })
+
+
+@router.post("/settings/pin/set")
+async def set_pin(request: Request):
+    """Set or change the PIN that gates opening sensitive (encrypted) files."""
+    from app.utils.crypto import hash_pin, verify_pin
+    db = _get("db")
+    form = await request.form()
+    new_pin = (form.get("new_pin") or "").strip()
+    confirm_pin = (form.get("confirm_pin") or "").strip()
+    current_pin = (form.get("current_pin") or "").strip()
+
+    if not new_pin.isdigit() or not (4 <= len(new_pin) <= 6):
+        return RedirectResponse("/settings?pin=invalid", status_code=303)
+    if new_pin != confirm_pin:
+        return RedirectResponse("/settings?pin=mismatch", status_code=303)
+
+    existing = await db.get_secret("PIN_HASH")
+    if existing:
+        # Changing existing PIN — require current.
+        if not verify_pin(current_pin, existing):
+            return RedirectResponse("/settings?pin=wrong_current", status_code=303)
+
+    await db.set_secret("PIN_HASH", hash_pin(new_pin))
+    return RedirectResponse("/settings?pin=ok", status_code=303)
+
+
+@router.post("/settings/pin/clear")
+async def clear_pin(request: Request):
+    """Remove the PIN — sensitive files become unopenable from Telegram
+    until a new PIN is set. The web login is the recovery path."""
+    db = _get("db")
+    await db.delete_secret("PIN_HASH")
+    return RedirectResponse("/settings?pin=cleared", status_code=303)
 
 
 @router.post("/settings/keys/save")

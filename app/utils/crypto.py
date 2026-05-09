@@ -23,6 +23,8 @@ import os
 import secrets
 from pathlib import Path
 
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, InvalidHashError
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -131,3 +133,29 @@ def load_or_create_system_key(path: str | Path = DEFAULT_SYSTEM_KEY_PATH) -> byt
     p.write_bytes(key)
     p.chmod(0o600)
     return key
+
+
+# ── PIN hashing (Argon2id) ──────────────────────────────────────────────────
+
+# PIN is *authorization*, not key material — it gates the use of the
+# in-memory system key when opening a sensitive document. We hash with
+# Argon2id (default profile) and store the encoded string as a secret.
+# Numeric PINs (4–6 digits) are weak; the hash slows brute-force only
+# on this single device. The threat model is "casual access while the
+# laptop is unlocked," not "full disk seizure" — see audit doc.
+_PIN_HASHER = PasswordHasher()
+
+
+def hash_pin(pin: str) -> str:
+    """Argon2id-hash a PIN and return the encoded hash string."""
+    return _PIN_HASHER.hash(pin)
+
+
+def verify_pin(pin: str, encoded_hash: str) -> bool:
+    """Constant-time PIN check. Returns False on any mismatch/format error."""
+    if not encoded_hash:
+        return False
+    try:
+        return _PIN_HASHER.verify(encoded_hash, pin)
+    except (VerifyMismatchError, InvalidHashError, Exception):
+        return False
