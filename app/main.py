@@ -217,6 +217,19 @@ async def lifespan(app: FastAPI):
     outbox_task = asyncio.create_task(
         _outbox_sweeper_loop(db, vector_store, settings)
     )
+    weekly_digest_task = None
+    on_this_day_task = None
+    anomaly_task = None
+    if tg_app:
+        weekly_digest_task = asyncio.create_task(
+            _weekly_digest_loop(db, tg_app)
+        )
+        on_this_day_task = asyncio.create_task(
+            _on_this_day_loop(db, tg_app)
+        )
+        anomaly_task = asyncio.create_task(
+            _anomaly_nudge_loop(db, tg_app, interval=1800)
+        )
 
     # Initialize MCP streamable HTTP session manager
     from app.mcp_server import mcp as _mcp_server
@@ -235,7 +248,8 @@ async def lifespan(app: FastAPI):
             await _state["_mcp_cm"].__aexit__(None, None, None)
         except Exception:
             pass
-    for t in [cleanup_task, reminder_task, auto_delete_task, outbox_task]:
+    for t in [cleanup_task, reminder_task, auto_delete_task, outbox_task,
+              weekly_digest_task, on_this_day_task, anomaly_task]:
         if t is None:
             continue
         t.cancel()
@@ -664,6 +678,100 @@ async def _daily_advice_loop(insights_engine, tg_app):
         except Exception as e:
             logger.error(f"Daily advice error: {e}")
             await asyncio.sleep(3600)  # retry in 1 hour
+
+
+async def _weekly_digest_loop(db, tg_app):
+    """Sprint L — Sunday 20:00 weekly summary."""
+    from datetime import datetime, timedelta
+    from app.bot.handlers import get_owner_chat_id
+    from app.services.digests import build_weekly_digest
+
+    while True:
+        try:
+            now = datetime.now()
+            # Next Sunday 20:00
+            days_until_sun = (6 - now.weekday()) % 7
+            target = now.replace(hour=20, minute=0, second=0, microsecond=0)
+            if days_until_sun == 0 and target <= now:
+                days_until_sun = 7
+            target = target + timedelta(days=days_until_sun)
+            wait = max(60, (target - now).total_seconds())
+            logger.info(
+                f"Weekly digest: next at {target.strftime('%a %H:%M')}, "
+                f"in {wait/3600:.1f}h"
+            )
+            await asyncio.sleep(wait)
+            chat_id = get_owner_chat_id()
+            if not chat_id:
+                continue
+            text = await build_weekly_digest(db)
+            if text:
+                await tg_app.bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode="HTML",
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"weekly_digest loop error: {e}")
+            await asyncio.sleep(3600)
+
+
+async def _on_this_day_loop(db, tg_app):
+    """Sprint L — daily 09:00 trip down memory lane."""
+    from datetime import datetime, timedelta
+    from app.bot.handlers import get_owner_chat_id
+    from app.services.digests import build_on_this_day
+
+    while True:
+        try:
+            now = datetime.now()
+            target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target = target + timedelta(days=1)
+            wait = max(60, (target - now).total_seconds())
+            logger.info(f"On-this-day: next at {target.strftime('%H:%M')} "
+                        f"in {wait/3600:.1f}h")
+            await asyncio.sleep(wait)
+            chat_id = get_owner_chat_id()
+            if not chat_id:
+                continue
+            text = await build_on_this_day(db)
+            if text:
+                await tg_app.bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode="HTML",
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"on_this_day loop error: {e}")
+            await asyncio.sleep(3600)
+
+
+async def _anomaly_nudge_loop(db, tg_app, interval: int = 1800):
+    """Sprint L — every 30 min, send the latest unseen anomaly_alert."""
+    from app.bot.handlers import get_owner_chat_id
+    from app.services.digests import (fetch_pending_anomaly, mark_anomaly_sent,
+                                      format_anomaly)
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            chat_id = get_owner_chat_id()
+            if not chat_id:
+                continue
+            alert = await fetch_pending_anomaly(db)
+            if not alert:
+                continue
+            await tg_app.bot.send_message(
+                chat_id=chat_id, text=format_anomaly(alert),
+                parse_mode="HTML",
+            )
+            await mark_anomaly_sent(db, alert)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"anomaly_nudge loop error: {e}")
+            await asyncio.sleep(3600)
 
 
 app = FastAPI(title="AI File Intelligence Agent", version="0.1.0", lifespan=lifespan)
