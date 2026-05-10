@@ -88,52 +88,79 @@ def main() -> int:
         return 3
     print(f"✓ unwrapped MDK ({len(mdk)} bytes)")
 
-    # --- decrypt notes ---
+    # --- decrypt notes + sibling tables ---
     con = sqlite3.connect(args.db, timeout=30)
     con.row_factory = sqlite3.Row
-    rows = con.execute(
-        "SELECT id, title, content, raw_content, tags, structured_json "
-        "FROM notes ORDER BY id"
-    ).fetchall()
-    print(f"scanning {len(rows)} notes")
+
+    # Tables/columns that may carry FAGE-encrypted plaintext.
+    targets = [
+        ("notes", "id", ["title", "content", "raw_content",
+                         "tags", "structured_json"]),
+        ("note_enrichments", "id", ["summary", "raw_llm_json", "tags"]),
+        ("note_items", "id", ["body", "title"]),
+        ("note_facts", "id", ["fact"]),
+        ("note_entities", "id", ["name", "details"]),
+        ("note_data", "id", ["value", "unit", "context"]),
+    ]
 
     fixed = 0
     skipped = 0
     failed = 0
-    for r in rows:
-        nid = r["id"]
-        updates: dict[str, str] = {}
-        any_enc = False
-        for col in ("title", "content", "raw_content", "tags", "structured_json"):
-            val = r[col] or ""
-            if not _looks_encrypted(val):
+    for tbl, pk, cols in targets:
+        # Skip tables/columns that don't exist in this DB.
+        try:
+            existing_cols = {
+                r["name"] for r in
+                con.execute(f"PRAGMA table_info({tbl})").fetchall()
+            }
+        except Exception:
+            continue
+        cols = [c for c in cols if c in existing_cols]
+        if not cols:
+            continue
+        col_list = ", ".join(cols)
+        rows = con.execute(
+            f"SELECT {pk}, {col_list} FROM {tbl}"
+        ).fetchall()
+        print(f"\n[{tbl}] scanning {len(rows)} rows ({col_list})")
+        sub_fixed = 0
+        for r in rows:
+            rid = r[pk]
+            updates: dict[str, str] = {}
+            any_enc = False
+            for c in cols:
+                val = r[c] or ""
+                if not _looks_encrypted(val):
+                    continue
+                any_enc = True
+                try:
+                    plain = decrypt_text(val, mdk)
+                except Exception as exc:
+                    print(f"  ✗ {tbl}.{rid}.{c}: {exc}")
+                    failed += 1
+                    plain = ""
+                updates[c] = plain
+            if not any_enc:
+                skipped += 1
                 continue
-            any_enc = True
-            try:
-                plain = decrypt_text(val, mdk)
-            except Exception as exc:
-                print(f"  ✗ note {nid}.{col}: {exc}")
-                failed += 1
-                plain = ""  # leave column empty rather than ciphertext mush
-            updates[col] = plain
-        if not any_enc:
-            skipped += 1
-            continue
-        if args.dry_run:
-            content_preview = (updates.get("content") or "")[:60]
-            print(f"  [DRY] note {nid}: {content_preview!r}")
+            if args.dry_run:
+                preview = (next(iter(updates.values()), "") or "")[:60]
+                print(f"  [DRY] {tbl}.{rid}: {preview!r}")
+                sub_fixed += 1
+                fixed += 1
+                continue
+            cols_sql = ", ".join(f"{c}=?" for c in updates)
+            con.execute(
+                f"UPDATE {tbl} SET {cols_sql} WHERE {pk}=?",
+                (*updates.values(), rid),
+            )
+            sub_fixed += 1
             fixed += 1
-            continue
-
-        cols_sql = ", ".join(f"{c}=?" for c in updates)
-        con.execute(
-            f"UPDATE notes SET {cols_sql} WHERE id=?",
-            (*updates.values(), nid),
-        )
-        fixed += 1
-        if fixed % 20 == 0:
+            if sub_fixed % 50 == 0:
+                con.commit()
+        if not args.dry_run:
             con.commit()
-            print(f"  ... {fixed} processed")
+        print(f"  → {sub_fixed} updated in {tbl}")
 
     if not args.dry_run:
         # Rebuild notes_fts so the new plaintext is searchable.
