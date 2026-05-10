@@ -878,13 +878,22 @@ class BotHandlers:
         tags = note_data.get("tags", [])
         action_items = note_data.get("action_items", [])
 
-        # 2. Find linked file from chat history
+        # 2. Find linked file from chat history.
+        #
+        # We only link when the USER explicitly attached a file in the recent
+        # conversation. Previously this looked at any chat_history row with a
+        # file_id, which included assistant search responses — so a voice
+        # note about dinner ended up "📎 social_security_card.jpg" just
+        # because the previous unrelated search had surfaced that file.
+        # Today only user-role messages with file_id should count, and the
+        # bot doesn't actually populate user-role file_id yet, so this is
+        # effectively a no-op until upload events get wired into chat_history.
         linked_file_id = ""
         linked_file_name = ""
         try:
             history = await db.get_chat_history(chat_id, limit=5)
             for h in reversed(history):
-                if h.get("file_id"):
+                if h.get("role") == "user" and h.get("file_id"):
                     linked_file_id = h["file_id"]
                     f = await db.get_file(linked_file_id)
                     if f:
