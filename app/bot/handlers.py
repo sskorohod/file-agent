@@ -76,20 +76,20 @@ class BotHandlers:
         self._pending_files: dict[str, str] = {}  # short_key → full file_id
 
     COMMANDS = [
-        BotCommand("dashboard", "📊 Дашборд (mood / energy / sentiment)"),
-        BotCommand("today", "☀️ Что было сегодня"),
-        BotCommand("notes", "📝 Заметки (по дням, поиск)"),
-        BotCommand("files", "📎 Документы"),
-        BotCommand("search", "🔍 Семантический поиск"),
-        BotCommand("recent", "🕒 Последние файлы"),
-        BotCommand("scan", "🖨 Многостраничное сканирование"),
-        BotCommand("done", "✅ Завершить и проверить"),
-        BotCommand("cancel", "↩ Отменить сканирование"),
-        BotCommand("stats", "📈 Статистика базы"),
-        BotCommand("analytics", "🧮 LLM-аналитика"),
-        BotCommand("insights", "💡 AI обзор"),
-        BotCommand("skills", "🧩 Скиллы"),
-        BotCommand("help", "❓ Список команд"),
+        BotCommand("dashboard", "Дашборд (mood / energy / sentiment)"),
+        BotCommand("today", "Что было сегодня"),
+        BotCommand("notes", "Заметки (по дням, поиск)"),
+        BotCommand("files", "Документы"),
+        BotCommand("search", "Семантический поиск"),
+        BotCommand("recent", "Последние файлы"),
+        BotCommand("scan", "Многостраничное сканирование"),
+        BotCommand("done", "Завершить и проверить"),
+        BotCommand("cancel", "Отменить сканирование"),
+        BotCommand("stats", "Статистика базы"),
+        BotCommand("analytics", "LLM-аналитика"),
+        BotCommand("insights", "AI обзор"),
+        BotCommand("skills", "Скиллы"),
+        BotCommand("help", "Список команд"),
         BotCommand("start", "Начать работу"),
     ]
 
@@ -565,12 +565,8 @@ class BotHandlers:
         )
         rows = [dict(r) for r in await cur.fetchall()]
 
-        SRC_EMOJI = {
-            "voice": "🎤", "text": "✍️", "telegram": "💬",
-            "checkin": "📊", "reminder": "🔔", "web": "🌐", "file": "📎",
-        }
         lines = [
-            f"📝 <b>Все заметки</b> — {total} шт. "
+            f"<b>Все заметки</b> — {total} шт. "
             f"(страница {page+1}/{max_page+1})\n",
         ]
         keyboard = []
@@ -579,13 +575,11 @@ class BotHandlers:
             date = ts[:10]
             time = ts[11:16]
             title = (n.get("title") or "").strip() or "(без заголовка)"
-            src = SRC_EMOJI.get(n.get("source", ""), "•")
             short = f"n{n['id']}"
             self._pending_files[f"note:{short}"] = n["id"]
-            line_label = f"{date} · {title[:60]}"
-            lines.append(f"{src} <code>{date}</code> {time} — {title[:90]}")
+            lines.append(f"<code>{date}</code> {time} — {title[:90]}")
             keyboard.append([InlineKeyboardButton(
-                f"{src} {line_label[:50]}",
+                f"{date} · {title[:50]}",
                 callback_data=f"note:o:{short}",
             )])
         # Pagination row
@@ -940,11 +934,9 @@ class BotHandlers:
             )
             return
 
-        # Build menu: title or first line, time, source emoji.
-        SOURCE_EMOJI = {"voice": "🎤", "text": "✍️", "telegram": "💬",
-                        "checkin": "📊", "reminder": "🔔", "web": "🌐",
-                        "file": "📎"}
-        lines = [f"🗓 <b>Заметки за {label}</b> ({date_iso}) — {len(rows)}\n"]
+        # Build menu: title or first line, time. No emoji per user request —
+        # plain ASCII reads cleaner and avoids font-fallback issues.
+        lines = [f"<b>Заметки за {label}</b> ({date_iso}) — {len(rows)}\n"]
         keyboard = []
         for n in rows:
             note_id = n["id"]
@@ -953,14 +945,12 @@ class BotHandlers:
             preview = title or content.split("\n", 1)[0]
             preview = preview[:80].rstrip()
             time_part = (n.get("created_at") or "")[11:16]
-            source = SOURCE_EMOJI.get(n.get("source", ""), "•")
-            lines.append(f"{source} <b>{time_part}</b> — {preview}")
-            # button for full transcript
+            lines.append(f"<b>{time_part}</b> — {preview}")
             short = f"n{note_id}"
             self._pending_files[f"note:{short}"] = note_id
-            btn_label = f"{source} {time_part} {preview[:30]}"
             keyboard.append(InlineKeyboardButton(
-                btn_label[:60], callback_data=f"note:o:{short}",
+                f"{time_part} {preview[:38]}",
+                callback_data=f"note:o:{short}",
             ))
 
         markup = InlineKeyboardMarkup([[b] for b in keyboard])
