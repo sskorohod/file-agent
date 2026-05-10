@@ -760,7 +760,26 @@ class BotHandlers:
                 await ack.edit_text("🎤 Не удалось распознать речь.")
                 return
 
-            # Show text + 2 buttons: user decides
+            # Search-intent shortcut: when the user clearly said "найди X" /
+            # "поищи X" / "find X" / "where is X", skip the "Search vs Note"
+            # menu and go straight to search. Buttons only appear for
+            # ambiguous transcripts (e.g. dictating an actual note).
+            t_low = text.strip().lower()
+            search_triggers = (
+                "найди", "найти", "поищи", "поиск", "ищи", "найдешь",
+                "найдёшь", "покажи", "где мой", "где мои", "где моя",
+                "find ", "search ", "show me", "where is", "where are",
+            )
+            search_intent = (
+                t_low.startswith(search_triggers)
+                or t_low.startswith("?") or t_low.endswith("?")
+            )
+            if search_intent:
+                await ack.edit_text(f"🎤 «{text}»\n🔍 Ищу…")
+                await self._do_search(update, text, context)
+                return
+
+            # Ambiguous → ask user which path: search or save as note.
             import secrets
             voice_key = secrets.token_hex(4)
             self._pending_files[f"vc:{voice_key}"] = text

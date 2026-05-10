@@ -37,7 +37,7 @@ User's question: {query}
 
 Give a complete, detailed answer with all specific data from the documents."""
 
-SEARCH_USER_COMPACT = """Documents from the archive:
+SEARCH_USER_COMPACT = """Documents from the archive (each delimited by [Document: ...]):
 
 {context}
 
@@ -45,31 +45,51 @@ SEARCH_USER_COMPACT = """Documents from the archive:
 
 User's question: {query}
 
-Answer in the same language as the question. Be concise — Telegram chat,
-not an essay. If MULTIPLE documents in the context are genuinely relevant
-to the question (e.g. user has two passports, several pay-stubs), describe
-EACH of them as a separate block. Skip documents that aren't a real match.
+Answer in the same language as the question. Telegram chat — concise,
+not an essay.
 
-FORMAT (Telegram HTML, no Markdown):
+═══ HOW TO STRUCTURE THE ANSWER ═══
 
-📄 <b>Document type — owner / date</b>
-• Key fact 1
-• Key fact 2 (date / number / amount / expiry)
-• Action item if any (with deadline)
+▸ COUNT how many documents in the context above are *genuinely* relevant
+  to the question. Skip documents that aren't a real match (a passport
+  query should not answer about a birth certificate even if it's in the
+  context).
 
-———
+▸ If exactly **ONE** document is relevant:
+   give the full detailed answer about that document, formatted as a
+   single block:
 
-📄 <b>Second document — owner / date</b>
-• ...
+      📄 <b>Document type — owner / date</b>
+      • Key fact 1
+      • Key fact 2 (number / amount / expiry)
+      • Action / deadline if any
 
-RULES:
-- Answer ONLY what was asked, no preamble like "I found ...", "В архиве ..."
-- One block per actually-relevant document, separated by "———"
-- Bullet "•" for facts; <b>bold</b> for the header line only
-- 3-5 bullets per document
-- Max 1500 chars total — if more docs are relevant than fit, list the
-  remainder as a one-line tail "ещё: <names>"
-- HTML only: <b>, <i>, <code> — no Markdown stars or hashes"""
+▸ If **TWO OR MORE** documents are relevant:
+   list ALL of them as a *brief* disambiguation menu, NOT full details
+   for each. End with a question asking which one the user wants. Do
+   NOT give the full content for any of them — the user will pick.
+
+      🔎 Найдено документов: N
+
+      📄 <b>Document type — owner</b>
+      <i>brief 1-line distinguishing detail (date / number / who)</i>
+
+      📄 <b>Second document type — owner</b>
+      <i>brief 1-line distinguishing detail</i>
+
+      ❓ Какой тебя интересует? Нажми кнопку с нужным файлом
+      или уточни запрос (например: «паспорт Инны», «pay-stub за май»).
+
+═══ HARD RULES ═══
+
+- ALWAYS process every [Document: ...] block in the context. Don't
+  skip a document just because the first looks like a match — there
+  may be a second relevant one further down.
+- Answer ONLY what was asked. No preamble like "I found …", "В архиве …".
+- HTML only: <b>, <i>, <code> — no Markdown stars or hashes.
+- Bullet "•" for the single-doc case; just <i>italic</i> distinguishing
+  line for the multi-doc menu.
+- Max 1500 chars total."""
 
 # Smart search thresholds
 MIN_SCORE = 0.50        # Discard chunks below this
