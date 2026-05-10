@@ -76,19 +76,21 @@ class BotHandlers:
         self._pending_files: dict[str, str] = {}  # short_key → full file_id
 
     COMMANDS = [
+        BotCommand("dashboard", "📊 Дашборд (mood / energy / sentiment)"),
+        BotCommand("today", "☀️ Что было сегодня"),
+        BotCommand("notes", "📝 Заметки (по дням, поиск)"),
+        BotCommand("files", "📎 Документы"),
+        BotCommand("search", "🔍 Семантический поиск"),
+        BotCommand("recent", "🕒 Последние файлы"),
+        BotCommand("scan", "🖨 Многостраничное сканирование"),
+        BotCommand("done", "✅ Завершить и проверить"),
+        BotCommand("cancel", "↩ Отменить сканирование"),
+        BotCommand("stats", "📈 Статистика базы"),
+        BotCommand("analytics", "🧮 LLM-аналитика"),
+        BotCommand("insights", "💡 AI обзор"),
+        BotCommand("skills", "🧩 Скиллы"),
+        BotCommand("help", "❓ Список команд"),
         BotCommand("start", "Начать работу"),
-        BotCommand("help", "Список команд"),
-        BotCommand("search", "Семантический поиск"),
-        BotCommand("files", "Список файлов"),
-        BotCommand("scan", "Многостраничное сканирование"),
-        BotCommand("done", "Завершить и проверить"),
-        BotCommand("cancel", "Отменить сканирование"),
-        BotCommand("recent", "Последние файлы"),
-        BotCommand("stats", "Статистика базы"),
-        BotCommand("skills", "Список скиллов"),
-        BotCommand("analytics", "Аналитика документов"),
-        BotCommand("insights", "AI обзор и рекомендации"),
-        BotCommand("notes", "Заметки"),
     ]
 
     def register(self, app: Application):
@@ -106,6 +108,8 @@ class BotHandlers:
         app.add_handler(CommandHandler("skills", self.cmd_skills))
         app.add_handler(CommandHandler("insights", self.cmd_insights))
         app.add_handler(CommandHandler("notes", self.cmd_notes))
+        app.add_handler(CommandHandler("dashboard", self.cmd_dashboard))
+        app.add_handler(CommandHandler("today", self.cmd_today))
 
         # File handlers (documents, photos)
         app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
@@ -127,6 +131,7 @@ class BotHandlers:
         app.add_handler(CallbackQueryHandler(self.handle_note_delete, pattern="^note:dc:"))
         app.add_handler(CallbackQueryHandler(self.handle_note_delete_cancel, pattern="^note:dx:"))
         app.add_handler(CallbackQueryHandler(self.handle_notes_page, pattern="^np:"))
+        app.add_handler(CallbackQueryHandler(self.handle_dashboard_period, pattern="^dash:"))
 
         # Text messages → search / Q&A
         app.add_handler(MessageHandler(
@@ -448,6 +453,86 @@ class BotHandlers:
     @owner_only
     async def cmd_notes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self._render_notes_page(update, context, page=0)
+
+    # ── Analytics dashboards ───────────────────────────────────────────
+
+    @owner_only
+    async def cmd_dashboard(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ):
+        """`/dashboard` — multi-panel PNG (mood/energy/sentiment/categories)."""
+        from app.analytics.dashboard import build_dashboard_png
+        # Default = 30 days. Period buttons let the user reshape.
+        await update.effective_chat.send_action("upload_photo")
+        try:
+            png = await build_dashboard_png(self.pipeline.db, days=30)
+        except Exception as e:
+            logger.exception("dashboard build failed")
+            await update.message.reply_text(f"⚠ не получилось: {e}")
+            return
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("7 дней", callback_data="dash:7"),
+            InlineKeyboardButton("30 дней", callback_data="dash:30"),
+            InlineKeyboardButton("90 дней", callback_data="dash:90"),
+            InlineKeyboardButton("Год", callback_data="dash:365"),
+        ]])
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=png,
+            caption="📊 Дашборд за 30 дней",
+            reply_markup=markup,
+        )
+
+    @owner_only
+    async def handle_dashboard_period(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ):
+        """Reshape dashboard for the chosen period (callback `dash:<days>`)."""
+        from app.analytics.dashboard import build_dashboard_png
+        query = update.callback_query
+        await query.answer("Считаю…")
+        try:
+            days = int(query.data.split(":", 1)[1])
+        except Exception:
+            days = 30
+        days = max(1, min(days, 730))
+        try:
+            png = await build_dashboard_png(self.pipeline.db, days=days)
+        except Exception as e:
+            logger.exception("dashboard rebuild failed")
+            await query.message.reply_text(f"⚠ {e}")
+            return
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("7 дней", callback_data="dash:7"),
+            InlineKeyboardButton("30 дней", callback_data="dash:30"),
+            InlineKeyboardButton("90 дней", callback_data="dash:90"),
+            InlineKeyboardButton("Год", callback_data="dash:365"),
+        ]])
+        await context.bot.send_photo(
+            chat_id=query.message.chat_id,
+            photo=png,
+            caption=f"📊 Дашборд за {days} дн",
+            reply_markup=markup,
+        )
+
+    @owner_only
+    async def cmd_today(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ):
+        """`/today` — single-panel timeline of today's notes."""
+        from app.analytics.dashboard import build_today_png
+        await update.effective_chat.send_action("upload_photo")
+        try:
+            png = await build_today_png(self.pipeline.db)
+        except Exception as e:
+            logger.exception("today build failed")
+            await update.message.reply_text(f"⚠ {e}")
+            return
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=png,
+            caption="☀️ Сегодняшний день",
+        )
 
     async def _render_notes_page(self, update_or_query, context, page: int = 0):
         """Render a page of notes — `<date> · <title>` per row, button per
