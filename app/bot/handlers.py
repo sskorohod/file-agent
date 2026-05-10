@@ -121,6 +121,7 @@ class BotHandlers:
         app.add_handler(CallbackQueryHandler(self.handle_reminder_action, pattern="^rem:"))
         app.add_handler(CallbackQueryHandler(self.handle_dedup_choice, pattern="^dedup:"))
         app.add_handler(CallbackQueryHandler(self.handle_file_send, pattern="^file:"))
+        app.add_handler(CallbackQueryHandler(self.handle_note_open, pattern="^note:o:"))
 
         # Text messages → search / Q&A
         app.add_handler(MessageHandler(
@@ -642,8 +643,147 @@ class BotHandlers:
             await self._handle_pin_attempt(update, context, query, pending)
             return
 
+        # Date-scoped notes lookup BEFORE search ("заметки за сегодня",
+        # "заметки 5 мая", "что я наговорил вчера" etc.).
+        date_hit = self._parse_notes_date_query(query)
+        if date_hit:
+            await self._show_notes_for_day(update, context, *date_hit)
+            return
+
         # All free text goes to search. Use /analytics for analytics.
         await self._do_search(update, query, context)
+
+    @staticmethod
+    def _parse_notes_date_query(text: str) -> tuple[str, str] | None:
+        """If the message is a "show me notes for <day>" query, return
+        (date_iso, human_label). Otherwise return None.
+
+        Recognised phrasings (Russian + English):
+          - сегодня / today
+          - вчера / yesterday
+          - позавчера / day before yesterday
+          - <number> <month_name> [<year>]
+          - YYYY-MM-DD
+        Plus a "notes-intent" keyword to avoid false positives on regular
+        search queries that happen to mention a date.
+        """
+        from datetime import date, timedelta
+        import re as _re
+
+        t = text.strip().lower()
+        intent = any(kw in t for kw in (
+            "заметк", "заметки", "что я наговор", "что я записал",
+            "что говорил", "transcript", "notes", "note from",
+        ))
+        if not intent:
+            return None
+
+        today = date.today()
+        if any(w in t for w in ("сегодня", "today")):
+            d = today
+            label = "сегодня"
+        elif any(w in t for w in ("вчера", "yesterday")):
+            d = today - timedelta(days=1)
+            label = "вчера"
+        elif "позавчера" in t:
+            d = today - timedelta(days=2)
+            label = "позавчера"
+        else:
+            # YYYY-MM-DD literal
+            m = _re.search(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", t)
+            if m:
+                y, mo, dy = (int(x) for x in m.groups())
+                try:
+                    d = date(y, mo, dy)
+                except ValueError:
+                    return None
+                label = d.isoformat()
+            else:
+                # "5 мая" / "5 may" / "May 5"
+                months = {
+                    "янв": 1, "фев": 2, "мар": 3, "апр": 4, "мая": 5, "май": 5,
+                    "июн": 6, "июл": 7, "авг": 8, "сен": 9, "окт": 10,
+                    "ноя": 11, "дек": 12,
+                    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5,
+                    "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10,
+                    "nov": 11, "dec": 12,
+                }
+                mo = None
+                for k, v in months.items():
+                    if k in t:
+                        mo = v
+                        break
+                if not mo:
+                    return None
+                m2 = _re.search(r"\b(\d{1,2})\b", t)
+                if not m2:
+                    return None
+                dy = int(m2.group(1))
+                # Default to current year; if that future date hasn't
+                # happened yet, roll back a year.
+                y = today.year
+                try:
+                    d = date(y, mo, dy)
+                except ValueError:
+                    return None
+                if d > today:
+                    d = date(y - 1, mo, dy)
+                label = d.strftime("%d %B").lower()
+        return (d.isoformat(), label)
+
+    async def _show_notes_for_day(self, update, context, date_iso: str, label: str):
+        """List notes for a specific calendar day. Brief summary per row;
+        each gets a button so the user can pull the full transcript."""
+        db = self.pipeline.db
+        try:
+            cur = await db.db.execute(
+                "SELECT id, title, content, source, created_at "
+                "FROM notes WHERE date(created_at) = ? "
+                "ORDER BY created_at",
+                (date_iso,),
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Ошибка: {e}")
+            return
+
+        if not rows:
+            await update.message.reply_text(
+                f"🗓 Заметок за {label} ({date_iso}) нет."
+            )
+            return
+
+        # Build menu: title or first line, time, source emoji.
+        SOURCE_EMOJI = {"voice": "🎤", "text": "✍️", "telegram": "💬",
+                        "checkin": "📊", "reminder": "🔔", "web": "🌐",
+                        "file": "📎"}
+        lines = [f"🗓 <b>Заметки за {label}</b> ({date_iso}) — {len(rows)}\n"]
+        keyboard = []
+        for n in rows:
+            note_id = n["id"]
+            title = (n.get("title") or "").strip()
+            content = (n.get("content") or "").strip()
+            preview = title or content.split("\n", 1)[0]
+            preview = preview[:80].rstrip()
+            time_part = (n.get("created_at") or "")[11:16]
+            source = SOURCE_EMOJI.get(n.get("source", ""), "•")
+            lines.append(f"{source} <b>{time_part}</b> — {preview}")
+            # button for full transcript
+            short = f"n{note_id}"
+            self._pending_files[f"note:{short}"] = note_id
+            btn_label = f"{source} {time_part} {preview[:30]}"
+            keyboard.append(InlineKeyboardButton(
+                btn_label[:60], callback_data=f"note:o:{short}",
+            ))
+
+        markup = InlineKeyboardMarkup([[b] for b in keyboard])
+        text = "\n".join(lines)
+        if len(text) > 3500:
+            text = text[:3500] + "\n…"
+        await update.message.reply_text(
+            text, parse_mode="HTML", reply_markup=markup,
+            disable_web_page_preview=True,
+        )
 
     async def _handle_pin_attempt(self, update, context, pin_attempt, pending):
         """Verify PIN, decrypt + send file on success, rate-limit on failure."""
@@ -1075,6 +1215,48 @@ class BotHandlers:
             await query.edit_message_text("✅ Оба файла сохранены.")
         else:
             await query.edit_message_text("❌ Неизвестное действие")
+
+    @owner_only
+    async def handle_note_open(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show the full transcript for a single note when its button is
+        tapped from a "заметки за <day>" menu."""
+        query = update.callback_query
+        parts = query.data.split(":")  # "note:o:<short>"
+        if len(parts) < 3:
+            await query.answer()
+            return
+        short = parts[2]
+        note_id = self._pending_files.get(f"note:{short}")
+        if not note_id:
+            await query.answer("⏱ Запрос устарел, повтори поиск", show_alert=True)
+            return
+        try:
+            cur = await self.pipeline.db.db.execute(
+                "SELECT title, content, source, created_at FROM notes WHERE id=?",
+                (note_id,),
+            )
+            row = await cur.fetchone()
+        except Exception as e:
+            await query.answer(f"⚠ {e}", show_alert=True)
+            return
+        if not row:
+            await query.answer("Заметка не найдена", show_alert=True)
+            return
+        n = dict(row)
+        title = (n.get("title") or "").strip() or "Без заголовка"
+        body = (n.get("content") or "").strip() or "(пусто)"
+        when = (n.get("created_at") or "")[:16]
+        src = n.get("source", "")
+        text = f"📝 <b>{title}</b>\n<i>{when} · {src}</i>\n\n{body}"
+        if len(text) > 4000:
+            text = text[:4000] + "\n…"
+        await query.answer()
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
 
     @owner_only
     async def handle_file_send(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
