@@ -46,22 +46,29 @@ SEARCH_USER_COMPACT = """Documents from the archive:
 User's question: {query}
 
 Answer in the same language as the question. Be concise — Telegram chat,
-not an essay. Pick the SINGLE most relevant document and answer about
-that one. Mention other documents only if the question is explicitly
-about multiple.
+not an essay. If MULTIPLE documents in the context are genuinely relevant
+to the question (e.g. user has two passports, several pay-stubs), describe
+EACH of them as a separate block. Skip documents that aren't a real match.
 
 FORMAT (Telegram HTML, no Markdown):
 
-📄 <b>Document type — date or name</b>
+📄 <b>Document type — owner / date</b>
 • Key fact 1
 • Key fact 2 (date / number / amount / expiry)
 • Action item if any (with deadline)
 
+———
+
+📄 <b>Second document — owner / date</b>
+• ...
+
 RULES:
 - Answer ONLY what was asked, no preamble like "I found ...", "В архиве ..."
-- Use bullet "•" for facts; <b>bold</b> for the header line only
-- For "find X" / "найди X" questions: one document, 3-5 bullets, no more
-- Max 1200 chars total
+- One block per actually-relevant document, separated by "———"
+- Bullet "•" for facts; <b>bold</b> for the header line only
+- 3-5 bullets per document
+- Max 1500 chars total — if more docs are relevant than fit, list the
+  remainder as a one-line tail "ещё: <names>"
 - HTML only: <b>, <i>, <code> — no Markdown stars or hashes"""
 
 # Smart search thresholds
@@ -145,19 +152,19 @@ class LLMSearch:
             file_best.append((fid, best))
         file_best.sort(key=lambda x: x[1].score, reverse=True)
 
-        # "find X" / "найди X" intent → top-1 button only. Stops button spam
-        # when several documents fuzzy-match (e.g. passport search returning
-        # birth_certificate, I-94, and an immigration exhibit alongside the
-        # actual passport).
-        q_low = query.strip().lower()
-        find_intent = (
-            q_low.startswith(("найди", "найти", "find", "show me", "where is", "где"))
-            or len(q_low.split()) <= 3
-        )
-        max_buttons = 1 if find_intent else MAX_CHUNKS_LLM
+        # Drop chunks that don't actually clear the score threshold once we
+        # have the best per file — a vector "near match" (score ~0.5) on
+        # something only loosely related (e.g. birth certificate to a
+        # passport query) shouldn't take a button slot from real matches.
+        # Keep the gap modest so we still surface multiple actual hits
+        # (e.g. user has 2 passports, both should appear).
+        if file_best:
+            top_score = file_best[0][1].score
+            file_best = [(fid, best) for (fid, best) in file_best
+                         if best.score >= max(MIN_SCORE, top_score - 0.10)]
         seen_files = {
             fid: best.metadata.get("filename", "file")
-            for fid, best in file_best[:max_buttons]
+            for fid, best in file_best[:MAX_CHUNKS_LLM]
         }
 
         # Step 3: Build context from top documents (use full text from DB when available)
