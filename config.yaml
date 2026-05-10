@@ -15,22 +15,30 @@ telegram:
   polling_timeout: 30
   max_file_size_mb: 20
 llm:
-  default_provider: anthropic
+  default_provider: openai
   models:
     classification:
-      model: anthropic/claude-haiku-4-5
+      model: openai/gpt-5.4-mini
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
       max_tokens: 1024
       temperature: 0.1
     extraction:
-      model: anthropic/claude-sonnet-4-5
+      model: openai/gpt-5.4-mini
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
       max_tokens: 4096
       temperature: 0.2
     search:
-      model: anthropic/claude-sonnet-4-5
+      model: openai/gpt-5.5
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
       max_tokens: 4096
       temperature: 0.3
     analysis:
-      model: anthropic/claude-sonnet-4-5
+      model: openai/gpt-5.5
+      api_base: http://127.0.0.1:10531/v1
+      api_key: dummy
       max_tokens: 4096
       temperature: 0.1
   retry:
