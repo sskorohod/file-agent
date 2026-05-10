@@ -1064,6 +1064,19 @@ class BotHandlers:
         except Exception:
             pass
 
+        # Outbox: signal cognee + wiki to refresh — Qdrant we already
+        # rebuilt above synchronously, so a 'qdrant' row is purely an
+        # audit record for memory-doctor.
+        try:
+            await db.enqueue_outbox(
+                event_type="note_updated",
+                source_kind="note",
+                source_id=str(nid),
+                payload={"title": title},
+            )
+        except Exception as exc:
+            logger.debug(f"outbox enqueue (note_updated) failed: {exc}")
+
         context.user_data.pop("pending_note_edit", None)
         await update.message.reply_text(
             f"✅ Заметка обновлена.\n📝 <b>{title}</b>",
@@ -1413,6 +1426,20 @@ class BotHandlers:
             tags=json_mod.dumps(tags),
         )
 
+        # 5a. Sprint D — enqueue outbox events so the sweeper re-embeds
+        # the note in Qdrant, ingests into cognee, and rebuilds the
+        # wiki page asynchronously. Failure here MUST NOT lose the
+        # note — content is already in SQLite + .md.
+        try:
+            await db.enqueue_outbox(
+                event_type="note_added",
+                source_kind="note",
+                source_id=str(note_id),
+                payload={"title": title, "source": "voice"},
+            )
+        except Exception as exc:
+            logger.debug(f"outbox enqueue (note_added) failed: {exc}")
+
         # 5b. Ingest into cognee personal memory (non-fatal if sidecar is down).
         try:
             from app.ingestion import ingest_text_to_cognee
@@ -1676,6 +1703,21 @@ class BotHandlers:
             await db.db.commit()
         except Exception as exc:
             errors.append(f"sqlite: {exc}")
+
+        # Outbox: queue cognee delete (we don't have a clean wrapper
+        # for it yet — sweeper will skip-with-reason until one lands)
+        # and a wiki-refresh signal so the entity backlinks lose this
+        # mention on the next regen.
+        try:
+            await db.enqueue_outbox(
+                event_type="note_deleted",
+                source_kind="note",
+                source_id=str(note_id),
+                payload={"title": title},
+                targets=["cognee", "wiki"],
+            )
+        except Exception:
+            pass
 
         # 4. On-disk .md (Obsidian-style transcript copy)
         if md_path:

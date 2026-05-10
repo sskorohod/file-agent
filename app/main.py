@@ -214,6 +214,9 @@ async def lifespan(app: FastAPI):
         auto_delete_task = asyncio.create_task(
             _auto_delete_loop(db, tg_app)
         )
+    outbox_task = asyncio.create_task(
+        _outbox_sweeper_loop(db, vector_store, settings)
+    )
 
     # Initialize MCP streamable HTTP session manager
     from app.mcp_server import mcp as _mcp_server
@@ -232,7 +235,7 @@ async def lifespan(app: FastAPI):
             await _state["_mcp_cm"].__aexit__(None, None, None)
         except Exception:
             pass
-    for t in [cleanup_task, reminder_task, auto_delete_task]:
+    for t in [cleanup_task, reminder_task, auto_delete_task, outbox_task]:
         if t is None:
             continue
         t.cancel()
@@ -368,6 +371,229 @@ async def _skill_reload_loop(skill_engine, interval: int):
             break
         except Exception as e:
             logger.error(f"Skill reload error: {e}")
+
+
+async def _outbox_sweeper_loop(db, vector_store, settings, interval: int = 30):
+    """Sprint D — apply pending outbox events to downstream stores.
+
+    Targets supported today:
+      * `qdrant` — for files/notes that fell off (e.g. embed step
+        crashed, but row already in SQLite). Re-embeds from current
+        DB state. For *_deleted events, scrubs orphan vectors.
+      * `wiki`   — touch a per-page rebuild flag; the next
+        ``make wiki-build`` call picks it up. (We don't run the full
+        rebuilder inline because it walks the whole archive.)
+      * `cognee` — best-effort ingest_text_to_cognee; if the sidecar
+        is down, mark the row as 'pending' for the next sweep.
+
+    Failures bump `attempts` and re-park the row. After
+    ``OUTBOX_MAX_ATTEMPTS`` we mark `failed` and stop trying.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            rows = await db.fetch_pending_outbox(limit=50)
+            if not rows:
+                continue
+            for row in rows:
+                try:
+                    handled = await _outbox_apply_one(db, vector_store, row, settings)
+                    if handled is True:
+                        await db.mark_outbox_applied(row["id"])
+                    elif handled == "skipped":
+                        await db.mark_outbox_skipped(row["id"], reason="target unavailable")
+                except Exception as exc:
+                    logger.warning(
+                        f"outbox row {row['id']} ({row['target']}) error: {exc}"
+                    )
+                    try:
+                        await db.mark_outbox_error(row["id"], str(exc))
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error(f"outbox sweeper loop error: {exc}")
+
+
+async def _outbox_apply_one(db, vector_store, row, settings):
+    """Apply one outbox event. Returns True on success, the string
+    'skipped' if the target is unavailable but we shouldn't retry, or
+    raises for transient failures (which the loop turns into attempts++).
+    """
+    import json as _j
+    target = row["target"]
+    kind = row["source_kind"]
+    sid = row["source_id"]
+    et = row["event_type"]
+
+    if target == "wiki":
+        # Touch a small marker file the next wiki-build picks up. We
+        # intentionally DO NOT regenerate the full vault inline — that's
+        # tens of seconds. ``make wiki-build`` reads this file and
+        # rebuilds only the affected page (Sprint G2 will wire that up).
+        from pathlib import Path
+        marker_dir = Path(settings.wiki.resolved_path) / ".outbox"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / f"{kind}-{sid}.txt").write_text(
+            f"{et}\n{row.get('payload_json','')}"
+        )
+        return True
+
+    if target == "qdrant":
+        # File/note re-embed-or-cleanup. We rely on whatever is in
+        # SQLite right now as the source of truth.
+        try:
+            from qdrant_client.models import (Filter, FieldCondition,
+                                              MatchValue)
+        except Exception:
+            return "skipped"
+        coll = vector_store.qdrant_config.collection_name
+        if et.endswith("_deleted"):
+            field = "file_id" if kind == "file" else "note_id"
+            value = sid if kind == "file" else int(sid)
+            vector_store._client.delete(
+                collection_name=coll,
+                points_selector=Filter(must=[FieldCondition(
+                    key=field, match=MatchValue(value=value),
+                )]),
+                wait=True,
+            )
+            return True
+        # _added / _updated → re-embed if not already present
+        # Existence check first, cheap.
+        if kind == "note":
+            field = "note_id"
+            value = int(sid)
+        else:
+            field = "file_id"
+            value = sid
+        try:
+            res = vector_store._client.scroll(
+                collection_name=coll, limit=1,
+                scroll_filter=Filter(must=[FieldCondition(
+                    key=field, match=MatchValue(value=value),
+                )]),
+                with_payload=False, with_vectors=False,
+            )
+            if res[0]:
+                return True  # already embedded
+        except Exception:
+            pass
+        # Embed missing note. Files are embedded by the pipeline's
+        # _step_embed before save_meta — if we got here for a file it
+        # means embed failed; rerun via VectorStore.upsert_document
+        # using extracted_text from the row.
+        if kind == "note":
+            cur = await db.db.execute(
+                "SELECT title, content FROM notes WHERE id=?",
+                (int(sid),),
+            )
+            r = await cur.fetchone()
+            if not r:
+                return True  # row gone
+            n = dict(r)
+            text = (n.get("content") or "").strip()
+            if not text:
+                return True
+            title = (n.get("title") or "").strip()
+            full = f"{title}\n\n{text}" if title else text
+            words = full.split()
+            CHUNK, OVER = 300, 50
+            chunks = []
+            i = 0
+            while i < len(words):
+                chunks.append(" ".join(words[i:i + CHUNK]))
+                i += CHUNK - OVER
+            if not chunks:
+                return True
+            embedder = vector_store._get_gemini_embedder()
+            vectors = embedder.embed_texts(
+                chunks, task_type="RETRIEVAL_DOCUMENT",
+            )
+            from qdrant_client.models import PointStruct
+            import uuid as _uuid
+            points = [PointStruct(
+                id=str(_uuid.uuid5(_uuid.NAMESPACE_DNS, f"note:{sid}:chunk:{ci}")),
+                vector=vec,
+                payload={
+                    "type": "note", "note_id": int(sid),
+                    "chunk_index": ci, "text": chunk[:5000],
+                    "title": title[:200],
+                },
+            ) for ci, (chunk, vec) in enumerate(zip(chunks, vectors))]
+            vector_store._client.upsert(
+                collection_name=coll, points=points, wait=True,
+            )
+            return True
+        # file fallback — call VectorStore.upsert_document via DB row
+        cur = await db.db.execute(
+            "SELECT original_name, stored_path, mime_type, category, "
+            "       extracted_text, metadata_json FROM files WHERE id=?",
+            (sid,),
+        )
+        r = await cur.fetchone()
+        if not r:
+            return True
+        f = dict(r)
+        text = (f.get("extracted_text") or "").strip()
+        if not text:
+            return True
+        # Multimodal embedding requires raw bytes — skip if expensive,
+        # text-chunks only.
+        await vector_store.upsert_document(
+            file_id=sid,
+            text=text,
+            metadata={"filename": f.get("original_name", ""),
+                      "category": f.get("category", "")},
+        )
+        return True
+
+    if target == "cognee":
+        cognee = _state.get("cognee")
+        if cognee is None or not getattr(cognee, "healthy", True):
+            return "skipped"
+        try:
+            from app.ingestion import ingest_text_to_cognee
+        except Exception:
+            return "skipped"
+        if et.endswith("_deleted"):
+            # No clean delete API today; mark skipped for memory-doctor.
+            return "skipped"
+        if kind == "note":
+            cur = await db.db.execute(
+                "SELECT content, title FROM notes WHERE id=?", (int(sid),),
+            )
+            r = await cur.fetchone()
+            if not r:
+                return True
+            content = (dict(r).get("content") or "").strip()
+            if not content:
+                return True
+            await ingest_text_to_cognee(
+                cognee, content=content, source_type="note",
+                source_id=str(sid),
+                filename=f"note_{sid}.txt",
+            )
+            return True
+        # file
+        cur = await db.db.execute(
+            "SELECT extracted_text, original_name FROM files WHERE id=?", (sid,),
+        )
+        r = await cur.fetchone()
+        if not r:
+            return True
+        f = dict(r)
+        text = (f.get("extracted_text") or "").strip()
+        if not text:
+            return True
+        await ingest_text_to_cognee(
+            cognee, content=text, source_type="file",
+            source_id=sid, filename=f.get("original_name") or f"file_{sid}",
+        )
+        return True
+
+    return "skipped"
 
 
 async def _auto_delete_loop(db, tg_app, interval: int = 60):

@@ -1,7 +1,8 @@
 .PHONY: install dev test lint format clean \
 	cognee-install cognee-start cognee-stop cognee-logs cognee-status cognee-spike2 \
 	cognee-mcp-start cognee-mcp-stop cognee-mcp-logs \
-	reindex reindex-notes docs-wiki wiki-build wiki-clean notes-decrypt
+	reindex reindex-notes docs-wiki wiki-build wiki-clean notes-decrypt \
+	memory-doctor memory-doctor-fix notes-reenrich
 
 install:
 	pip install -r requirements.txt
@@ -95,3 +96,17 @@ wiki-clean:
 	echo "wiping $$VAULT/{docs,notes,entities,index.md,log.md,CLAUDE.md}"; \
 	rm -rf "$$VAULT/docs" "$$VAULT/notes" "$$VAULT/entities" \
 	       "$$VAULT/index.md" "$$VAULT/log.md" "$$VAULT/CLAUDE.md"
+
+# Memory reconciliation — walks SQLite, Qdrant, cognee, wiki and
+# prints divergence between the four. Run with --fix to enqueue
+# outbox events that bring them back in sync.
+memory-doctor:
+	.venv/bin/python scripts/memory_doctor.py
+
+memory-doctor-fix:
+	.venv/bin/python scripts/memory_doctor.py --fix
+
+# Wipe + redo every note enrichment (mood/energy/sentiment/tags).
+# Run after a notes decrypt or a major prompt change.
+notes-reenrich:
+	.venv/bin/python scripts/redo_note_enrichments.py

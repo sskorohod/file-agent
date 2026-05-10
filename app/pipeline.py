@@ -680,6 +680,28 @@ class Pipeline:
             sensitive=classification.sensitive,
         )
 
+        # Sprint D — fan out to downstream stores via the outbox so the
+        # wiki page + cognee node + (re)embed reconciles asynchronously
+        # even if a sweeper or sidecar is briefly unavailable. Qdrant is
+        # already populated by `_step_embed`, but we still enqueue a
+        # 'qdrant' event so memory-doctor's reconciliation has a single
+        # log of "what changed" for cleanup. Failures here MUST NOT
+        # abort the pipeline — file is already on disk + in SQLite, and
+        # the sweeper retries on its own.
+        try:
+            await self.db.enqueue_outbox(
+                event_type="file_ingested",
+                source_kind="file",
+                source_id=file_record.id,
+                payload={
+                    "filename": file_record.original_name,
+                    "category": classification.category,
+                    "sensitive": classification.sensitive,
+                },
+            )
+        except Exception as exc:
+            logger.warning(f"outbox enqueue (file_ingested) failed: {exc}")
+
     # ── Cognee ingest (Phase 2) ─────────────────────────────────────────
 
     def _should_cognee_ingest(

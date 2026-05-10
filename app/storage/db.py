@@ -9,7 +9,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -191,6 +191,35 @@ CREATE TABLE IF NOT EXISTS auto_delete_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_auto_delete_pending
     ON auto_delete_messages(deleted, delete_at);
+
+-- Outbox pattern (Sprint D). Every change to a `files` or `notes` row
+-- enqueues an event here, one per downstream target (qdrant, cognee,
+-- wiki, ...). The lifespan background sweeper picks up rows with
+-- ``applied_at IS NULL`` and applies them, so SQLite stays the single
+-- source of truth and the four stores reconcile asynchronously even
+-- across uvicorn restarts. ``attempts`` is incremented on every retry;
+-- ``last_error`` carries the latest exception text. Rows that exceed
+-- the retry budget end up parked with ``status='failed'`` for manual
+-- replay via ``scripts/replay_outbox.py``.
+CREATE TABLE IF NOT EXISTS outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,           -- 'file_ingested', 'file_updated',
+                                        -- 'file_deleted', 'note_added',
+                                        -- 'note_updated', 'note_deleted'
+    source_kind TEXT NOT NULL,          -- 'file' | 'note'
+    source_id TEXT NOT NULL,            -- file_id (TEXT) or note_id (INTEGER as TEXT)
+    target TEXT NOT NULL,               -- 'qdrant' | 'cognee' | 'wiki'
+    payload_json TEXT DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'applied' | 'failed' | 'skipped'
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT DEFAULT '',
+    applied_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending
+    ON outbox(status, target, attempts);
+CREATE INDEX IF NOT EXISTS idx_outbox_source
+    ON outbox(source_kind, source_id);
 """
 
 
@@ -697,6 +726,81 @@ class Database:
     async def delete_secret(self, name: str):
         await self.db.execute("DELETE FROM secrets WHERE name=?", (name,))
         await self.db.commit()
+
+    # ── Outbox (Sprint D — eventual consistency between SQLite +
+    #            Qdrant + Cognee + wiki vault) ────────────────────────
+
+    OUTBOX_TARGETS = ("qdrant", "cognee", "wiki")
+    OUTBOX_MAX_ATTEMPTS = 5
+
+    async def enqueue_outbox(
+        self,
+        *,
+        event_type: str,
+        source_kind: str,
+        source_id: str,
+        targets: list[str] | None = None,
+        payload: dict | None = None,
+    ) -> int:
+        """Enqueue one row per `target`. Returns the number of rows added.
+
+        Caller passes the logical event (e.g. 'note_added'), the source
+        ('note', '170'), and which downstream stores to fan out to. If
+        `targets` is omitted, defaults to all known targets.
+        """
+        import json as _j
+        targets = targets or list(self.OUTBOX_TARGETS)
+        body = _j.dumps(payload or {}, ensure_ascii=False)
+        for tgt in targets:
+            await self.db.execute(
+                "INSERT INTO outbox "
+                "(event_type, source_kind, source_id, target, payload_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (event_type, source_kind, str(source_id), tgt, body),
+            )
+        await self.db.commit()
+        return len(targets)
+
+    async def fetch_pending_outbox(self, limit: int = 50) -> list[dict]:
+        cur = await self.db.execute(
+            "SELECT id, event_type, source_kind, source_id, target, "
+            "       payload_json, attempts FROM outbox "
+            "WHERE status='pending' AND attempts < ? "
+            "ORDER BY id LIMIT ?",
+            (self.OUTBOX_MAX_ATTEMPTS, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def mark_outbox_applied(self, row_id: int):
+        await self.db.execute(
+            "UPDATE outbox SET status='applied', applied_at=datetime('now'), "
+            "last_error='' WHERE id=?",
+            (row_id,),
+        )
+        await self.db.commit()
+
+    async def mark_outbox_skipped(self, row_id: int, reason: str = ""):
+        await self.db.execute(
+            "UPDATE outbox SET status='skipped', applied_at=datetime('now'), "
+            "last_error=? WHERE id=?",
+            (reason[:500], row_id),
+        )
+        await self.db.commit()
+
+    async def mark_outbox_error(self, row_id: int, error: str):
+        await self.db.execute(
+            "UPDATE outbox SET attempts = attempts + 1, last_error=?, "
+            "status = CASE WHEN attempts + 1 >= ? THEN 'failed' ELSE 'pending' END "
+            "WHERE id=?",
+            (error[:500], self.OUTBOX_MAX_ATTEMPTS, row_id),
+        )
+        await self.db.commit()
+
+    async def outbox_stats(self) -> dict[str, int]:
+        cur = await self.db.execute(
+            "SELECT status, COUNT(*) AS n FROM outbox GROUP BY status"
+        )
+        return {dict(r)["status"]: dict(r)["n"] for r in await cur.fetchall()}
 
     # ── Auto-delete (Telegram self-destructing messages) ─────────────
 
