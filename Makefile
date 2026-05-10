@@ -1,7 +1,7 @@
 .PHONY: install dev test lint format clean \
 	cognee-install cognee-start cognee-stop cognee-logs cognee-status cognee-spike2 \
 	cognee-mcp-start cognee-mcp-stop cognee-mcp-logs \
-	reindex docs-wiki
+	reindex reindex-notes docs-wiki wiki-build wiki-clean notes-decrypt
 
 install:
 	pip install -r requirements.txt
@@ -72,3 +72,26 @@ reindex:
 # Idempotent — safe to rerun after every reindex or new ingest.
 docs-wiki:
 	.venv/bin/python scripts/build_docs_wiki.py
+
+# Re-embed every note into Qdrant (atomic chunks). Run after a notes
+# decrypt or schema change.
+reindex-notes:
+	.venv/bin/python scripts/reindex_notes.py
+
+# Decrypt any FAGE-encrypted residue in notes-related tables. Idempotent.
+notes-decrypt:
+	.venv/bin/python scripts/decrypt_legacy_notes.py --via-session-key
+
+# Build the LLM-wiki vault (Karpathy pattern) under wiki.base_path —
+# default ~/ai-agent-files/wiki/. One markdown page per document, per
+# transcript, and per auto-extracted entity, with backlinks. Pure
+# autogen — manual edits go under <vault>/manual/ instead.
+wiki-build:
+	.venv/bin/python scripts/build_wiki.py
+
+# Wipe the autogen subdirs of the wiki vault (keeps manual/, raw/).
+wiki-clean:
+	@VAULT="$$(.venv/bin/python -c 'from app.config import get_settings; print(get_settings().wiki.resolved_path)')"; \
+	echo "wiping $$VAULT/{docs,notes,entities,index.md,log.md,CLAUDE.md}"; \
+	rm -rf "$$VAULT/docs" "$$VAULT/notes" "$$VAULT/entities" \
+	       "$$VAULT/index.md" "$$VAULT/log.md" "$$VAULT/CLAUDE.md"

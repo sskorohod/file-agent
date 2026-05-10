@@ -181,6 +181,38 @@ class CogneeConfig(BaseModel):
     use_for_search: bool = False  # Phase 4 flips this to True
 
 
+class WikiConfig(BaseModel):
+    """LLM-wiki layer — a markdown vault that mirrors the SQLite/cognee
+    state in human-browsable form (Karpathy's ``llm-wiki`` pattern).
+
+    Layout under ``base_path``:
+
+        CLAUDE.md     — schema / conventions for any LLM editing the vault
+        index.md      — top-level dashboard (categories, counts, latest)
+        log.md        — append-only ingest journal
+        raw/          — symlinks back to original files on disk
+        docs/<slug>.md      — one page per file in the archive
+        notes/<date>-<slug>.md  — one page per transcript
+        entities/<slug>.md  — auto-extracted people / orgs / topics
+                              with backlinks to docs and notes that
+                              mention them
+
+    Every page carries YAML frontmatter so Obsidian / Logseq /
+    grep-based agents can query it. Wikilinks are vault-relative.
+    """
+
+    enabled: bool = True
+    # Default — separate dir under the user's archive so the existing
+    # ``notes/`` (Obsidian-style transcripts written by the bot) and
+    # ``raw/`` (source files) stay untouched while the wiki is layered
+    # on top. Override in config.yaml or via WIKI__BASE_PATH env.
+    base_path: str = "~/ai-agent-files/wiki"
+
+    @property
+    def resolved_path(self) -> Path:
+        return Path(self.base_path).expanduser().resolve()
+
+
 # ── Main Settings ───────────────────────────────────────────────────────────
 
 def _load_yaml(path: str | Path) -> dict[str, Any]:
@@ -219,6 +251,7 @@ class Settings(BaseSettings):
     database: DatabaseConfig = DatabaseConfig()
     logging: LoggingConfig = LoggingConfig()
     cognee: CogneeConfig = CogneeConfig()
+    wiki: WikiConfig = WikiConfig()
 
     def __init__(self, config_path: str | Path = "config.yaml", **kwargs):
         yaml_data = _load_yaml(config_path)

@@ -104,3 +104,17 @@ cognee:
   request_timeout_s: 60
   cognify_timeout_s: 300
   use_for_search: true
+wiki:
+  # LLM-wiki vault (Karpathy pattern). Vault layout under base_path:
+  #   CLAUDE.md   — schema for any agent editing the vault
+  #   index.md    — top-level dashboard (categories, counts, latest)
+  #   log.md      — append-only ingest journal
+  #   docs/       — one .md per file
+  #   notes/      — one .md per transcript
+  #   entities/   — auto-extracted people/orgs/topics with backlinks
+  #   raw/        — symlinks to the original files on disk
+  # Override base_path here, or via WIKI__BASE_PATH env. Default below
+  # puts the vault next to existing notes/ + raw/ inside the user's
+  # archive so Obsidian sees one combined vault.
+  enabled: true
+  base_path: ~/ai-agent-files/wiki
