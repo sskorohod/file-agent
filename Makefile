@@ -2,7 +2,8 @@
 	cognee-install cognee-start cognee-stop cognee-logs cognee-status cognee-spike2 \
 	cognee-mcp-start cognee-mcp-stop cognee-mcp-logs \
 	reindex reindex-notes docs-wiki wiki-build wiki-clean notes-decrypt \
-	memory-doctor memory-doctor-fix notes-reenrich
+	memory-doctor memory-doctor-fix notes-reenrich \
+	cognee-cognify cognee-cognify-foreground
 
 install:
 	pip install -r requirements.txt
@@ -61,6 +62,14 @@ cognee-mcp-stop:
 
 cognee-mcp-logs:
 	tail -f infra/cognee/logs/cognee-mcp.log
+
+# Trigger cognify on main_dataset (graph + vectors). Background by default.
+cognee-cognify:
+	.venv/bin/python scripts/cognee_cognify.py
+
+# Same but block until done — useful for verification scripts.
+cognee-cognify-foreground:
+	.venv/bin/python scripts/cognee_cognify.py --foreground
 
 # ── Maintenance ────────────────────────────────────────────────────────────
 # Drop Qdrant collection and re-parse + re-classify + re-embed every file
