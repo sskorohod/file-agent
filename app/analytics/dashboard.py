@@ -238,14 +238,112 @@ async def _panel_files_by_category(db, ax):
     ax.grid(True, axis="x", linestyle=":", alpha=0.4)
 
 
+async def _panel_mood_by_category(db, ax, days: int):
+    """Avg mood / sentiment per top category. Daylio-style insight:
+    'running: 4.6/5; meetings: 2.8/5'. Falls back to sentiment when
+    mood_score is sparse."""
+    rows = await _fetch_rows(
+        db,
+        "SELECT COALESCE(NULLIF(ne.category,''), n.category, 'other') AS cat, "
+        "  AVG(CAST(ne.mood_score AS REAL)) AS mood, "
+        "  AVG(ne.sentiment) AS sent, "
+        "  COUNT(*) AS n "
+        "FROM notes n JOIN note_enrichments ne ON ne.note_id = n.id "
+        "WHERE date(n.created_at) >= date('now','-' || ? || ' days') "
+        "  AND ne.sentiment IS NOT NULL "
+        "GROUP BY cat HAVING n >= 2 "
+        "ORDER BY n DESC LIMIT 8",
+        (days,),
+    )
+    if not rows:
+        _empty_panel(ax, "Настроение по категориям")
+        return
+    labels = [r["cat"] or "—" for r in rows]
+    # mood (1-10) preferred; else map sentiment (-1..1) → 1..10
+    values = []
+    for r in rows:
+        if r.get("mood") is not None:
+            values.append(float(r["mood"]))
+        else:
+            s = float(r.get("sent") or 0)
+            values.append(5.5 + 4.5 * s)
+    colors = [_GOOD if v >= 6.5 else _BAD if v <= 4 else _WARN for v in values]
+    bars = ax.barh(range(len(labels)), values, color=colors, alpha=0.9)
+    ax.set_yticks(range(len(labels)))
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 10)
+    ax.axvline(5.5, color=_GRID, lw=1, linestyle="--", alpha=0.7)
+    ax.set_title("Настроение по категориям (где тебе хорошо/плохо)",
+                 loc="left", fontsize=11, fontweight="bold")
+    for b, v, r in zip(bars, values, rows):
+        ax.text(b.get_width() + 0.15, b.get_y() + b.get_height() / 2,
+                f"{v:.1f}  ({r['n']})", va="center", color=_FG, fontsize=9)
+    ax.grid(True, axis="x", linestyle=":", alpha=0.4)
+
+
+async def _panel_timeline_heatmap(db, ax, days: int):
+    """Calendar heatmap: row = week, col = day-of-week, color = note volume.
+    Rewind/Day One pattern. Glanceable activity at a glance."""
+    from datetime import date, timedelta
+    rows = await _fetch_rows(
+        db,
+        "SELECT date(created_at) AS d, COUNT(*) AS n FROM notes "
+        "WHERE content!='' AND date(created_at) >= date('now','-' || ? || ' days') "
+        "GROUP BY d",
+        (days,),
+    )
+    by_day = {r["d"]: r["n"] for r in rows}
+    if not by_day:
+        _empty_panel(ax, "Карта активности")
+        return
+    today = date.today()
+    start = today - timedelta(days=days - 1)
+    # align to Monday
+    start -= timedelta(days=start.weekday())
+    weeks = []
+    cur_week = [0] * 7
+    cur_date = start
+    week_labels = []
+    while cur_date <= today:
+        dow = cur_date.weekday()
+        if dow == 0 and cur_week != [0] * 7:
+            weeks.append(cur_week)
+            week_labels.append((cur_date - timedelta(days=7)).strftime("%d.%m"))
+            cur_week = [0] * 7
+        cur_week[dow] = by_day.get(cur_date.isoformat(), 0)
+        cur_date += timedelta(days=1)
+    if cur_week != [0] * 7:
+        weeks.append(cur_week)
+        week_labels.append(
+            (cur_date - timedelta(days=cur_date.weekday() + 1)).strftime("%d.%m")
+        )
+
+    import numpy as np
+    grid = np.array(weeks) if weeks else np.zeros((1, 7))
+    im = ax.imshow(grid, aspect="auto", cmap="YlGn", interpolation="nearest")
+    ax.set_xticks(range(7))
+    ax.set_xticklabels(["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"], fontsize=9)
+    ax.set_yticks(range(len(week_labels)))
+    ax.set_yticklabels(week_labels, fontsize=9)
+    ax.set_title("Карта активности (нед × день)",
+                 loc="left", fontsize=11, fontweight="bold")
+    # annotate non-zero cells
+    for i, week in enumerate(weeks):
+        for j, n in enumerate(week):
+            if n > 0:
+                ax.text(j, i, str(n), ha="center", va="center",
+                        color=_BG if n >= 5 else _FG, fontsize=8)
+
+
 # --- top-level composers ---------------------------------------------------
 
 
 async def build_dashboard_png(db, days: int = 30) -> bytes:
-    """6-panel dashboard. Returns PNG bytes."""
-    fig = plt.figure(figsize=(12, 9), dpi=110)
-    gs = fig.add_gridspec(3, 2, hspace=0.5, wspace=0.25,
-                          left=0.06, right=0.97, top=0.93, bottom=0.07)
+    """8-panel dashboard. Returns PNG bytes."""
+    fig = plt.figure(figsize=(13, 12), dpi=110)
+    gs = fig.add_gridspec(4, 2, hspace=0.55, wspace=0.28,
+                          left=0.06, right=0.97, top=0.95, bottom=0.05)
     fig.suptitle(
         f"Dashboard — последние {days} дн",
         color=_FG, fontsize=14, fontweight="bold", y=0.985,
@@ -255,8 +353,10 @@ async def build_dashboard_png(db, days: int = 30) -> bytes:
     await _panel_mood_energy(db, fig.add_subplot(gs[0, 1]), days)
     await _panel_sentiment(db, fig.add_subplot(gs[1, 0]), days)
     await _panel_categories(db, fig.add_subplot(gs[1, 1]), days)
-    await _panel_sources(db, fig.add_subplot(gs[2, 0]), days)
-    await _panel_files_by_category(db, fig.add_subplot(gs[2, 1]))
+    await _panel_mood_by_category(db, fig.add_subplot(gs[2, 0]), days)
+    await _panel_timeline_heatmap(db, fig.add_subplot(gs[2, 1]), days)
+    await _panel_sources(db, fig.add_subplot(gs[3, 0]), days)
+    await _panel_files_by_category(db, fig.add_subplot(gs[3, 1]))
 
     buf = BytesIO()
     fig.savefig(buf, format="png", facecolor=_BG, bbox_inches="tight")

@@ -88,6 +88,8 @@ class BotHandlers:
         BotCommand("stats", "Статистика базы"),
         BotCommand("analytics", "LLM-аналитика"),
         BotCommand("insights", "AI обзор"),
+        BotCommand("patterns", "Паттерны поведения (аномалии, связи, todo)"),
+        BotCommand("todos", "Открытые задачи из заметок"),
         BotCommand("skills", "Скиллы"),
         BotCommand("help", "Список команд"),
         BotCommand("start", "Начать работу"),
@@ -110,6 +112,8 @@ class BotHandlers:
         app.add_handler(CommandHandler("notes", self.cmd_notes))
         app.add_handler(CommandHandler("dashboard", self.cmd_dashboard))
         app.add_handler(CommandHandler("today", self.cmd_today))
+        app.add_handler(CommandHandler("patterns", self.cmd_patterns))
+        app.add_handler(CommandHandler("todos", self.cmd_todos))
 
         # File handlers (documents, photos)
         app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
@@ -534,6 +538,150 @@ class BotHandlers:
             caption="☀️ Сегодняшний день",
         )
 
+    @owner_only
+    async def cmd_patterns(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ):
+        """`/patterns` — surface previously-invisible behaviour signals
+        from `anomaly_alerts`, `personal_baselines`, `note_relations`,
+        `note_tasks` (Sprint K)."""
+        db = self.pipeline.db
+        parts: list[str] = ["<b>📊 Паттерны и аномалии</b>\n"]
+
+        # Anomalies — last 7 days
+        cur = await db.db.execute(
+            "SELECT alert_type, date, message FROM anomaly_alerts "
+            "WHERE date >= date('now','-7 days') "
+            "ORDER BY date DESC, id DESC LIMIT 8"
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        if rows:
+            parts.append("<b>⚠️ Аномалии (последние 7 дней)</b>")
+            for r in rows:
+                d = (r.get("date") or "")[:10]
+                parts.append(f"<code>{d}</code> · {r.get('message','')[:120]}")
+            parts.append("")
+
+        # Baselines vs current
+        cur = await db.db.execute(
+            "SELECT metric_key, avg_value, std_value, data_points "
+            "FROM personal_baselines ORDER BY metric_key"
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        if rows:
+            parts.append("<b>📐 Личные baseline (30-дневные)</b>")
+            for r in rows:
+                avg = r.get("avg_value")
+                std = r.get("std_value") or 0
+                parts.append(
+                    f"• <i>{r['metric_key']}</i>: "
+                    f"среднее <b>{avg:.1f}</b> ± {std:.1f} "
+                    f"(<code>{r['data_points']}</code> точек)"
+                )
+            parts.append("")
+
+        # Top connected notes (note_relations 1487 строк уже есть!)
+        cur = await db.db.execute(
+            "SELECT n.id, n.title, n.created_at, "
+            "       (SELECT COUNT(*) FROM note_relations r "
+            "        WHERE r.source_note_id=n.id OR r.target_note_id=n.id) AS deg "
+            "FROM notes n WHERE n.content!='' "
+            "ORDER BY deg DESC LIMIT 5"
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        rows = [r for r in rows if (r.get("deg") or 0) > 0]
+        if rows:
+            parts.append("<b>🔗 Самые «связные» заметки</b>")
+            for r in rows:
+                title = (r.get("title") or "(без заголовка)")[:60]
+                parts.append(
+                    f"• {(r['created_at'] or '')[:10]} · {title} "
+                    f"<i>({r['deg']} связей)</i>"
+                )
+            parts.append("")
+
+        # Open tasks
+        cur = await db.db.execute(
+            "SELECT t.id, t.description, t.priority, n.created_at "
+            "FROM note_tasks t JOIN notes n ON n.id = t.note_id "
+            "WHERE t.status='open' "
+            "ORDER BY t.created_at DESC LIMIT 8"
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        if rows:
+            parts.append("<b>✅ Открытые задачи (из заметок)</b>")
+            for r in rows:
+                parts.append(
+                    f"• <code>{(r.get('created_at') or '')[:10]}</code> · "
+                    f"{(r.get('description') or '')[:90]}"
+                )
+            parts.append("")
+
+        # Lag correlations (might be empty until cron computes them)
+        cur = await db.db.execute(
+            "SELECT metric_a, metric_b, lag_days, correlation, p_value "
+            "FROM lag_correlations WHERE p_value < 0.05 "
+            "ORDER BY ABS(correlation) DESC LIMIT 5"
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        if rows:
+            parts.append("<b>🔬 Корреляции с лагом</b>")
+            for r in rows:
+                arrow = "→" if r["lag_days"] > 0 else "↔"
+                parts.append(
+                    f"• <i>{r['metric_a']}</i> {arrow} <i>{r['metric_b']}</i> "
+                    f"(lag={r['lag_days']}д, r={r['correlation']:.2f})"
+                )
+            parts.append("")
+
+        if len(parts) == 1:
+            parts.append("Пока без паттернов — продолжай записывать "
+                         "заметки и check-in'ы, через несколько дней "
+                         "появятся.")
+
+        text = "\n".join(parts)
+        if len(text) > 3900:
+            text = text[:3900] + "\n…"
+        await update.message.reply_text(
+            text, parse_mode="HTML", disable_web_page_preview=True,
+        )
+
+    @owner_only
+    async def cmd_todos(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ):
+        """`/todos` — все открытые задачи извлечённые из заметок."""
+        db = self.pipeline.db
+        cur = await db.db.execute(
+            "SELECT t.id, t.description, t.priority, t.due_date, "
+            "       t.note_id, n.title, n.created_at "
+            "FROM note_tasks t LEFT JOIN notes n ON n.id = t.note_id "
+            "WHERE t.status='open' "
+            "ORDER BY CASE t.priority WHEN 'high' THEN 0 "
+            "  WHEN 'medium' THEN 1 ELSE 2 END, t.created_at DESC LIMIT 30"
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+        if not rows:
+            await update.message.reply_text(
+                "✅ Открытых задач нет. Запиши заметку с конкретным делом "
+                "(«надо позвонить врачу») — извлечётся автоматически."
+            )
+            return
+        prio_marker = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+        lines = [f"<b>✅ Открытые задачи — {len(rows)}</b>\n"]
+        for r in rows:
+            mark = prio_marker.get(r.get("priority", "medium"), "⚪")
+            desc = (r.get("description") or "")[:120]
+            note_date = (r.get("created_at") or "")[:10]
+            lines.append(f"{mark} {desc}")
+            lines.append(f"   <i>из заметки {note_date}</i>")
+        text = "\n".join(lines)
+        if len(text) > 3900:
+            text = text[:3900] + "\n…"
+        await update.message.reply_text(
+            text, parse_mode="HTML", disable_web_page_preview=True,
+        )
+
     async def _render_notes_page(self, update_or_query, context, page: int = 0):
         """Render a page of notes — `<date> · <title>` per row, button per
         note that pulls the full transcript on tap. Pagination via prev/
@@ -831,8 +979,45 @@ class BotHandlers:
             await self._show_notes_for_day(update, context, *date_hit)
             return
 
-        # All free text goes to search. Use /analytics for analytics.
-        await self._do_search(update, query, context)
+        # Decide: explicit search → run search, otherwise ask via buttons.
+        # Same logic as voice transcript flow — only obvious search-intent
+        # phrases bypass the menu. Everything else is ambiguous and the
+        # user picks. This matches user feedback: "I typed a note and the
+        # bot ran a search without asking."
+        if self._is_search_intent(query):
+            await self._do_search(update, query, context)
+            return
+
+        # Ambiguous → 🔍 Поиск / 📝 Заметка
+        import secrets
+        text_key = secrets.token_hex(4)
+        self._pending_files[f"vc:{text_key}"] = query
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔍 Поиск", callback_data=f"vc:s:{text_key}"),
+            InlineKeyboardButton("📝 Заметка", callback_data=f"vc:n:{text_key}"),
+        ]])
+        preview = query if len(query) <= 200 else query[:200] + "…"
+        await update.message.reply_text(
+            f"📝 «{preview}»\n\nЭто поиск или заметка?",
+            reply_markup=keyboard,
+        )
+
+    @staticmethod
+    def _is_search_intent(text: str) -> bool:
+        """True if the message clearly looks like a search query, not a
+        free-form note. Same triggers as voice handler."""
+        t = (text or "").strip().lower()
+        if not t:
+            return False
+        triggers = (
+            "найди", "найти", "поищи", "поиск", "ищи", "найдешь",
+            "найдёшь", "покажи", "где мой", "где мои", "где моя",
+            "find ", "search ", "show me", "where is", "where are",
+        )
+        return (
+            t.startswith(triggers)
+            or t.startswith("?") or t.endswith("?")
+        )
 
     @staticmethod
     def _parse_notes_date_query(text: str) -> tuple[str, str] | None:
