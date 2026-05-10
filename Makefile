@@ -1,6 +1,7 @@
 .PHONY: install dev test lint format clean \
 	cognee-install cognee-start cognee-stop cognee-logs cognee-status cognee-spike2 \
-	cognee-mcp-start cognee-mcp-stop cognee-mcp-logs
+	cognee-mcp-start cognee-mcp-stop cognee-mcp-logs \
+	reindex docs-wiki
 
 install:
 	pip install -r requirements.txt
@@ -59,3 +60,15 @@ cognee-mcp-stop:
 
 cognee-mcp-logs:
 	tail -f infra/cognee/logs/cognee-mcp.log
+
+# ── Maintenance ────────────────────────────────────────────────────────────
+# Drop Qdrant collection and re-parse + re-classify + re-embed every file
+# in SQLite. Run after major prompt or extraction-schema changes.
+reindex:
+	.venv/bin/python scripts/reindex_all.py
+
+# Refresh the Obsidian-friendly per-document wiki under
+# ~/ai-agent-files/docs/ (one .md per file + _DOCS.md index).
+# Idempotent — safe to rerun after every reindex or new ingest.
+docs-wiki:
+	.venv/bin/python scripts/build_docs_wiki.py
