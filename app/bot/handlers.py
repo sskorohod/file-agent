@@ -878,13 +878,22 @@ class BotHandlers:
         tags = note_data.get("tags", [])
         action_items = note_data.get("action_items", [])
 
-        # 2. Find linked file from chat history
+        # 2. Find linked file from chat history.
+        #
+        # We only link when the USER explicitly attached a file in the recent
+        # conversation. Previously this looked at any chat_history row with a
+        # file_id, which included assistant search responses — so a voice
+        # note about dinner ended up "📎 social_security_card.jpg" just
+        # because the previous unrelated search had surfaced that file.
+        # Today only user-role messages with file_id should count, and the
+        # bot doesn't actually populate user-role file_id yet, so this is
+        # effectively a no-op until upload events get wired into chat_history.
         linked_file_id = ""
         linked_file_name = ""
         try:
             history = await db.get_chat_history(chat_id, limit=5)
             for h in reversed(history):
-                if h.get("file_id"):
+                if h.get("role") == "user" and h.get("file_id"):
                     linked_file_id = h["file_id"]
                     f = await db.get_file(linked_file_id)
                     if f:
@@ -1288,6 +1297,29 @@ class BotHandlers:
                 result = await self.search_fn(query, history=history, compact=True)
                 text = result["text"] if isinstance(result, dict) else result
                 file_ids = result.get("file_ids", {}) if isinstance(result, dict) else {}
+
+                # Defensive: LLM occasionally returns empty/whitespace-only output
+                # (refusal, hit max_tokens before producing text, model glitch).
+                # Telegram rejects empty messages with "Message text is empty",
+                # which we used to surface as "❌ Ошибка поиска". Replace with a
+                # sane fallback so the user still sees the matched files.
+                if not text or not text.strip():
+                    logger.warning(
+                        f"Empty LLM search response for query={query!r}; "
+                        f"falling back to file list ({len(file_ids)} matches)"
+                    )
+                    if file_ids:
+                        names = ", ".join(list(file_ids.values())[:5])
+                        text = (
+                            f"🤔 Не получил внятного ответа от LLM по запросу "
+                            f"«{query}», но нашёл документы: {names}.\n"
+                            "Открой их кнопками ниже или переформулируй вопрос."
+                        )
+                    else:
+                        text = (
+                            f"🤔 По запросу «{query}» ничего не нашлось. "
+                            "Попробуй переформулировать."
+                        )
 
                 # Build inline keyboard with file buttons
                 # Look up sensitive flag per file so we can prefix with 🔒.
