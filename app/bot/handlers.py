@@ -1289,6 +1289,29 @@ class BotHandlers:
                 text = result["text"] if isinstance(result, dict) else result
                 file_ids = result.get("file_ids", {}) if isinstance(result, dict) else {}
 
+                # Defensive: LLM occasionally returns empty/whitespace-only output
+                # (refusal, hit max_tokens before producing text, model glitch).
+                # Telegram rejects empty messages with "Message text is empty",
+                # which we used to surface as "❌ Ошибка поиска". Replace with a
+                # sane fallback so the user still sees the matched files.
+                if not text or not text.strip():
+                    logger.warning(
+                        f"Empty LLM search response for query={query!r}; "
+                        f"falling back to file list ({len(file_ids)} matches)"
+                    )
+                    if file_ids:
+                        names = ", ".join(list(file_ids.values())[:5])
+                        text = (
+                            f"🤔 Не получил внятного ответа от LLM по запросу "
+                            f"«{query}», но нашёл документы: {names}.\n"
+                            "Открой их кнопками ниже или переформулируй вопрос."
+                        )
+                    else:
+                        text = (
+                            f"🤔 По запросу «{query}» ничего не нашлось. "
+                            "Попробуй переформулировать."
+                        )
+
                 # Build inline keyboard with file buttons
                 # Look up sensitive flag per file so we can prefix with 🔒.
                 sensitive_ids: set[str] = set()
