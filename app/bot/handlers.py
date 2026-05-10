@@ -122,6 +122,10 @@ class BotHandlers:
         app.add_handler(CallbackQueryHandler(self.handle_dedup_choice, pattern="^dedup:"))
         app.add_handler(CallbackQueryHandler(self.handle_file_send, pattern="^file:"))
         app.add_handler(CallbackQueryHandler(self.handle_note_open, pattern="^note:o:"))
+        app.add_handler(CallbackQueryHandler(self.handle_note_edit_start, pattern="^note:e:"))
+        app.add_handler(CallbackQueryHandler(self.handle_note_delete_confirm, pattern="^note:d:"))
+        app.add_handler(CallbackQueryHandler(self.handle_note_delete, pattern="^note:dc:"))
+        app.add_handler(CallbackQueryHandler(self.handle_note_delete_cancel, pattern="^note:dx:"))
         app.add_handler(CallbackQueryHandler(self.handle_notes_page, pattern="^np:"))
 
         # Text messages → search / Q&A
@@ -729,6 +733,12 @@ class BotHandlers:
             return
 
         # PIN entry path — if a sensitive file is awaiting unlock, treat
+        # Note edit flow takes priority over both PIN and date queries.
+        pending_edit = context.user_data.get("pending_note_edit")
+        if pending_edit:
+            await self._handle_note_edit_text(update, context, query, pending_edit)
+            return
+
         # the next text message as the PIN attempt.
         pending = context.user_data.get("pending_open")
         if pending:
@@ -875,6 +885,104 @@ class BotHandlers:
         await update.message.reply_text(
             text, parse_mode="HTML", reply_markup=markup,
             disable_web_page_preview=True,
+        )
+
+    async def _handle_note_edit_text(self, update, context, new_text: str, pending: dict):
+        """User had tapped ✏️ on a note and now sent new text. Replace
+        notes.content + title, refresh FTS, re-embed Qdrant chunks for
+        this note. Cancel via /cancel."""
+        import re as _re
+        import time
+        import json as _j
+        nid = int(pending.get("note_id") or 0)
+        if not nid:
+            context.user_data.pop("pending_note_edit", None)
+            return
+        # User can abort
+        if new_text.strip().lower() in ("/cancel", "отмена", "cancel"):
+            context.user_data.pop("pending_note_edit", None)
+            await update.message.reply_text("↩ Редактирование отменено.")
+            return
+        # Stale prompt (older than 5 min) — drop it
+        if time.time() - pending.get("asked_at", 0) > 300:
+            context.user_data.pop("pending_note_edit", None)
+            await update.message.reply_text(
+                "⏱ Запрос устарел. Открой заметку ещё раз и нажми ✏️."
+            )
+            return
+
+        body = new_text.strip()
+        first = _re.sub(r"^#+\s+", "", body.split("\n")[0]).strip()
+        first = _re.split(r"\s{2,}|https?://", first)[0].strip()
+        title = first[:60] or "(без заголовка)"
+
+        db = self.pipeline.db
+        try:
+            await db.db.execute(
+                "UPDATE notes SET content=?, title=? WHERE id=?",
+                (body, title, nid),
+            )
+            await db.db.commit()
+            # FTS rebuild for this row only is cheap via the trigger;
+            # the existing notes_au trigger covers it on UPDATE.
+        except Exception as exc:
+            context.user_data.pop("pending_note_edit", None)
+            await update.message.reply_text(f"⚠ Не удалось сохранить: {exc}")
+            return
+
+        # Re-embed: drop the note's Qdrant points and re-upsert chunks.
+        try:
+            from qdrant_client.models import (Filter, FieldCondition,
+                                              MatchValue, PointStruct)
+            import uuid
+            vs = self.pipeline.vector_store
+            coll = vs.qdrant_config.collection_name
+            vs._client.delete(
+                collection_name=coll,
+                points_selector=Filter(must=[FieldCondition(
+                    key="note_id", match=MatchValue(value=nid),
+                )]),
+                wait=True,
+            )
+            text_with_title = f"{title}\n\n{body}" if title else body
+            words = text_with_title.split()
+            CHUNK = 300
+            OVERLAP = 50
+            chunks = []
+            i = 0
+            while i < len(words):
+                chunks.append(" ".join(words[i:i + CHUNK]))
+                i += CHUNK - OVERLAP
+            if chunks:
+                emb = vs._get_gemini_embedder()
+                vectors = emb.embed_texts(chunks, task_type="RETRIEVAL_DOCUMENT")
+                points = []
+                for ci, (chunk_text, vec) in enumerate(zip(chunks, vectors)):
+                    pid = str(uuid.uuid5(uuid.NAMESPACE_DNS,
+                                         f"note:{nid}:chunk:{ci}"))
+                    points.append(PointStruct(
+                        id=pid, vector=vec,
+                        payload={
+                            "type": "note", "note_id": nid,
+                            "chunk_index": ci, "text": chunk_text[:5000],
+                            "title": title[:200],
+                        },
+                    ))
+                vs._client.upsert(collection_name=coll, points=points, wait=True)
+        except Exception as exc:
+            logger.warning(f"note edit re-embed failed for {nid}: {exc}")
+
+        # Wipe search cache so the next query sees the new text
+        try:
+            await db.db.execute("DELETE FROM search_cache")
+            await db.db.commit()
+        except Exception:
+            pass
+
+        context.user_data.pop("pending_note_edit", None)
+        await update.message.reply_text(
+            f"✅ Заметка обновлена.\n📝 <b>{title}</b>",
+            parse_mode="HTML",
         )
 
     async def _handle_pin_attempt(self, update, context, pin_attempt, pending):
@@ -1340,15 +1448,203 @@ class BotHandlers:
         when = (n.get("created_at") or "")[:16]
         src = n.get("source", "")
         text = f"📝 <b>{title}</b>\n<i>{when} · {src}</i>\n\n{body}"
-        if len(text) > 4000:
-            text = text[:4000] + "\n…"
+        if len(text) > 3900:
+            text = text[:3900] + "\n…"
+        # Edit / Delete actions for the note. The same `short` key is
+        # already in `_pending_files` from the open step so we reuse it.
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✏️ Редактировать",
+                                 callback_data=f"note:e:{short}"),
+            InlineKeyboardButton("🗑 Удалить",
+                                 callback_data=f"note:d:{short}"),
+        ]])
         await query.answer()
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=text,
             parse_mode="HTML",
             disable_web_page_preview=True,
+            reply_markup=markup,
         )
+
+    @owner_only
+    async def handle_note_edit_start(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ):
+        """User tapped ✏️ — stash the note id, wait for the next text
+        message in `handle_text` which will accept it as the new content."""
+        import time
+        query = update.callback_query
+        parts = query.data.split(":")  # "note:e:<short>"
+        if len(parts) < 3:
+            await query.answer()
+            return
+        short = parts[2]
+        note_id = self._pending_files.get(f"note:{short}")
+        if not note_id:
+            await query.answer("⏱ Запрос устарел", show_alert=True)
+            return
+        context.user_data["pending_note_edit"] = {
+            "note_id": int(note_id),
+            "asked_at": time.time(),
+        }
+        await query.answer("✏️ Жду новый текст")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=(
+                "✏️ Пришли новый текст заметки одним сообщением.\n"
+                "Старое содержимое будет полностью заменено.\n"
+                "/cancel — отмена."
+            ),
+        )
+
+    @owner_only
+    async def handle_note_delete_confirm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ):
+        """User tapped 🗑 Удалить — show a confirm prompt."""
+        query = update.callback_query
+        parts = query.data.split(":")
+        if len(parts) < 3:
+            await query.answer()
+            return
+        short = parts[2]
+        note_id = self._pending_files.get(f"note:{short}")
+        if not note_id:
+            await query.answer("⏱ Запрос устарел", show_alert=True)
+            return
+        # Re-fetch the title for the prompt
+        try:
+            cur = await self.pipeline.db.db.execute(
+                "SELECT title FROM notes WHERE id=?", (int(note_id),),
+            )
+            row = await cur.fetchone()
+            title = (dict(row).get("title") or "")[:60] if row else f"#{note_id}"
+        except Exception:
+            title = f"#{note_id}"
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🗑 Подтвердить удаление",
+                                 callback_data=f"note:dc:{short}"),
+            InlineKeyboardButton("↩ Отмена", callback_data="note:dx:0"),
+        ]])
+        await query.answer()
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"🗑 Удалить заметку «{title}»?",
+            reply_markup=markup,
+        )
+
+    @owner_only
+    async def handle_note_delete(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ):
+        """User confirmed 🗑 — cascade delete from SQLite + Qdrant +
+        wiki + the on-disk .md."""
+        query = update.callback_query
+        parts = query.data.split(":")  # "note:dc:<short>"
+        if len(parts) < 3:
+            await query.answer()
+            return
+        short = parts[2]
+        note_id = self._pending_files.get(f"note:{short}")
+        if not note_id:
+            await query.answer("⏱ Запрос устарел", show_alert=True)
+            return
+        note_id = int(note_id)
+        db = self.pipeline.db
+        # 1. fetch metadata for cleanup paths
+        try:
+            cur = await db.db.execute(
+                "SELECT title, content, md_path FROM notes WHERE id=?",
+                (note_id,),
+            )
+            row = await cur.fetchone()
+        except Exception:
+            row = None
+        title = "?"
+        md_path = ""
+        if row:
+            n = dict(row)
+            title = (n.get("title") or "")[:50] or "?"
+            md_path = n.get("md_path") or ""
+
+        errors: list[str] = []
+
+        # 2. Qdrant — delete every point with payload.note_id == this id
+        try:
+            from qdrant_client.models import (Filter, FieldCondition,
+                                              MatchValue)
+            vs = self.pipeline.vector_store
+            vs._client.delete(
+                collection_name=vs.qdrant_config.collection_name,
+                points_selector=Filter(must=[FieldCondition(
+                    key="note_id", match=MatchValue(value=note_id),
+                )]),
+                wait=True,
+            )
+        except Exception as exc:
+            errors.append(f"qdrant: {exc}")
+
+        # 3. SQLite — note_enrichments cascades via FK; just drop notes row.
+        try:
+            await db.db.execute("DELETE FROM notes WHERE id=?", (note_id,))
+            await db.db.commit()
+        except Exception as exc:
+            errors.append(f"sqlite: {exc}")
+
+        # 4. On-disk .md (Obsidian-style transcript copy)
+        if md_path:
+            try:
+                p = Path(md_path)
+                if p.exists():
+                    p.unlink()
+            except Exception as exc:
+                errors.append(f"md: {exc}")
+
+        # 5. Wiki vault — find any wiki/notes/*-<id>.md and remove it.
+        # build_wiki regenerates the rest from SQLite, so deleting just
+        # this page is enough.
+        try:
+            from app.config import get_settings
+            wiki_notes = get_settings().wiki.resolved_path / "notes"
+            if wiki_notes.exists():
+                for p in wiki_notes.glob(f"*-{note_id}.md"):
+                    p.unlink()
+        except Exception as exc:
+            errors.append(f"wiki: {exc}")
+
+        # 6. cognee — best-effort; sidecar exposes delete via dataset
+        # API that we don't have a clean wrapper for yet, so skip and
+        # leave a TODO for the outbox-driven version (Sprint D).
+
+        if errors:
+            await query.answer(
+                "⚠ удалено с замечаниями", show_alert=True,
+            )
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"🗑 «{title}» удалена частично: {'; '.join(errors)}",
+            )
+        else:
+            await query.answer("🗑 удалена")
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"🗑 «{title}» удалена.",
+            )
+        # Clear the pending key (best-effort)
+        self._pending_files.pop(f"note:{short}", None)
+
+    @owner_only
+    async def handle_note_delete_cancel(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ):
+        """User tapped ↩ Отмена on a delete prompt."""
+        query = update.callback_query
+        await query.answer("Отменено")
+        try:
+            await query.edit_message_text("↩ Удаление отменено.")
+        except Exception:
+            pass
 
     @owner_only
     async def handle_file_send(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
