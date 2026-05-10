@@ -45,35 +45,28 @@ SEARCH_USER_COMPACT = """Documents from the archive:
 
 User's question: {query}
 
-FORMAT your answer exactly like this example:
+Answer in the same language as the question. Be concise — Telegram chat,
+not an essay. Pick the SINGLE most relevant document and answer about
+that one. Mention other documents only if the question is explicitly
+about multiple.
 
-📋 <b>Visit 01.05.2025 — Dr. Smith</b>
+FORMAT (Telegram HTML, no Markdown):
 
-💊 Azithromycin 250 mg
-   2 tabs day 1, then 1 tab × 4 days
-
-💊 Omeprazole 20 mg
-   1 cap daily before breakfast, 2 weeks
-
-———
-
-📋 <b>Visit 09.06.2025 — Dr. Jones</b>
-
-💊 Ibuprofen 800 mg
-   As needed for pain
+📄 <b>Document type — date or name</b>
+• Key fact 1
+• Key fact 2 (date / number / amount / expiry)
+• Action item if any (with deadline)
 
 RULES:
-- Answer ONLY what was asked
-- Use emoji as section markers: 📋 for headers, 💊💰📄📅🏥 for items as appropriate
-- <b>bold</b> for headers only
-- One empty line between items, "———" between document sections
-- Short lines, no long paragraphs
-- Max 1500 chars
-- No markdown, only HTML <b> <i> <code>"""
+- Answer ONLY what was asked, no preamble like "I found ...", "В архиве ..."
+- Use bullet "•" for facts; <b>bold</b> for the header line only
+- For "find X" / "найди X" questions: one document, 3-5 bullets, no more
+- Max 1200 chars total
+- HTML only: <b>, <i>, <code> — no Markdown stars or hashes"""
 
 # Smart search thresholds
 MIN_SCORE = 0.50        # Discard chunks below this
-MAX_CHUNKS_LLM = 5      # Send best chunk from top N documents
+MAX_CHUNKS_LLM = 3      # Send best chunk from top N documents (was 5; trims button spam)
 MAX_WORDS_PER_CHUNK = 1500  # More text for detailed answer
 CACHE_TTL_SECONDS = 3600   # 1 hour
 
@@ -152,9 +145,19 @@ class LLMSearch:
             file_best.append((fid, best))
         file_best.sort(key=lambda x: x[1].score, reverse=True)
 
+        # "find X" / "найди X" intent → top-1 button only. Stops button spam
+        # when several documents fuzzy-match (e.g. passport search returning
+        # birth_certificate, I-94, and an immigration exhibit alongside the
+        # actual passport).
+        q_low = query.strip().lower()
+        find_intent = (
+            q_low.startswith(("найди", "найти", "find", "show me", "where is", "где"))
+            or len(q_low.split()) <= 3
+        )
+        max_buttons = 1 if find_intent else MAX_CHUNKS_LLM
         seen_files = {
             fid: best.metadata.get("filename", "file")
-            for fid, best in file_best[:MAX_CHUNKS_LLM]
+            for fid, best in file_best[:max_buttons]
         }
 
         # Step 3: Build context from top documents (use full text from DB when available)
