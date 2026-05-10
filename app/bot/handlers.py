@@ -122,6 +122,7 @@ class BotHandlers:
         app.add_handler(CallbackQueryHandler(self.handle_dedup_choice, pattern="^dedup:"))
         app.add_handler(CallbackQueryHandler(self.handle_file_send, pattern="^file:"))
         app.add_handler(CallbackQueryHandler(self.handle_note_open, pattern="^note:o:"))
+        app.add_handler(CallbackQueryHandler(self.handle_notes_page, pattern="^np:"))
 
         # Text messages → search / Q&A
         app.add_handler(MessageHandler(
@@ -438,17 +439,108 @@ class BotHandlers:
             f"Расход: ${llm_stats['total_cost_usd']:.4f}"
         )
 
+    NOTES_PAGE_SIZE = 10
+
     @owner_only
     async def cmd_notes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        notes = await self.pipeline.db.list_notes(limit=10)
-        if not notes:
-            await update.message.reply_text("📝 Заметок пока нет.")
+        await self._render_notes_page(update, context, page=0)
+
+    async def _render_notes_page(self, update_or_query, context, page: int = 0):
+        """Render a page of notes — `<date> · <title>` per row, button per
+        note that pulls the full transcript on tap. Pagination via prev/
+        next buttons in the same callback family (`np:<page>`).
+        """
+        from datetime import datetime
+        page = max(0, int(page))
+        size = self.NOTES_PAGE_SIZE
+        db = self.pipeline.db
+        cur = await db.db.execute("SELECT COUNT(*) FROM notes WHERE content!=''")
+        row = await cur.fetchone()
+        total = row[0] if row else 0
+        if total == 0:
+            target = (
+                update_or_query.message.reply_text
+                if hasattr(update_or_query, "message")
+                else update_or_query.message.edit_text
+            )
+            await target("📝 Заметок пока нет.")
             return
-        lines = []
-        for n in notes:
-            file_ref = f" (📎 к файлу)" if n.get("file_id") else ""
-            lines.append(f"• {n['content'][:80]}{file_ref}\n  {n['created_at'][:16]}")
-        await update.message.reply_text(f"📝 Заметки ({len(notes)}):\n\n" + "\n\n".join(lines))
+        max_page = max(0, (total - 1) // size)
+        page = min(page, max_page)
+
+        cur = await db.db.execute(
+            "SELECT id, title, content, source, category, created_at "
+            "FROM notes WHERE content!='' "
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (size, page * size),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+
+        SRC_EMOJI = {
+            "voice": "🎤", "text": "✍️", "telegram": "💬",
+            "checkin": "📊", "reminder": "🔔", "web": "🌐", "file": "📎",
+        }
+        lines = [
+            f"📝 <b>Все заметки</b> — {total} шт. "
+            f"(страница {page+1}/{max_page+1})\n",
+        ]
+        keyboard = []
+        for n in rows:
+            ts = (n.get("created_at") or "")
+            date = ts[:10]
+            time = ts[11:16]
+            title = (n.get("title") or "").strip() or "(без заголовка)"
+            src = SRC_EMOJI.get(n.get("source", ""), "•")
+            short = f"n{n['id']}"
+            self._pending_files[f"note:{short}"] = n["id"]
+            line_label = f"{date} · {title[:60]}"
+            lines.append(f"{src} <code>{date}</code> {time} — {title[:90]}")
+            keyboard.append([InlineKeyboardButton(
+                f"{src} {line_label[:50]}",
+                callback_data=f"note:o:{short}",
+            )])
+        # Pagination row
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                "◀ Назад", callback_data=f"np:{page-1}"))
+        if page < max_page:
+            nav.append(InlineKeyboardButton(
+                "Вперёд ▶", callback_data=f"np:{page+1}"))
+        if nav:
+            keyboard.append(nav)
+
+        text = "\n".join(lines)
+        markup = InlineKeyboardMarkup(keyboard)
+        # Whether we're rendering fresh or paginating
+        if hasattr(update_or_query, "message") and hasattr(update_or_query, "data"):
+            # CallbackQuery from the np: button — edit in place
+            try:
+                await update_or_query.edit_message_text(
+                    text, parse_mode="HTML", reply_markup=markup,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                await update_or_query.message.reply_text(
+                    text, parse_mode="HTML", reply_markup=markup,
+                    disable_web_page_preview=True,
+                )
+        else:
+            await update_or_query.message.reply_text(
+                text, parse_mode="HTML", reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+
+    @owner_only
+    async def handle_notes_page(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Pagination callback for /notes (np:<page>)."""
+        query = update.callback_query
+        await query.answer()
+        try:
+            page = int(query.data.split(":", 1)[1])
+        except Exception:
+            page = 0
+        await self._render_notes_page(query, context, page=page)
 
     @owner_only
     async def cmd_skills(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1511,6 +1603,49 @@ class BotHandlers:
             except Exception:
                 pass
 
+    @staticmethod
+    def _classify_search_intent(query: str) -> str:
+        """Decide which store the user wants to hit.
+
+        Returns one of:
+          * 'notes' — query mentions заметки / notes / transcripts /
+                     check-in / things only stored as voice or text notes
+          * 'files' — query names a document type or document keywords
+          * 'both'  — ambiguous, search across both stores
+
+        Used by `_do_search` so a "найди заметку про CRM" query doesn't
+        return passport scans, and "найди паспорт" doesn't get drowned
+        in matching notes.
+        """
+        q = (query or "").strip().lower()
+        notes_kw = (
+            "заметк", "заметку", "заметки", "наговорил", "наговор",
+            "записал", "запись на диктофон", "запис",
+            "checkin", "check-in", "чек-ин", "чек ин",
+            "transcript", "voice note", "запис голос",
+            "что я сказал", "что я говорил",
+        )
+        files_kw = (
+            "документ", "файл", "паспорт", "passport",
+            "ssn", "социального страхования", "social security",
+            "права", "license", "permit", "i-94", "i94",
+            "i-765", "i-131", "ead", "виза", "visa",
+            "свидетельств", "контракт", "договор", "contract",
+            "pay stub", "paystub", "pay-stub",
+            "расчётны", "расчетны", "зарпл",
+            "w-9", "w9", "w-2", "w2", "1099",
+            "налог", "tax form", "invoice", "счёт", "счет",
+            "медицинский анализ", "lab result", "мрт", "mri",
+            "выписк", "after visit",
+        )
+        n = any(k in q for k in notes_kw)
+        f = any(k in q for k in files_kw)
+        if n and not f:
+            return "notes"
+        if f and not n:
+            return "files"
+        return "both"
+
     async def _do_search(self, update: Update, query: str, context=None):
         """Perform semantic search and reply with file download buttons."""
         chat_id = update.effective_chat.id if update.effective_chat else 0
@@ -1558,9 +1693,18 @@ class BotHandlers:
             try:
                 # Show typing indicator while searching
                 await update.effective_chat.send_action("typing")
+                # Decide which kind of source the user is asking about.
+                # "найди заметку" → notes only. "найди паспорт / документ /
+                # SSN / pay-stub" → files only. Anything else → both.
+                intent = self._classify_search_intent(query)
                 result = await self.search_fn(query, history=history, compact=True)
                 text = result["text"] if isinstance(result, dict) else result
                 file_ids = result.get("file_ids", {}) if isinstance(result, dict) else {}
+                note_ids_raw = result.get("note_ids", {}) if isinstance(result, dict) else {}
+                if intent == "notes":
+                    file_ids = {}
+                elif intent == "files":
+                    note_ids_raw = {}
 
                 # Defensive: LLM occasionally returns empty/whitespace-only output
                 # (refusal, hit max_tokens before producing text, model glitch).
@@ -1637,7 +1781,8 @@ class BotHandlers:
                     )
 
                 # Note buttons (semantic search now matches transcripts too).
-                note_ids = result.get("note_ids", {}) if isinstance(result, dict) else {}
+                # Use the intent-filtered set, not the raw result
+                note_ids = note_ids_raw if isinstance(note_ids_raw, dict) else {}
                 for nid, ntitle in note_ids.items():
                     short = f"n{nid}"
                     self._pending_files[f"note:{short}"] = int(nid) if str(nid).isdigit() else nid
