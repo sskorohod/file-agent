@@ -95,8 +95,8 @@ _PERSON_PATTERN = re.compile(
 )
 
 
-def extract_entities(*texts: str, tags: list[str] | None = None) -> list[str]:
-    """Return a deduplicated list of likely entity labels."""
+def _regex_entities(*texts: str, tags: list[str] | None = None) -> list[str]:
+    """Fallback regex extractor (used when LLM is disabled / sidecar down)."""
     seen: dict[str, str] = {}
     for t in texts:
         if not t:
@@ -105,8 +105,6 @@ def extract_entities(*texts: str, tags: list[str] | None = None) -> list[str]:
             if len(m) < 4:
                 continue
             words = m.split()
-            # Drop sentence starters: an entity is at least 2 words OR
-            # an explicit org hint OR all-caps abbreviation.
             if len(words) >= 2 or any(h in m for h in _ORG_HINTS) or m.isupper():
                 key = m.lower()
                 seen.setdefault(key, m)
@@ -117,10 +115,43 @@ def extract_entities(*texts: str, tags: list[str] | None = None) -> list[str]:
     return sorted(seen.values(), key=lambda x: (-len(x), x))[:25]
 
 
+# Lazily instantiated EntityExtractor — set in main() when --use-llm is on.
+_LLM_EXTRACTOR = None
+
+
+async def extract_entities(
+    *texts: str, tags: list[str] | None = None,
+) -> list[str]:
+    """Async LLM-driven entity extraction with regex fallback.
+
+    When ``_LLM_EXTRACTOR`` is set (--use-llm path), each unique block of
+    text gets one LLM call (cached by content sha256). Result is the
+    canonical name from `entity_aliases`. Falls through to regex if the
+    extractor is None or any LLM call raises.
+    """
+    if _LLM_EXTRACTOR is None:
+        return _regex_entities(*texts, tags=tags)
+    seen: dict[str, str] = {}
+    blob = "\n\n".join(t for t in texts if t)
+    if not blob.strip():
+        return _regex_entities(*texts, tags=tags)
+    try:
+        ents = await _LLM_EXTRACTOR.extract(blob)
+        for e in ents:
+            seen.setdefault(e.name.lower(), e.name)
+    except Exception:
+        return _regex_entities(*texts, tags=tags)
+    if tags:
+        for t in tags:
+            if t and t.lower() not in seen:
+                seen[t.lower()] = t
+    return sorted(seen.values(), key=lambda x: (-len(x), x))[:25]
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 
-async def main(no_entities: bool):
+async def main(no_entities: bool, use_llm: bool = False):
     from app.config import get_settings
     from app.storage.db import Database
 
@@ -132,6 +163,18 @@ async def main(no_entities: bool):
 
     db = Database(s.database.path)
     await db.connect()
+
+    # Sprint G — wire LLM extractor (optional). When enabled, replaces
+    # the regex catch-all with proxy-driven (gpt-5.4-mini) extraction +
+    # alias canonicalisation + content-hash cache. Costs ~$0.0002 per
+    # source on first run, free thereafter.
+    if use_llm and not no_entities:
+        from app.llm.entities import EntityExtractor
+        global _LLM_EXTRACTOR
+        _LLM_EXTRACTOR = EntityExtractor(db)
+        print("entity extractor: LLM (gpt-5.4-mini via proxy)")
+    else:
+        print("entity extractor: regex (legacy)")
 
     # ── 1. Schema page (CLAUDE.md) ──────────────────────────────────────
     (vault / "CLAUDE.md").write_text(_schema_md(s), encoding="utf-8")
@@ -177,10 +220,10 @@ async def main(no_entities: bool):
         file_pages[f["id"]] = rel
         (vault / "docs" / cat).mkdir(parents=True, exist_ok=True)
 
-        ent = extract_entities(
+        ent = (await extract_entities(
             f.get("summary", ""), owner, dtype,
             tags=tags,
-        ) if not no_entities else []
+        )) if not no_entities else []
 
         front = fm({
             "type": "document",
@@ -240,7 +283,7 @@ async def main(no_entities: bool):
             tags = json.loads(n.get("tags") or "[]")
         except Exception:
             tags = []
-        ent = extract_entities(title, body, tags=tags) if not no_entities else []
+        ent = (await extract_entities(title, body, tags=tags)) if not no_entities else []
 
         front = fm({
             "type": "note",
@@ -294,10 +337,10 @@ async def main(no_entities: bool):
                 tags = json.loads(f.get("tags") or "[]")
             except Exception:
                 tags = []
-            for e in extract_entities(
+            for e in (await extract_entities(
                 f.get("summary", ""), meta.get("owner", ""),
                 meta.get("document_type", ""), tags=tags,
-            ):
+            )):
                 entity_refs.setdefault(e, []).append((
                     "document",
                     file_pages[f["id"]].rsplit(".md", 1)[0],
@@ -308,9 +351,9 @@ async def main(no_entities: bool):
                 tags = json.loads(n.get("tags") or "[]")
             except Exception:
                 tags = []
-            for e in extract_entities(
+            for e in (await extract_entities(
                 n.get("title") or "", n.get("content") or "", tags=tags,
-            ):
+            )):
                 entity_refs.setdefault(e, []).append((
                     "note",
                     note_pages[n["id"]].rsplit(".md", 1)[0],
@@ -490,5 +533,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-entities", action="store_true",
                     help="skip entity extraction (faster, but no graph)")
+    ap.add_argument("--use-llm", action="store_true",
+                    help="use the LLM entity extractor (Sprint G); "
+                         "default is regex fallback for cheap/offline runs")
     args = ap.parse_args()
-    asyncio.run(main(args.no_entities))
+    asyncio.run(main(args.no_entities, args.use_llm))

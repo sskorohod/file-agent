@@ -87,7 +87,12 @@ notes-decrypt:
 # default ~/ai-agent-files/wiki/. One markdown page per document, per
 # transcript, and per auto-extracted entity, with backlinks. Pure
 # autogen — manual edits go under <vault>/manual/ instead.
+# `wiki-build`     — LLM-driven entity extraction via proxy (Sprint G)
+# `wiki-build-fast`— regex fallback, no LLM cost
 wiki-build:
+	.venv/bin/python scripts/build_wiki.py --use-llm
+
+wiki-build-fast:
 	.venv/bin/python scripts/build_wiki.py
 
 # Wipe the autogen subdirs of the wiki vault (keeps manual/, raw/).
