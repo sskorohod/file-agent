@@ -129,8 +129,27 @@ class LLMSearch:
             except Exception as e:
                 logger.warning(f"cognee search failed, falling back to vector_store: {e}")
 
-        # Step 1: Semantic search (wider net)
-        results = await self.vector_store.search(query, top_k=top_k)
+        # Step 1: Semantic search (wider net). Pull a few extra hits because
+        # we'll drop anything without a matching SQLite row — vector chunks
+        # without file_id (legacy note vectors, abandoned ingest experiments)
+        # used to win the top slot on short queries by sheer text overlap.
+        results = await self.vector_store.search(query, top_k=top_k * 2)
+
+        # Drop hits with no file_id, or whose file row is gone from SQLite.
+        # Without this a single orphan point can dominate the top-1 result
+        # on a 0.69 fuzzy match while real documents at 0.63 sit below it.
+        if results and self.db:
+            valid = []
+            for r in results:
+                if not r.file_id:
+                    continue
+                try:
+                    fr = await self.db.get_file(r.file_id)
+                except Exception:
+                    fr = None
+                if fr:
+                    valid.append(r)
+            results = valid[:top_k]
 
         if not results:
             return {"text": "🔍 По вашему запросу ничего не найдено.", "file_ids": {}, "cached": False}
