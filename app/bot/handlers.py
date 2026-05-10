@@ -1078,18 +1078,30 @@ class BotHandlers:
 
     @owner_only
     async def handle_file_send(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Send a file document to the user when they click a file button."""
+        """Send a file document to the user when they click a file button.
+
+        Telegram allows ``query.answer()`` ONCE per callback. Earlier code
+        called it eagerly at the top, which silently swallowed every
+        subsequent ``query.answer(text=…, show_alert=True)`` — so when a
+        sensitive file's PIN check failed, the user saw nothing happen
+        instead of the "PIN не задан" prompt. We now call ``answer()``
+        once with the right message at the end of every code path.
+        """
         query = update.callback_query
-        await query.answer()
 
         parts = query.data.split(":")  # "file:s:short_key"
         if len(parts) < 3:
+            await query.answer()
             return
 
         short_key = parts[2]
-        file_id = self._pending_files.pop(f"fs:{short_key}", None) or context.bot_data.pop(f"fs:{short_key}", None)
+        # Peek (not pop) so a transient failure / repeated tap still works.
+        file_id = (
+            self._pending_files.get(f"fs:{short_key}")
+            or context.bot_data.get(f"fs:{short_key}")
+        )
         if not file_id:
-            await query.answer("❌ Данные устарели", show_alert=True)
+            await query.answer("❌ Данные устарели — повторите поиск", show_alert=True)
             return
 
         db = self.pipeline.db
@@ -1108,9 +1120,25 @@ class BotHandlers:
             db_obj = self.pipeline.db
             pin_hash = await db_obj.get_secret("PIN_HASH") if db_obj else None
             if not pin_hash:
+                # Dismiss the spinner with a short alert AND post a normal
+                # chat message — alerts are limited to 200 chars and one
+                # call per callback, but the chat message persists so the
+                # user has clear instructions.
                 await query.answer(
-                    "🔒 PIN не задан. Открой /settings → Security и установи PIN.",
+                    "🔒 PIN не задан — нужно установить",
                     show_alert=True,
+                )
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        f"🔒 Файл *{file.get('original_name', 'документ')}* "
+                        f"содержит личные данные и требует PIN для открытия.\n\n"
+                        f"Открой <a href=\"https://fag.n8nskorx.top/settings\">"
+                        f"Settings → Security</a> и задай 4–6-значный PIN, "
+                        f"потом нажми кнопку ещё раз."
+                    ),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
                 )
                 return
             # Stash the pending file id; next text message is interpreted as PIN.
@@ -1119,6 +1147,7 @@ class BotHandlers:
                 "asked_at": time.time(),
                 "attempts": 0,
             }
+            await query.answer("🔒 Введи PIN сообщением")
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=(
@@ -1129,12 +1158,27 @@ class BotHandlers:
             )
             return
 
+        # Non-sensitive — send straight away.
+        await query.answer()
         await self._send_file_to_user(context, query.message.chat_id, file)
 
-    async def _send_file_to_user(self, context, chat_id: int, file: dict, *, decrypt: bool = False):
-        """Send a file (optionally decrypting on-the-fly)."""
+    # Documents the bot pushes into a chat self-destruct after this many
+    # seconds — Telegram chat history shouldn't keep copies of the user's
+    # passport / SSN / pay-stubs sitting around.
+    AUTO_DELETE_SECONDS = 15 * 60  # 15 minutes
+
+    async def _send_file_to_user(
+        self, context, chat_id: int, file: dict, *, decrypt: bool = False,
+    ):
+        """Send a file (optionally decrypting on-the-fly) and schedule
+        auto-deletion of the chat message after AUTO_DELETE_SECONDS."""
         file_path = Path(file["stored_path"])
         filename = file.get("original_name", file_path.name)
+        ttl_min = self.AUTO_DELETE_SECONDS // 60
+        caption = (
+            f"⏳ Это сообщение удалится через {ttl_min} мин — "
+            "сохрани файл, если он нужен позже."
+        )
 
         if decrypt:
             try:
@@ -1145,13 +1189,32 @@ class BotHandlers:
             data = await self.pipeline.file_storage.read_bytes(file_path, decrypt_with=key)
             buf = BytesIO(data)
             buf.name = filename
-            await context.bot.send_document(chat_id=chat_id, document=buf, filename=filename)
+            sent = await context.bot.send_document(
+                chat_id=chat_id, document=buf, filename=filename, caption=caption,
+            )
         else:
-            await context.bot.send_document(
+            sent = await context.bot.send_document(
                 chat_id=chat_id,
                 document=open(file_path, "rb"),
                 filename=filename,
+                caption=caption,
             )
+        await self._schedule_auto_delete(chat_id, sent.message_id, file.get("id", ""))
+
+    async def _schedule_auto_delete(self, chat_id: int, message_id: int, file_id: str = ""):
+        """Persist a deletion task. The cleanup loop in main.lifespan runs
+        every minute and removes due messages."""
+        from datetime import datetime, timedelta, timezone
+        delete_at = datetime.now(timezone.utc) + timedelta(seconds=self.AUTO_DELETE_SECONDS)
+        try:
+            await self.pipeline.db.schedule_message_deletion(
+                chat_id=chat_id,
+                message_id=message_id,
+                delete_at_iso=delete_at.strftime("%Y-%m-%d %H:%M:%S"),
+                note=file_id[:32],
+            )
+        except Exception as exc:
+            logger.warning(f"auto-delete schedule failed: {exc}")
 
     async def _cascade_delete(self, file_id: str):
         """Delete file from disk + Qdrant + SQLite."""
@@ -1340,27 +1403,53 @@ class BotHandlers:
                             "Попробуй переформулировать."
                         )
 
-                # Build inline keyboard with file buttons
-                # Look up sensitive flag per file so we can prefix with 🔒.
-                sensitive_ids: set[str] = set()
+                # Build inline keyboard with file buttons.
+                # Pull `sensitive` + `metadata_json.display_label` per file
+                # in one shot so buttons read like "🔒 Паспорт — Вячеслав"
+                # instead of "🔒 photo_AQADyxdrG8oAARBKfg.jpg".
+                file_meta: dict[str, dict] = {}
                 if file_ids:
                     try:
                         placeholders = ",".join("?" * len(file_ids))
                         cur = await self.pipeline.db.db.execute(
-                            f"SELECT id FROM files WHERE sensitive=1 AND id IN ({placeholders})",
+                            "SELECT id, original_name, sensitive, metadata_json "
+                            f"FROM files WHERE id IN ({placeholders})",
                             tuple(file_ids.keys()),
                         )
-                        sensitive_ids = {row[0] for row in await cur.fetchall()}
+                        import json as _j
+                        for row in await cur.fetchall():
+                            try:
+                                meta = _j.loads(row[3] or "{}")
+                            except Exception:
+                                meta = {}
+                            file_meta[row[0]] = {
+                                "original_name": row[1],
+                                "sensitive": bool(row[2]),
+                                "display_label": (meta.get("display_label") or "").strip(),
+                                "document_type": meta.get("document_type", ""),
+                                "owner": meta.get("owner", ""),
+                            }
                     except Exception:
-                        sensitive_ids = set()
+                        file_meta = {}
 
                 keyboard = []
                 for fid, fname in file_ids.items():
                     short_key = fid[:8]
                     self._pending_files[f"fs:{short_key}"] = fid
-                    # Show filename, trim to fit Telegram button limit
-                    label = fname[:40] if len(fname) <= 40 else fname[:37] + "..."
-                    icon = "🔒" if fid in sensitive_ids else "📎"
+                    info = file_meta.get(fid, {})
+                    # Prefer display_label → human "Type — owner" → filename.
+                    label = info.get("display_label") or ""
+                    if not label:
+                        dt = info.get("document_type", "")
+                        owner = info.get("owner", "")
+                        if dt and owner:
+                            label = f"{dt} — {owner.split()[0] if owner else ''}".strip(" —")
+                        elif dt:
+                            label = dt
+                    if not label:
+                        label = fname
+                    label = label[:38] if len(label) <= 38 else label[:35] + "…"
+                    icon = "🔒" if info.get("sensitive") else "📎"
                     keyboard.append(
                         InlineKeyboardButton(f"{icon} {label}", callback_data=f"file:s:{short_key}")
                     )

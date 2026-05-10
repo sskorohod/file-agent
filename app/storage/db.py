@@ -175,6 +175,22 @@ CREATE TABLE IF NOT EXISTS dev_projects (
     cognee_token TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Telegram messages scheduled for self-destruction. The bot enqueues a
+-- row every time it sends a document so the chat history doesn't keep
+-- copies of sensitive files lying around. A background loop in the
+-- lifespan polls and deletes rows past their ``delete_at``.
+CREATE TABLE IF NOT EXISTS auto_delete_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    delete_at TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    note TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_auto_delete_pending
+    ON auto_delete_messages(deleted, delete_at);
 """
 
 
@@ -680,6 +696,36 @@ class Database:
 
     async def delete_secret(self, name: str):
         await self.db.execute("DELETE FROM secrets WHERE name=?", (name,))
+        await self.db.commit()
+
+    # ── Auto-delete (Telegram self-destructing messages) ─────────────
+
+    async def schedule_message_deletion(
+        self, chat_id: int, message_id: int,
+        delete_at_iso: str, note: str = "",
+    ) -> int:
+        """Enqueue a Telegram message for the auto-delete sweeper."""
+        cur = await self.db.execute(
+            "INSERT INTO auto_delete_messages "
+            "(chat_id, message_id, delete_at, note) VALUES (?, ?, ?, ?)",
+            (chat_id, message_id, delete_at_iso, note),
+        )
+        await self.db.commit()
+        return cur.lastrowid or 0
+
+    async def fetch_due_deletions(self, now_iso: str, limit: int = 50) -> list[dict]:
+        """Pull pending rows whose delete_at has passed."""
+        cur = await self.db.execute(
+            "SELECT id, chat_id, message_id FROM auto_delete_messages "
+            "WHERE deleted=0 AND delete_at <= ? ORDER BY delete_at LIMIT ?",
+            (now_iso, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def mark_message_deleted(self, row_id: int):
+        await self.db.execute(
+            "UPDATE auto_delete_messages SET deleted=1 WHERE id=?", (row_id,)
+        )
         await self.db.commit()
 
     # ── Insights ─────────────────────────────────────────────────────

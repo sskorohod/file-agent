@@ -23,6 +23,15 @@ Rules:
 - expiry_date: если в документе явно указан срок действия / дата окончания — укажи в формате YYYY-MM-DD. Если нет — пустая строка.
 - tags: 3-5 relevant tags, lowercase
 - sensitive: true ЕСЛИ документ содержит личные данные, PII или секретную информацию, требующую защиты при открытии. ПРИМЕРЫ TRUE: паспорт, водительские права, ID-карта, SSN/ИНН/паспортные данные, банковские выписки с номерами счетов, медицинские диагнозы и анализы, налоговые декларации, контракты с конфиденциальными условиями, платёжные ведомости, иммиграционные документы (I-94/I-765/I-131), биометрические данные. ПРИМЕРЫ FALSE: чеки на еду, рекламные гайды, технические manuals, презентации публичных компаний, статьи, образовательные материалы, рецепты, общедоступные шаблоны.
+- owner: ФИО владельца документа в формате «Имя Фамилия» (на каком языке указано в документе). Для документов без явного владельца (гайды, чеки магазина, отчёты компании) — пустая строка.
+- display_label: КОРОТКАЯ человеко-читаемая надпись для кнопки в Telegram, ≤ 35 символов. Должна быть достаточной для отличия от других похожих документов в выдаче. Примеры:
+    * «Паспорт — Вячеслав» (вместо `passport_20260329.pdf`)
+    * «Pay stub — май 2026» (вместо `VS-1642-pay-stubs-2026-05-08_11_08_38.pdf`)
+    * «CA Driver License» (вместо `photo_AQADyxdrG8oAARBKfg.jpg`)
+    * «I-94 запись — Inha» (вместо `I94 - INHA2.pdf`)
+    * «W-9 форма» (для одного W-9; если несколько — добавь год/имя)
+    * «MRI отчёт — янв 2026»
+  Используй язык запроса (русский по умолчанию). Без расширений файлов.
 - DO NOT force-fit the document. If it's a guide about marketing — say so. If it's a receipt — say so. Be honest about what you see.
 
 Respond ONLY with valid JSON, no markdown fences:
@@ -33,7 +42,9 @@ Respond ONLY with valid JSON, no markdown fences:
   "summary": "<2-3 short Russian sentences: purpose + key facts>",
   "document_type": "<specific_type>",
   "expiry_date": "<YYYY-MM-DD or empty>",
-  "sensitive": true | false
+  "sensitive": true | false,
+  "owner": "<owner full name or empty>",
+  "display_label": "<≤35 chars button label, distinguishing from similar docs>"
 }}
 """
 
@@ -79,6 +90,8 @@ class ClassificationResult:
     document_type: str
     expiry_date: str = ""      # YYYY-MM-DD if the document carries one
     sensitive: bool = False    # PII / restricted content — encrypt at rest
+    owner: str = ""            # full name of the document's subject, if any
+    display_label: str = ""    # ≤35-char Telegram button label
     skill_name: str | None = None
     model_used: str = ""
 
@@ -116,6 +129,8 @@ class Classifier:
                 document_type=llm_result.get("document_type", ""),
                 expiry_date=llm_result.get("expiry_date", "") or "",
                 sensitive=_coerce_sensitive(llm_result, matched_skill),
+                owner=(llm_result.get("owner", "") or "")[:80],
+                display_label=(llm_result.get("display_label", "") or "")[:35],
                 skill_name=matched_skill.name,
                 model_used=llm_result.get("_model", ""),
             )
@@ -156,6 +171,8 @@ class Classifier:
             document_type=llm_result.get("document_type", ""),
             expiry_date=llm_result.get("expiry_date", "") or "",
             sensitive=_coerce_sensitive(llm_result, winning_skill),
+            owner=(llm_result.get("owner", "") or "")[:80],
+            display_label=(llm_result.get("display_label", "") or "")[:35],
             skill_name=skill_name,
             model_used=llm_result.get("_model", ""),
         )
@@ -182,12 +199,14 @@ class Classifier:
             f"{base_prompt}\n\n"
             f"Available categories:\n{categories_str}\n\n"
             "Respond ONLY with valid JSON, no markdown fences:\n"
-            '{{\n  "category": "<category_name>",\n  "confidence": <0.0-1.0>,\n'
+            '{\n  "category": "<category_name>",\n  "confidence": <0.0-1.0>,\n'
             '  "tags": ["tag1", "tag2"],\n'
             '  "summary": "<2-3 short Russian sentences: purpose + key facts>",\n'
             '  "document_type": "<specific_type>",\n'
             '  "expiry_date": "<YYYY-MM-DD or empty>",\n'
-            '  "sensitive": <true|false — true for PII / personal IDs / financial / medical>\n}}'
+            '  "sensitive": <true|false>,\n'
+            '  "owner": "<full name of the document owner, or empty>",\n'
+            '  "display_label": "<≤35 chars Telegram button label, distinguishing from similar docs>"\n}'
         )
         user_msg = CLASSIFICATION_USER.format(
             filename=filename,
