@@ -209,6 +209,11 @@ async def lifespan(app: FastAPI):
     advice_task = asyncio.create_task(
         _daily_advice_loop(insights_engine, tg_app)
     )
+    auto_delete_task = None
+    if tg_app:
+        auto_delete_task = asyncio.create_task(
+            _auto_delete_loop(db, tg_app)
+        )
 
     # Initialize MCP streamable HTTP session manager
     from app.mcp_server import mcp as _mcp_server
@@ -227,7 +232,9 @@ async def lifespan(app: FastAPI):
             await _state["_mcp_cm"].__aexit__(None, None, None)
         except Exception:
             pass
-    for t in [cleanup_task, reminder_task]:
+    for t in [cleanup_task, reminder_task, auto_delete_task]:
+        if t is None:
+            continue
         t.cancel()
         try:
             await t
@@ -361,6 +368,36 @@ async def _skill_reload_loop(skill_engine, interval: int):
             break
         except Exception as e:
             logger.error(f"Skill reload error: {e}")
+
+
+async def _auto_delete_loop(db, tg_app, interval: int = 60):
+    """Sweep ``auto_delete_messages`` every minute, deleting any Telegram
+    messages whose TTL has expired. Survives across uvicorn restarts —
+    pending rows are persisted in SQLite, not in process memory.
+    """
+    from datetime import datetime, timezone
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            due = await db.fetch_due_deletions(now_iso, limit=50)
+            for row in due:
+                try:
+                    await tg_app.bot.delete_message(
+                        chat_id=row["chat_id"], message_id=row["message_id"],
+                    )
+                except Exception as exc:
+                    # Message may have been deleted by user already, or chat
+                    # cleared, or we lack rights — log and move on, mark
+                    # the row as handled either way so we don't loop on it.
+                    logger.debug(
+                        f"auto-delete: skip {row['chat_id']}/{row['message_id']}: {exc}"
+                    )
+                await db.mark_message_deleted(row["id"])
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"auto-delete loop error: {e}")
 
 
 async def _daily_advice_loop(insights_engine, tg_app):

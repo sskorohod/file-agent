@@ -170,10 +170,12 @@ async def main(dry_run: bool, only_id: str | None):
                 metadata_json={
                     "document_type": cl.document_type,
                     "language": parsed.language,
-                    "parser": parsed.parser,
+                    "parser": parsed.parser_used,
                     "pages": parsed.pages,
                     "expiry_date": cl.expiry_date,
                     "skill": cl.skill_name,
+                    "owner": cl.owner,
+                    "display_label": cl.display_label,
                     "reindexed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },
             )

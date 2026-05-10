@@ -194,13 +194,78 @@ class LLMSearch:
         # Drop chunks that don't actually clear the score threshold once we
         # have the best per file — a vector "near match" (score ~0.5) on
         # something only loosely related (e.g. birth certificate to a
-        # passport query) shouldn't take a button slot from real matches.
-        # Keep the gap modest so we still surface multiple actual hits
-        # (e.g. user has 2 passports, both should appear).
+        # passport query) shouldn't take a button slot.
         if file_best:
             top_score = file_best[0][1].score
             file_best = [(fid, best) for (fid, best) in file_best
                          if best.score >= max(MIN_SCORE, top_score - 0.10)]
+
+        # Document-type-aware narrowing. When the user asks for a specific
+        # document type ("найди паспорт", "pay stub", "W-9"), keep ONLY files
+        # whose `metadata.document_type` matches that intent. Stops things
+        # like the I-94 record or birth certificate from leaking into a
+        # passport answer just because they share PII / immigration context.
+        # Multi-passport / multi-payslip cases still surface (we filter by
+        # type, not by uniqueness).
+        TYPE_KEYWORDS = {
+            "passport":           ("passport", "паспорт", "загранпасп"),
+            "driver_license":     ("driver license", "водительск", "права",
+                                   "driving licen", "dl"),
+            "birth_certificate":  ("birth certif", "свидетельств", "о рожден"),
+            "i94_record":         ("i-94", "i94"),
+            "pay_stub":           ("pay stub", "pay-stub", "payslip",
+                                   "расчётны", "расчетны", "зарпл"),
+            "tax_form":           ("w-9", "w9", "w-2", "w2", "1099", "налогов"),
+            "social_security_card": ("ssn", "social security card",
+                                     "номер социального страхования",
+                                     "снилс"),
+            "ead": ("ead", "employment authorization"),
+            "vehicle_registration": ("vehicle reg", "регистрация автомоб",
+                                     "регистрация машин", "техпаспорт"),
+            "lab_result": ("lab result", "анализ", "лабораторн"),
+            "after_visit_summary": ("after visit", "выписк", "после визит"),
+        }
+
+        async def _file_doc_type(fid: str) -> str:
+            if not self.db:
+                return ""
+            try:
+                fr = await self.db.get_file(fid)
+            except Exception:
+                return ""
+            if not fr:
+                return ""
+            try:
+                meta = json.loads(fr.get("metadata_json") or "{}")
+            except Exception:
+                meta = {}
+            return (meta.get("document_type") or "").lower()
+
+        ql = query.strip().lower()
+        wanted_types: set[str] = set()
+        for dt, kws in TYPE_KEYWORDS.items():
+            if any(kw in ql for kw in kws):
+                wanted_types.add(dt)
+        # Driver-license + passport requests also tolerate id_card matches
+        # because users often photograph their EAD/SSN/DL all at once.
+        # But we keep it strict for passport — that's the user's complaint.
+
+        if wanted_types:
+            narrowed: list = []
+            for fid, best in file_best:
+                dt = await _file_doc_type(fid)
+                if dt in wanted_types or any(w in dt for w in wanted_types):
+                    narrowed.append((fid, best))
+            # Only apply the narrow filter if it leaves at least one match —
+            # otherwise we'd return an empty answer when the query keyword
+            # doesn't perfectly line up with any stored document_type.
+            if narrowed:
+                file_best = narrowed
+                logger.info(
+                    f"document_type filter: kept {len(narrowed)} matching "
+                    f"types {wanted_types}"
+                )
+
         seen_files = {
             fid: best.metadata.get("filename", "file")
             for fid, best in file_best[:MAX_CHUNKS_LLM]
