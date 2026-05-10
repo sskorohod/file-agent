@@ -47,8 +47,30 @@ class LLMRetryConfig(BaseModel):
     backoff_base: int = 2
 
 
+class LLMProxyConfig(BaseModel):
+    """Optional uvicorn-managed openai-oauth proxy subprocess.
+
+    By default this is *off* — production manages the proxy via launchd
+    (`com.openai.oauth-proxy` plist with KeepAlive=true). Flip
+    `enabled=True` only if you want uvicorn to own the proxy lifecycle
+    (and disable / unload the launchd job first to avoid port conflict
+    on 10531). See `app/services/proxy_manager.py` for the implementation.
+    """
+
+    enabled: bool = False
+    command: str = "npx openai-oauth"
+    port: int = 10531
+    auto_restart: bool = True
+    health_check_interval: int = 30  # seconds between health pings
+    max_restarts: int = 5  # max restarts within restart_window
+    restart_window: int = 600  # seconds — counter resets after this
+    startup_timeout: int = 30  # max seconds to wait for proxy ready
+    shutdown_timeout: int = 5  # seconds before SIGKILL
+
+
 class LLMConfig(BaseModel):
     default_provider: str = "anthropic"
+    proxy: LLMProxyConfig = LLMProxyConfig()
     models: dict[str, LLMModelConfig] = Field(default_factory=lambda: {
         "classification": LLMModelConfig(
             model="anthropic/claude-3-haiku-20240307",
