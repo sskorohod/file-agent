@@ -142,9 +142,19 @@ docs/
 
 ## External Services
 
+- **LLM proxy (PRIMARY):** `openai-oauth` (https://github.com/EvanZhouDev/openai-oauth)
+  bound to `127.0.0.1:10531/v1`. Backed by the user's ChatGPT account via OAuth
+  (auth file at `~/.codex/auth.json`). Exposes Codex models — `gpt-5.4-mini`,
+  `gpt-5.1`, etc. — through an OpenAI-compatible API. **This is the default
+  way `config.yaml` reaches LLMs**, not direct provider keys. Start manually:
+  `nohup npx -y openai-oauth --port 10531 > logs/openai-oauth.log 2>&1 &`
+  (or via launchd plist `com.openai.oauth-proxy.plist` with KeepAlive=true).
 - **Qdrant:** Docker on ugreen (192.168.1.244), API key required, accessed via SSH tunnel to localhost:6333
-- **Anthropic:** Claude for classification/extraction/search
-- **Google:** Gemini for embedding + vision OCR fallback
+- **Anthropic / OpenAI / Google direct keys:** kept in `.env` as a fallback
+  when the proxy is down; switching `config.yaml` to e.g. `anthropic/claude-haiku-4-5`
+  bypasses the proxy.
+- **Google Gemini:** embedding + vision OCR fallback (used directly via
+  `google-genai` SDK, not through the proxy)
 - **Telegram:** Bot polling mode
 
 ## Gotchas
@@ -171,3 +181,15 @@ docs/
 - **cognee-mcp deps on Python 3.14 arm64:** psycopg2-binary has no
   wheel — `setup.sh` installs `cognee-mcp --no-deps` and pins the
   runtime essentials (fastmcp, mcp) explicitly
+- **`openai-oauth` proxy MUST be running for `config.yaml` defaults to work:**
+  if `127.0.0.1:10531` is dead, every LLM call (classification, extraction,
+  search) silently falls back to `category='uncategorized'`, `summary=''`
+  while the pipeline still logs "Pipeline OK". Symptom: every newly uploaded
+  file lands in `uncategorized` with empty summary; Telegram search returns
+  "❌ Ошибка поиска: Message text is empty". Used to be auto-started by
+  `app/services/proxy_manager.py` (alive only on `feature/encryption-at-rest`,
+  not in main). Until that's restored on main, start the proxy manually
+  (`nohup npx -y openai-oauth --port 10531 ...`) or via launchd. **Do not
+  edit `config.yaml` to "fix" uncategorized files until you've verified the
+  proxy is up** — switching to direct anthropic models loses access to the
+  Codex models the user actually pays for through ChatGPT.
