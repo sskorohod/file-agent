@@ -118,15 +118,17 @@ async def main(dry_run: bool):
     add_dur = time.time() - t0
     print(f"\nadded {ok}/{ok+fail} sources in {add_dur:.0f}s")
 
-    print("\ntriggering cognify (graph extraction)…")
-    t1 = time.time()
-    try:
-        await cog.cognify(dataset=dataset, run_in_background=False)
-        print(f"  cognify done in {time.time()-t1:.0f}s")
-    except (CogneeUnavailable, CogneeError) as exc:
-        print(f"  ✗ cognify: {exc}")
+    # Don't run cognify inline — the long-running graph build would
+    # otherwise race the asyncio loop on shutdown (httpx
+    # AsyncClient.aclose vs aiosqlite worker thread). Use the
+    # standalone `scripts/cognee_cognify.py` (or `make cognee-cognify`)
+    # to kick it off in background AFTER this script exits cleanly.
+    print("\nNext step: run `make cognee-cognify` to build the graph.")
 
-    await cog.shutdown()
+    try:
+        await cog.shutdown()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
