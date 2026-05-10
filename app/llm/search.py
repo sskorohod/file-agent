@@ -150,45 +150,76 @@ class LLMSearch:
                 logger.warning(f"cognee search failed, falling back to vector_store: {e}")
 
         # Step 1: Semantic search (wider net). Pull a few extra hits because
-        # we'll drop anything without a matching SQLite row — vector chunks
-        # without file_id (legacy note vectors, abandoned ingest experiments)
-        # used to win the top slot on short queries by sheer text overlap.
+        # we'll drop anything without a real source row — vector chunks
+        # whose payload doesn't tie back to either a file or a note are
+        # garbage from old ingest experiments and can dominate top-1.
         results = await self.vector_store.search(query, top_k=top_k * 2)
 
-        # Drop hits with no file_id, or whose file row is gone from SQLite.
-        # Without this a single orphan point can dominate the top-1 result
-        # on a 0.69 fuzzy match while real documents at 0.63 sit below it.
+        # Drop hits whose payload has no sane reference back to SQLite.
+        # Two valid kinds:
+        #   • file chunks: payload.type missing or 'file', `file_id` matches
+        #     a row in the `files` table (the document path)
+        #   • note chunks: payload.type == 'note', `note_id` matches a row
+        #     in the `notes` table (the transcript path; PR #11 onward)
         if results and self.db:
             valid = []
             for r in results:
-                if not r.file_id:
-                    continue
-                try:
-                    fr = await self.db.get_file(r.file_id)
-                except Exception:
-                    fr = None
-                if fr:
-                    valid.append(r)
+                pay = getattr(r, "metadata", {}) or {}
+                rtype = (pay.get("type") or "").lower()
+                if rtype == "note":
+                    note_id = pay.get("note_id")
+                    if not note_id:
+                        continue
+                    try:
+                        cur = await self.db.db.execute(
+                            "SELECT 1 FROM notes WHERE id=?", (note_id,)
+                        )
+                        if await cur.fetchone():
+                            valid.append(r)
+                    except Exception:
+                        pass
+                else:
+                    if not r.file_id:
+                        continue
+                    try:
+                        fr = await self.db.get_file(r.file_id)
+                    except Exception:
+                        fr = None
+                    if fr:
+                        valid.append(r)
             results = valid[:top_k]
 
         if not results:
-            return {"text": "🔍 По вашему запросу ничего не найдено.", "file_ids": {}, "cached": False}
+            return {
+                "text": "🔍 По вашему запросу ничего не найдено.",
+                "file_ids": {}, "note_ids": {}, "cached": False,
+            }
 
-        # Step 2: Group by file, pick best chunk per file
+        # Step 2: Group by *source* (file or note), pick best chunk per
+        # source. Note chunks have an empty file_id but a note_id in
+        # payload; without this split every note collapsed into the
+        # same "" bucket.
         filtered = [r for r in results if r.score >= MIN_SCORE]
         if not filtered:
             filtered = results[:1]
 
         from collections import defaultdict
-        by_file = defaultdict(list)
-        for r in filtered:
-            by_file[r.file_id].append(r)
 
-        # Sort files by best chunk score
+        def _key(r):
+            pay = r.metadata or {}
+            if (pay.get("type") or "").lower() == "note":
+                return ("note", str(pay.get("note_id") or ""))
+            return ("file", r.file_id)
+
+        by_src = defaultdict(list)
+        for r in filtered:
+            by_src[_key(r)].append(r)
+
+        # Sort sources by best chunk score
         file_best = []
-        for fid, chunks in by_file.items():
+        for src_key, chunks in by_src.items():
             best = max(chunks, key=lambda c: c.score)
-            file_best.append((fid, best))
+            file_best.append((src_key, best))
         file_best.sort(key=lambda x: x[1].score, reverse=True)
 
         # Drop chunks that don't actually clear the score threshold once we
@@ -252,10 +283,16 @@ class LLMSearch:
 
         if wanted_types:
             narrowed: list = []
-            for fid, best in file_best:
-                dt = await _file_doc_type(fid)
+            for src_key, best in file_best:
+                kind, sid = src_key
+                if kind != "file":
+                    # Notes don't carry a document_type — keep them only
+                    # if the query was generic. For type-specific queries,
+                    # docs must dominate.
+                    continue
+                dt = await _file_doc_type(sid)
                 if dt in wanted_types or any(w in dt for w in wanted_types):
-                    narrowed.append((fid, best))
+                    narrowed.append((src_key, best))
             # Only apply the narrow filter if it leaves at least one match —
             # otherwise we'd return an empty answer when the query keyword
             # doesn't perfectly line up with any stored document_type.
@@ -266,31 +303,55 @@ class LLMSearch:
                     f"types {wanted_types}"
                 )
 
-        seen_files = {
-            fid: best.metadata.get("filename", "file")
-            for fid, best in file_best[:MAX_CHUNKS_LLM]
-        }
+        seen_files: dict[str, str] = {}
+        seen_notes: dict[str, str] = {}
+        for src_key, best in file_best[:MAX_CHUNKS_LLM]:
+            kind, sid = src_key
+            if kind == "note":
+                title = best.metadata.get("title") or ""
+                seen_notes[str(sid)] = title or best.text[:50]
+            else:
+                seen_files[sid] = best.metadata.get("filename", "file")
 
-        # Step 3: Build context from top documents (use full text from DB when available)
+        # Step 3: Build context, pulling full text from the right DB table
         context_parts = []
-        for fid, best in file_best[:MAX_CHUNKS_LLM]:
-            fname = best.metadata.get("filename", "unknown")
-
-            # Try to load full extracted_text from DB for richer answers
+        for src_key, best in file_best[:MAX_CHUNKS_LLM]:
+            kind, sid = src_key
             full_text = None
-            if self.db:
+            display = ""
+
+            if kind == "note" and self.db:
                 try:
-                    file_rec = await self.db.get_file(fid)
-                    if file_rec:
-                        full_text = file_rec.get("extracted_text", "")
-                        fname = file_rec.get("original_name", fname)
+                    cur = await self.db.db.execute(
+                        "SELECT title, content FROM notes WHERE id=?",
+                        (int(sid),),
+                    )
+                    row = await cur.fetchone()
+                    if row:
+                        rd = dict(row)
+                        full_text = rd.get("content") or ""
+                        title = (rd.get("title") or "").strip()
+                        display = title or "Note"
                 except Exception:
                     pass
+                marker = "Note"
+            else:
+                fname = best.metadata.get("filename", "unknown")
+                if self.db:
+                    try:
+                        file_rec = await self.db.get_file(sid)
+                        if file_rec:
+                            full_text = file_rec.get("extracted_text", "")
+                            fname = file_rec.get("original_name", fname)
+                    except Exception:
+                        pass
+                display = fname
+                marker = "Document"
 
             text_source = full_text if full_text else best.text
-            words = text_source.split()
+            words = (text_source or "").split()
             text = " ".join(words[:MAX_WORDS_PER_CHUNK])
-            context_parts.append(f"[Document: {fname}]\n{text}")
+            context_parts.append(f"[{marker}: {display}]\n{text}")
 
         context = "\n\n---\n\n".join(context_parts)
 
@@ -311,7 +372,12 @@ class LLMSearch:
                 messages=[{"role": "user", "content": user_msg}],
                 system=system,
             )
-            result = {"text": response.text, "file_ids": seen_files, "cached": False}
+            result = {
+                "text": response.text,
+                "file_ids": seen_files,
+                "note_ids": seen_notes,
+                "cached": False,
+            }
 
             # Save to cache
             if self.db:
@@ -324,8 +390,13 @@ class LLMSearch:
             lines = [f"🔍 Найдено по «{query}»:\n"]
             for i, r in enumerate(filtered[:3], 1):
                 preview = r.text[:200] + "..." if len(r.text) > 200 else r.text
-                lines.append(f"{i}. {r.metadata.get('filename', '?')}\n{preview}")
-            return {"text": "\n\n".join(lines), "file_ids": seen_files, "cached": False}
+                lines.append(f"{i}. {r.metadata.get('filename', r.metadata.get('title', '?'))}\n{preview}")
+            return {
+                "text": "\n\n".join(lines),
+                "file_ids": seen_files,
+                "note_ids": seen_notes,
+                "cached": False,
+            }
 
     async def _answer_via_cognee(self, query: str, top_k: int) -> dict | None:
         """Route a search through cognee.recall (GRAPH_COMPLETION).

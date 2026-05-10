@@ -1636,6 +1636,18 @@ class BotHandlers:
                         InlineKeyboardButton(f"{icon} {label}", callback_data=f"file:s:{short_key}")
                     )
 
+                # Note buttons (semantic search now matches transcripts too).
+                note_ids = result.get("note_ids", {}) if isinstance(result, dict) else {}
+                for nid, ntitle in note_ids.items():
+                    short = f"n{nid}"
+                    self._pending_files[f"note:{short}"] = int(nid) if str(nid).isdigit() else nid
+                    title = (ntitle or "").strip()[:34] or "Заметка"
+                    keyboard.append(
+                        InlineKeyboardButton(
+                            f"📝 {title}", callback_data=f"note:o:{short}",
+                        )
+                    )
+
                 reply_markup = None
                 if keyboard:
                     # One button per row for better filename readability
