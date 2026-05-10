@@ -100,6 +100,37 @@ async def lifespan(app: FastAPI):
     await skill_engine.load_all()
     _state["skill_engine"] = skill_engine
 
+    # ── Optional: uvicorn-managed openai-oauth proxy ────────────────────
+    # Off by default — production manages the proxy via launchd
+    # (com.openai.oauth-proxy with KeepAlive=true). Enable in config.yaml
+    # under llm.proxy.enabled if you want uvicorn to own the lifecycle
+    # instead. Will refuse to start if port 10531 is already taken (e.g.
+    # by the launchd job you forgot to unload).
+    proxy_manager = None
+    if settings.llm.proxy.enabled:
+        from app.services.proxy_manager import LLMProxyManager, ProxyConfig
+        pcfg = settings.llm.proxy
+        proxy_manager = LLMProxyManager(ProxyConfig(
+            enabled=pcfg.enabled,
+            command=pcfg.command,
+            port=pcfg.port,
+            auto_restart=pcfg.auto_restart,
+            health_check_interval=pcfg.health_check_interval,
+            max_restarts=pcfg.max_restarts,
+            restart_window=pcfg.restart_window,
+            startup_timeout=pcfg.startup_timeout,
+            shutdown_timeout=pcfg.shutdown_timeout,
+        ))
+        ready = await proxy_manager.start()
+        if ready:
+            logger.info(f"LLM proxy ready on port {pcfg.port}")
+        else:
+            logger.warning(
+                f"LLM proxy not ready (port {pcfg.port}); LLM calls "
+                "will fail until it's up. Check 'lsof :10531'."
+            )
+    _state["proxy_manager"] = proxy_manager
+
     from app.llm.router import LLMRouter
     llm_router = LLMRouter(settings.llm, db=db)
     _state["llm_router"] = llm_router
@@ -217,6 +248,11 @@ async def lifespan(app: FastAPI):
             await _state["cognee"].shutdown()
         except Exception:
             pass
+    if _state.get("proxy_manager"):
+        try:
+            await _state["proxy_manager"].stop()
+        except Exception as exc:
+            logger.warning(f"proxy_manager stop failed: {exc}")
     await vector_store.close()
     await db.close()
     logger.info("Shutdown complete")

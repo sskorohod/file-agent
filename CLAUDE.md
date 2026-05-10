@@ -145,10 +145,16 @@ docs/
 - **LLM proxy (PRIMARY):** `openai-oauth` (https://github.com/EvanZhouDev/openai-oauth)
   bound to `127.0.0.1:10531/v1`. Backed by the user's ChatGPT account via OAuth
   (auth file at `~/.codex/auth.json`). Exposes Codex models — `gpt-5.4-mini`,
-  `gpt-5.1`, etc. — through an OpenAI-compatible API. **This is the default
-  way `config.yaml` reaches LLMs**, not direct provider keys. Start manually:
-  `nohup npx -y openai-oauth --port 10531 > logs/openai-oauth.log 2>&1 &`
-  (or via launchd plist `com.openai.oauth-proxy.plist` with KeepAlive=true).
+  `gpt-5.5`, etc. — through an OpenAI-compatible API. **This is the default
+  way `config.yaml` reaches LLMs**, not direct provider keys.
+  Two ways to run it:
+  - **launchd (production default):** `~/Library/LaunchAgents/com.openai.oauth-proxy.plist`
+    with `KeepAlive=true`. Survives reboots, independent of uvicorn.
+  - **uvicorn-managed (opt-in):** flip `llm.proxy.enabled: true` in `config.yaml`.
+    `app/services/proxy_manager.py` then runs `npx openai-oauth` as an asyncio
+    subprocess with health pings, auto-restart, and a stdout ring buffer.
+    **Disable / unload the launchd job first** to avoid the two of them
+    fighting over port 10531.
 - **Qdrant:** Docker on ugreen (192.168.1.244), API key required, accessed via SSH tunnel to localhost:6333
 - **Anthropic / OpenAI / Google direct keys:** kept in `.env` as a fallback
   when the proxy is down; switching `config.yaml` to e.g. `anthropic/claude-haiku-4-5`
