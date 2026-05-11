@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 5
+logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -220,6 +223,29 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending
     ON outbox(status, target, attempts);
 CREATE INDEX IF NOT EXISTS idx_outbox_source
     ON outbox(source_kind, source_id);
+
+-- Sprint P: structured tasks extracted from notes (or added explicitly via
+-- /remind). Schema is union of legacy v1 columns + v6 additions; the
+-- v5→v6 migration ALTERs in the new columns for existing DBs.
+CREATE TABLE IF NOT EXISTS note_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id INTEGER REFERENCES notes(id) ON DELETE CASCADE,
+    description TEXT NOT NULL,
+    priority TEXT DEFAULT 'medium',
+    status TEXT DEFAULT 'open',         -- open|done|archived|pending_confirm
+    due_date TEXT DEFAULT '',
+    done_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    defer_date TEXT,
+    remind_at TEXT,
+    extraction_confidence TEXT DEFAULT 'implicit',  -- explicit|implicit
+    source_span TEXT DEFAULT '',
+    rationale TEXT DEFAULT '',
+    due_text TEXT DEFAULT '',
+    linked_file_id TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_note ON note_tasks(note_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON note_tasks(status);
 """
 
 
@@ -239,9 +265,125 @@ class Database:
         await self._db.executescript(SCHEMA_SQL)
         await self._migrate_v2_to_v3()
         await self._migrate_v3_to_v4()
+        await self._migrate_v5_to_v6()
         await self._db.execute(
             "INSERT OR IGNORE INTO schema_version(version) VALUES(?)", (SCHEMA_VERSION,)
         )
+        await self._db.commit()
+
+    async def _migrate_v5_to_v6(self):
+        """Sprint P (tasks): note_tasks gains structured columns +
+        legacy rows get archived.
+
+        New columns:
+          - defer_date  TEXT  — Things-3 style "don't show until"
+          - remind_at   TEXT  — exact-time push (null = digest-only)
+          - extraction_confidence TEXT — 'explicit' | 'implicit'
+          - source_span TEXT  — JSON [start, end] char offsets
+          - rationale   TEXT  — one-line LLM explanation
+          - due_text    TEXT  — raw "завтра в 9" before parsing
+          - linked_file_id TEXT — task came from a document, not a note
+
+        Legacy 35 rows from the old pipeline are flipped to
+        ``status='archived'`` so /todos and /patterns don't mix them
+        with newly-extracted tasks.
+        """
+        for ddl in (
+            "ALTER TABLE note_tasks ADD COLUMN defer_date TEXT",
+            "ALTER TABLE note_tasks ADD COLUMN remind_at TEXT",
+            "ALTER TABLE note_tasks ADD COLUMN extraction_confidence TEXT DEFAULT 'implicit'",
+            "ALTER TABLE note_tasks ADD COLUMN source_span TEXT DEFAULT ''",
+            "ALTER TABLE note_tasks ADD COLUMN rationale TEXT DEFAULT ''",
+            "ALTER TABLE note_tasks ADD COLUMN due_text TEXT DEFAULT ''",
+            "ALTER TABLE note_tasks ADD COLUMN linked_file_id TEXT DEFAULT ''",
+        ):
+            try:
+                await self._db.execute(ddl)
+            except Exception as exc:
+                if "duplicate column name" in str(exc).lower():
+                    continue
+                raise
+
+        # One-shot legacy archival. We pin a date marker rather than
+        # ``WHERE created_at < datetime('now')`` so a re-run doesn't
+        # archive newly-extracted tasks. The cutoff is "before P1
+        # release" — anything created before this migration first ran.
+        try:
+            await self._db.execute(
+                "UPDATE note_tasks SET status='archived' "
+                "WHERE status NOT IN ('done','archived') "
+                "  AND (rationale IS NULL OR rationale = '') "
+                "  AND id <= COALESCE("
+                "    (SELECT MAX(id) FROM note_tasks "
+                "     WHERE created_at < '2026-05-10 04:00:00'), 0)"
+            )
+        except Exception as exc:
+            logger.warning(f"legacy note_tasks archival: {exc}")
+        # The legacy table has note_id NOT NULL — we now also accept
+        # standalone tasks (/remind without a reply). SQLite cannot drop
+        # the constraint in place, so rebuild the table once if needed.
+        try:
+            cur = await self._db.execute("PRAGMA table_info(note_tasks)")
+            cols = [dict(zip(("cid", "name", "type", "notnull",
+                              "dflt_value", "pk"), r))
+                    for r in await cur.fetchall()]
+            note_id_col = next((c for c in cols if c["name"] == "note_id"), None)
+            if note_id_col and note_id_col["notnull"]:
+                # Commit any pending implicit txn from the ALTER TABLE
+                # / archival statements above before starting the rebuild.
+                await self._db.commit()
+                await self._db.execute(
+                    "CREATE TABLE note_tasks_new (\n"
+                    "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+                    "  note_id INTEGER REFERENCES notes(id) ON DELETE CASCADE,\n"
+                    "  description TEXT NOT NULL,\n"
+                    "  priority TEXT DEFAULT 'medium',\n"
+                    "  status TEXT DEFAULT 'open',\n"
+                    "  due_date TEXT DEFAULT '',\n"
+                    "  done_at TEXT,\n"
+                    "  created_at TEXT NOT NULL DEFAULT (datetime('now')),\n"
+                    "  defer_date TEXT,\n"
+                    "  remind_at TEXT,\n"
+                    "  extraction_confidence TEXT DEFAULT 'implicit',\n"
+                    "  source_span TEXT DEFAULT '',\n"
+                    "  rationale TEXT DEFAULT '',\n"
+                    "  due_text TEXT DEFAULT '',\n"
+                    "  linked_file_id TEXT DEFAULT ''\n"
+                    ")"
+                )
+                await self._db.execute(
+                    "INSERT INTO note_tasks_new "
+                    "(id, note_id, description, priority, status, due_date, "
+                    " done_at, created_at, defer_date, remind_at, "
+                    " extraction_confidence, source_span, rationale, due_text, "
+                    " linked_file_id) "
+                    "SELECT id, note_id, description, priority, status, due_date, "
+                    "       done_at, created_at, defer_date, remind_at, "
+                    "       extraction_confidence, source_span, rationale, due_text, "
+                    "       linked_file_id FROM note_tasks"
+                )
+                await self._db.execute("DROP TABLE note_tasks")
+                await self._db.execute(
+                    "ALTER TABLE note_tasks_new RENAME TO note_tasks"
+                )
+                await self._db.commit()
+        except Exception as exc:
+            logger.warning(f"note_tasks rebuild skipped: {exc}")
+
+        # Add the remind index *after* the column exists.
+        try:
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_remind "
+                "ON note_tasks(status, remind_at)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_note ON note_tasks(note_id)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_status ON note_tasks(status)"
+            )
+        except Exception:
+            pass
         await self._db.commit()
 
     async def _migrate_v2_to_v3(self):
@@ -583,6 +725,97 @@ class Database:
                 "SELECT * FROM notes ORDER BY created_at DESC LIMIT ?", (limit,)
             )
         return [dict(r) for r in await cursor.fetchall()]
+
+    # ── Tasks (Sprint P) ──────────────────────────────────────────────
+
+    async def enqueue_task(
+        self,
+        description: str,
+        *,
+        note_id: int | None = None,
+        priority: str = "medium",
+        due_text: str = "",
+        remind_at: str | None = None,
+        defer_date: str | None = None,
+        extraction_confidence: str = "explicit",
+        source_span: str = "",
+        rationale: str = "",
+        linked_file_id: str = "",
+        status: str = "open",
+    ) -> int:
+        cur = await self.db.execute(
+            "INSERT INTO note_tasks (note_id, description, priority, status, "
+            "due_text, remind_at, defer_date, extraction_confidence, "
+            "source_span, rationale, linked_file_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (note_id, description, priority, status, due_text, remind_at,
+             defer_date, extraction_confidence, source_span, rationale,
+             linked_file_id),
+        )
+        await self.db.commit()
+        return cur.lastrowid
+
+    async def get_task(self, task_id: int) -> dict | None:
+        cur = await self.db.execute(
+            "SELECT * FROM note_tasks WHERE id=?", (task_id,)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def set_task_remind_at(self, task_id: int, remind_at: str | None):
+        await self.db.execute(
+            "UPDATE note_tasks SET remind_at=? WHERE id=?",
+            (remind_at, task_id),
+        )
+        await self.db.commit()
+
+    async def mark_task_done(self, task_id: int):
+        await self.db.execute(
+            "UPDATE note_tasks SET status='done', done_at=datetime('now') "
+            "WHERE id=?",
+            (task_id,),
+        )
+        await self.db.commit()
+
+    async def archive_task(self, task_id: int):
+        await self.db.execute(
+            "UPDATE note_tasks SET status='archived' WHERE id=?", (task_id,)
+        )
+        await self.db.commit()
+
+    async def snooze_task(self, task_id: int, new_remind_at: str):
+        await self.db.execute(
+            "UPDATE note_tasks SET status='open', remind_at=? WHERE id=?",
+            (new_remind_at, task_id),
+        )
+        await self.db.commit()
+
+    async def open_tasks_with_remind(self) -> list[dict]:
+        """Open tasks that have a future `remind_at` — used at startup
+        to re-register JobQueue.run_once after a restart."""
+        cur = await self.db.execute(
+            "SELECT * FROM note_tasks "
+            "WHERE status='open' AND remind_at IS NOT NULL "
+            "  AND remind_at > datetime('now') "
+            "ORDER BY remind_at"
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def due_tasks_for_digest(self, cap: int = 5) -> list[dict]:
+        """Open tasks suitable for the morning digest:
+        no per-task push (remind_at NULL or already past) and not deferred."""
+        cur = await self.db.execute(
+            "SELECT * FROM note_tasks "
+            "WHERE status='open' "
+            "  AND (remind_at IS NULL OR remind_at <= datetime('now','+24 hours')) "
+            "  AND (defer_date IS NULL OR defer_date <= date('now')) "
+            "ORDER BY "
+            "  CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
+            "  COALESCE(remind_at, created_at) "
+            "LIMIT ?",
+            (cap + 1,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
 
     # ── Chat History (persistent dialog memory) ───────────────────────
 

@@ -60,6 +60,43 @@ def get_owner_chat_id() -> int | None:
 MAX_TELEGRAM_FILE_SIZE = 20 * 1024 * 1024
 
 
+async def _fire_task_reminder(context):
+    """JobQueue callback — push the task to the user with snooze/done
+    inline buttons. Looked up live by task_id so a /todos done in the
+    meantime suppresses the firing."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    data = context.job.data or {}
+    task_id = data.get("task_id")
+    chat_id = data.get("chat_id")
+    if not task_id or not chat_id:
+        return
+    db = context.application.bot_data.get("db")
+    if db is None:
+        return
+    try:
+        task = await db.get_task(int(task_id))
+    except Exception:
+        return
+    if not task or task.get("status") != "open":
+        return  # done/archived/snoozed elsewhere — skip
+    buttons = [[
+        InlineKeyboardButton("✅", callback_data=f"task:done:{task_id}"),
+        InlineKeyboardButton("😴 1ч", callback_data=f"task:snooze:{task_id}:1h"),
+        InlineKeyboardButton("🌅 Завтра", callback_data=f"task:snooze:{task_id}:tomorrow"),
+        InlineKeyboardButton("📅 4ч",  callback_data=f"task:snooze:{task_id}:4h"),
+    ]]
+    text = f"⏰ <b>Напоминание</b>\n📌 {task['description']}"
+    if task.get("due_text"):
+        text += f"\n<i>{task['due_text']}</i>"
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    except Exception:
+        logger.exception("task reminder send failed")
+
+
 def _log_task_exception(task: asyncio.Task):
     """Callback to log unhandled exceptions in background tasks."""
     if not task.cancelled() and task.exception():
@@ -74,6 +111,7 @@ class BotHandlers:
         self.search_fn = search_fn  # injected from LLM search module
         self.analytics_fn = analytics_fn  # injected from LLM analytics module
         self._pending_files: dict[str, str] = {}  # short_key → full file_id
+        self._tg_app = None  # set on register() so callbacks can reach JobQueue
 
     COMMANDS = [
         BotCommand("dashboard", "Дашборд (mood / energy / sentiment)"),
@@ -90,6 +128,7 @@ class BotHandlers:
         BotCommand("insights", "AI обзор"),
         BotCommand("patterns", "Паттерны поведения (аномалии, связи, todo)"),
         BotCommand("todos", "Открытые задачи из заметок"),
+        BotCommand("remind", "Напоминание: /remind <время> <текст>"),
         BotCommand("skills", "Скиллы"),
         BotCommand("help", "Список команд"),
         BotCommand("start", "Начать работу"),
@@ -97,6 +136,8 @@ class BotHandlers:
 
     def register(self, app: Application):
         """Register all handlers with the bot application."""
+        self._tg_app = app
+        app.bot_data["db"] = self.pipeline.db
         app.add_handler(CommandHandler("start", self.cmd_start))
         app.add_handler(CommandHandler("help", self.cmd_help))
         app.add_handler(CommandHandler("search", self.cmd_search))
@@ -136,6 +177,9 @@ class BotHandlers:
         app.add_handler(CallbackQueryHandler(self.handle_note_delete_cancel, pattern="^note:dx:"))
         app.add_handler(CallbackQueryHandler(self.handle_notes_page, pattern="^np:"))
         app.add_handler(CallbackQueryHandler(self.handle_dashboard_period, pattern="^dash:"))
+        app.add_handler(CallbackQueryHandler(self.handle_task_action, pattern="^task:"))
+        app.add_handler(CommandHandler("remind", self.cmd_remind))
+        app.add_handler(CommandHandler("cancel_reminder", self.cmd_cancel_reminder))
 
         # Text messages → search / Q&A
         app.add_handler(MessageHandler(
@@ -667,20 +711,27 @@ class BotHandlers:
                 "(«надо позвонить врачу») — извлечётся автоматически."
             )
             return
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         prio_marker = {"high": "🔴", "medium": "🟡", "low": "🟢"}
-        lines = [f"<b>✅ Открытые задачи — {len(rows)}</b>\n"]
-        for r in rows:
+        header = f"<b>✅ Открытые задачи — {len(rows)}</b>"
+        await update.message.reply_text(header, parse_mode="HTML")
+        for r in rows[:15]:
             mark = prio_marker.get(r.get("priority", "medium"), "⚪")
             desc = (r.get("description") or "")[:120]
             note_date = (r.get("created_at") or "")[:10]
-            lines.append(f"{mark} {desc}")
-            lines.append(f"   <i>из заметки {note_date}</i>")
-        text = "\n".join(lines)
-        if len(text) > 3900:
-            text = text[:3900] + "\n…"
-        await update.message.reply_text(
-            text, parse_mode="HTML", disable_web_page_preview=True,
-        )
+            tid = r["id"]
+            row1 = [
+                InlineKeyboardButton("✅", callback_data=f"task:done:{tid}"),
+                InlineKeyboardButton("😴 1ч", callback_data=f"task:snooze:{tid}:1h"),
+                InlineKeyboardButton("🌅 Завтра", callback_data=f"task:snooze:{tid}:tomorrow"),
+                InlineKeyboardButton("✗", callback_data=f"task:drop:{tid}"),
+            ]
+            await update.message.reply_text(
+                f"{mark} {desc}\n<i>из заметки {note_date}</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([row1]),
+                disable_web_page_preview=True,
+            )
 
     async def _render_notes_page(self, update_or_query, context, page: int = 0):
         """Render a page of notes — `<date> · <title>` per row, button per
@@ -1629,6 +1680,50 @@ class BotHandlers:
         except Exception as e:
             logger.debug(f"cognee note ingest skipped: {e}")
 
+        # 5c. Sprint P — extract structured tasks from raw text and
+        # auto-add (status='open'). Footer-undo lets the user drop any
+        # mistake in one tap.
+        extracted_tasks: list[tuple[int, str]] = []  # [(task_id, short_desc)]
+        try:
+            from app.llm.task_extractor import extract_tasks
+            from app.services.date_nlp import parse_due, to_iso
+            tasks = await extract_tasks(text, language="ru")
+            for t in tasks:
+                remind_at_iso: str | None = None
+                if t.due_text:
+                    dt = parse_due(t.due_text, base=now)
+                    if dt is not None:
+                        remind_at_iso = to_iso(dt)
+                tid = await db.enqueue_task(
+                    description=t.description,
+                    note_id=note_id,
+                    priority=t.priority,
+                    due_text=t.due_text,
+                    remind_at=remind_at_iso,
+                    extraction_confidence=t.confidence,
+                    source_span=json_mod.dumps(list(t.source_span))
+                        if t.source_span else "",
+                    rationale=t.rationale,
+                    linked_file_id=linked_file_id,
+                    status="open",
+                )
+                extracted_tasks.append((tid, t.description[:60]))
+                # Schedule the per-task push if there's a future remind_at.
+                if remind_at_iso and self._tg_app is not None:
+                    try:
+                        from datetime import datetime as _dt
+                        when = _dt.strptime(remind_at_iso, "%Y-%m-%d %H:%M:%S")
+                        if when > _dt.now():
+                            self._tg_app.job_queue.run_once(
+                                _fire_task_reminder, when=when,
+                                data={"task_id": tid, "chat_id": chat_id},
+                                name=f"task_{tid}",
+                            )
+                    except Exception as exc:
+                        logger.debug(f"task scheduler failed: {exc}")
+        except Exception as exc:
+            logger.debug(f"task extraction skipped: {exc}")
+
         # 6. Reply
         reply_parts = [f"📝 **{title}**", "", summary]
         if tags:
@@ -1640,7 +1735,26 @@ class BotHandlers:
         if action_items:
             reply_parts.append("✅ " + "; ".join(action_items))
 
-        await callback_query.edit_message_text("\n".join(reply_parts))
+        if extracted_tasks:
+            reply_parts.append("")
+            for _, desc in extracted_tasks:
+                reply_parts.append(f"📌 {desc}")
+
+        keyboard = None
+        if extracted_tasks:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            buttons = []
+            for tid, desc in extracted_tasks[:3]:
+                short = (desc[:18] + "…") if len(desc) > 18 else desc
+                buttons.append([InlineKeyboardButton(
+                    f"✗ убрать «{short}»",
+                    callback_data=f"task:drop:{tid}",
+                )])
+            keyboard = InlineKeyboardMarkup(buttons)
+
+        await callback_query.edit_message_text(
+            "\n".join(reply_parts), reply_markup=keyboard,
+        )
 
     @owner_only
     async def handle_reminder_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1667,6 +1781,182 @@ class BotHandlers:
             )
             await db.db.commit()
             await query.edit_message_text(query.message.text + "\n\n⏰ Отложено на 1 день.")
+
+    @owner_only
+    async def handle_task_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Sprint P — task button callbacks: done / snooze / drop / keep."""
+        from datetime import datetime, timedelta
+        from app.services.date_nlp import to_iso
+
+        query = update.callback_query
+        await query.answer()
+        parts = query.data.split(":")  # task:done:42 / task:snooze:42:1h / task:drop:42
+        if len(parts) < 3:
+            return
+        action = parts[1]
+        try:
+            task_id = int(parts[2])
+        except ValueError:
+            return
+        db = self.pipeline.db
+        task = await db.get_task(task_id)
+        if not task:
+            await query.edit_message_text(query.message.text + "\n\n(задача уже удалена)")
+            return
+
+        original = query.message.text or ""
+
+        if action == "done":
+            await db.mark_task_done(task_id)
+            self._cancel_task_job(task_id)
+            await query.edit_message_text(
+                f"~~{original}~~\n\n✅ Выполнено", parse_mode="Markdown",
+            )
+            return
+
+        if action == "drop":
+            await db.archive_task(task_id)
+            self._cancel_task_job(task_id)
+            # Drop the matching pin line from the parent message footer.
+            new_text = "\n".join(
+                ln for ln in original.splitlines()
+                if not ln.startswith(f"📌 {task['description'][:60]}")
+            ) or "📝 (заметка сохранена)"
+            try:
+                await query.edit_message_text(new_text)
+            except Exception:
+                pass
+            return
+
+        if action == "snooze" and len(parts) >= 4:
+            bucket = parts[3]
+            now = datetime.now()
+            target = {
+                "15m": now + timedelta(minutes=15),
+                "1h":  now + timedelta(hours=1),
+                "4h":  now + timedelta(hours=4),
+                "tonight":  now.replace(hour=21, minute=0, second=0, microsecond=0)
+                            + (timedelta(days=1) if now.hour >= 21 else timedelta()),
+                "tomorrow": (now + timedelta(days=1)).replace(
+                    hour=9, minute=0, second=0, microsecond=0),
+            }.get(bucket)
+            if target is None:
+                return
+            iso = to_iso(target)
+            await db.snooze_task(task_id, iso)
+            self._cancel_task_job(task_id)
+            if self._tg_app is not None:
+                self._tg_app.job_queue.run_once(
+                    _fire_task_reminder, when=target,
+                    data={"task_id": task_id,
+                          "chat_id": query.message.chat_id},
+                    name=f"task_{task_id}",
+                )
+            await query.edit_message_text(
+                f"{original}\n\n😴 Отложено до {iso[:16]}"
+            )
+            return
+
+    def _cancel_task_job(self, task_id: int):
+        if self._tg_app is None:
+            return
+        for job in self._tg_app.job_queue.get_jobs_by_name(f"task_{task_id}"):
+            job.schedule_removal()
+
+    @owner_only
+    async def cmd_remind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """`/remind <время> <текст>` — explicit reminder, no LLM.
+
+        Reply-to-message form: `/remind <время>` uses the replied text
+        as the body and links to the original note/file."""
+        from datetime import datetime
+        from app.services.date_nlp import parse_due, to_iso
+
+        msg = update.message
+        args_text = (msg.text or "").split(maxsplit=1)
+        if len(args_text) < 2:
+            await msg.reply_text(
+                "⏰ <b>/remind</b> <i>время</i> <i>текст</i>\n"
+                "пример: /remind через 2 часа купить молоко\n"
+                "или: /remind завтра в 9 — на reply'е к заметке",
+                parse_mode="HTML",
+            )
+            return
+        rest = args_text[1].strip()
+
+        replied = msg.reply_to_message
+        replied_text = (replied.text or replied.caption or "") if replied else ""
+
+        # Greedy: try the longest leading prefix that parses as a date,
+        # leaving the suffix as the description.
+        when = None
+        time_text = ""
+        body_text = ""
+        words = rest.split()
+        for cut in range(min(len(words), 6), 0, -1):
+            head = " ".join(words[:cut])
+            cand = parse_due(head, base=datetime.now())
+            if cand is not None:
+                when = cand
+                time_text = head
+                body_text = " ".join(words[cut:]).strip()
+                break
+        if when is None and replied_text:
+            cand = parse_due(rest, base=datetime.now())
+            if cand is not None:
+                when = cand
+                time_text = rest
+                body_text = replied_text[:200]
+        if when is None:
+            await msg.reply_text(
+                "❓ Не понял время. Попробуй: «через 2 часа», «завтра в 9», «в пятницу»."
+            )
+            return
+        if not body_text:
+            body_text = replied_text[:200] or "напоминание"
+
+        if when <= datetime.now():
+            await msg.reply_text("❓ Время уже прошло.")
+            return
+
+        db = self.pipeline.db
+        tid = await db.enqueue_task(
+            description=body_text[:200],
+            due_text=time_text,
+            remind_at=to_iso(when),
+            extraction_confidence="explicit",
+            priority="medium",
+            rationale="/remind",
+            status="open",
+        )
+        if self._tg_app is not None:
+            self._tg_app.job_queue.run_once(
+                _fire_task_reminder, when=when,
+                data={"task_id": tid, "chat_id": msg.chat_id},
+                name=f"task_{tid}",
+            )
+        await msg.reply_text(
+            f"⏰ Напомню {to_iso(when)[:16]}\n📌 {body_text[:60]}\n"
+            f"<i>id={tid} · /cancel_reminder {tid}</i>",
+            parse_mode="HTML",
+        )
+
+    @owner_only
+    async def cmd_cancel_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.message
+        args = (msg.text or "").split()
+        if len(args) < 2 or not args[1].isdigit():
+            await msg.reply_text("использование: /cancel_reminder <id>")
+            return
+        tid = int(args[1])
+        db = self.pipeline.db
+        task = await db.get_task(tid)
+        if not task:
+            await msg.reply_text(f"задача {tid} не найдена")
+            return
+        await db.archive_task(tid)
+        self._cancel_task_job(tid)
+        await msg.reply_text(f"✅ Напоминание {tid} отменено")
 
     @owner_only
     async def handle_dedup_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
