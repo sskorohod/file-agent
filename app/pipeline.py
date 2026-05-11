@@ -587,7 +587,10 @@ class Pipeline:
                 metadata={
                     "category": classification.category,
                     "filename": file_record.original_name,
+                    "original_name": file_record.original_name,
                     "document_type": classification.document_type,
+                    "summary": classification.summary or "",
+                    "tags": classification.tags or [],
                 },
                 file_bytes=file_data,
                 mime_type=file_record.mime_type,

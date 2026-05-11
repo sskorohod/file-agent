@@ -12,7 +12,7 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -266,6 +266,7 @@ class Database:
         await self._migrate_v2_to_v3()
         await self._migrate_v3_to_v4()
         await self._migrate_v5_to_v6()
+        await self._migrate_v6_to_v7()
         await self._db.execute(
             "INSERT OR IGNORE INTO schema_version(version) VALUES(?)", (SCHEMA_VERSION,)
         )
@@ -385,6 +386,72 @@ class Database:
         except Exception:
             pass
         await self._db.commit()
+
+    async def _migrate_v6_to_v7(self):
+        """Sprint Q (search): rebuild ``files_fts`` so it indexes
+        ``summary`` and ``extracted_text`` alongside name/category/tags.
+
+        The legacy virtual table was created with only three columns,
+        so the hybrid FTS+vector search couldn't see the body of any
+        document. Triggers `files_ai` / `files_au` already insert all
+        five columns — the table just needed widening + a one-shot
+        rebuild from current `files` content.
+        """
+        try:
+            cur = await self._db.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='files_fts'"
+            )
+            row = await cur.fetchone()
+            current_sql = (row[0] if row else "") or ""
+            needs_rebuild = (
+                "extracted_text" not in current_sql
+                or "summary" not in current_sql
+            )
+            if not needs_rebuild:
+                return
+
+            await self._db.commit()
+            # Drop old triggers + table, recreate, repopulate from files.
+            await self._db.execute("DROP TRIGGER IF EXISTS files_ai")
+            await self._db.execute("DROP TRIGGER IF EXISTS files_au")
+            await self._db.execute("DROP TRIGGER IF EXISTS files_ad")
+            await self._db.execute("DROP TABLE IF EXISTS files_fts")
+            await self._db.execute(
+                "CREATE VIRTUAL TABLE files_fts USING fts5("
+                "  original_name, category, tags, summary, extracted_text,"
+                "  content=files, content_rowid=rowid)"
+            )
+            await self._db.execute(
+                "CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN "
+                "  INSERT INTO files_fts(rowid, original_name, category, tags, summary, extracted_text) "
+                "  VALUES (new.rowid, new.original_name, new.category, new.tags, new.summary, new.extracted_text); "
+                "END"
+            )
+            await self._db.execute(
+                "CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN "
+                "  INSERT INTO files_fts(files_fts, rowid, original_name, category, tags, summary, extracted_text) "
+                "  VALUES ('delete', old.rowid, old.original_name, old.category, old.tags, old.summary, old.extracted_text); "
+                "  INSERT INTO files_fts(rowid, original_name, category, tags, summary, extracted_text) "
+                "  VALUES (new.rowid, new.original_name, new.category, new.tags, new.summary, new.extracted_text); "
+                "END"
+            )
+            await self._db.execute(
+                "CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN "
+                "  INSERT INTO files_fts(files_fts, rowid, original_name, category, tags, summary, extracted_text) "
+                "  VALUES ('delete', old.rowid, old.original_name, old.category, old.tags, old.summary, old.extracted_text); "
+                "END"
+            )
+            await self._db.execute(
+                "INSERT INTO files_fts(rowid, original_name, category, tags, summary, extracted_text) "
+                "SELECT rowid, original_name, category, tags, "
+                "       COALESCE(summary,''), COALESCE(extracted_text,'') "
+                "FROM files"
+            )
+            await self._db.commit()
+            logger.info("files_fts rebuilt with summary + extracted_text")
+        except Exception as exc:
+            logger.warning(f"files_fts rebuild skipped: {exc}")
 
     async def _migrate_v2_to_v3(self):
         """Phase 5b: dev_projects gains cognee_email + cognee_token.
@@ -530,16 +597,62 @@ class Database:
         return row[0] if row else 0
 
     async def search_files(self, query: str, limit: int = 20) -> list[dict]:
-        """Full-text search across file metadata."""
+        """Full-text search across file metadata + summary + body.
+
+        Wraps the user's input in a permissive FTS5 query — each token
+        becomes a prefix match, joined with implicit AND. Special FTS
+        characters are stripped so an accidental colon doesn't crash
+        the parse.
+        """
+        fts_query = self._build_fts_query(query)
+        if not fts_query:
+            return []
+        try:
+            cursor = await self.db.execute(
+                """SELECT f.*, bm25(files_fts) AS bm25_score FROM files f
+                   JOIN files_fts fts ON f.rowid = fts.rowid
+                   WHERE files_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (fts_query, limit),
+            )
+            return [dict(r) for r in await cursor.fetchall()]
+        except Exception as exc:
+            logger.debug(f"FTS search failed for {query!r}: {exc}")
+            return []
+
+    async def tag_search_files(self, tag: str, limit: int = 20) -> list[dict]:
+        """Exact tag match. Returns every file whose `tags` JSON array
+        literally contains the given tag string (case-insensitive)."""
+        if not tag:
+            return []
+        like = f'%"{tag.lower()}"%'
         cursor = await self.db.execute(
-            """SELECT f.* FROM files f
-               JOIN files_fts fts ON f.rowid = fts.rowid
-               WHERE files_fts MATCH ?
-               ORDER BY rank
-               LIMIT ?""",
-            (query, limit),
+            "SELECT * FROM files WHERE lower(tags) LIKE ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (like, limit),
         )
         return [dict(r) for r in await cursor.fetchall()]
+
+    @staticmethod
+    def _build_fts_query(raw: str) -> str:
+        """Turn user input into a safe FTS5 MATCH expression.
+
+        - strips characters that FTS5 treats as operators
+        - splits on whitespace; tokens shorter than 2 chars are dropped
+        - each token gets a `*` prefix-wildcard so "passp" matches "passport"
+        - tokens joined with AND (default for FTS5)
+        """
+        import re
+        cleaned = re.sub(r'[\"\(\)\:\^\*\-\+\~]', " ", raw or "").strip()
+        if not cleaned:
+            return ""
+        toks = [t for t in cleaned.split() if len(t) >= 2]
+        if not toks:
+            return ""
+        # Quote each token to disable special-char parsing inside it,
+        # then add a trailing `*` for prefix match.
+        return " ".join(f'"{t}"*' for t in toks)
 
     async def get_stats(self) -> dict:
         """Get aggregate stats."""

@@ -211,8 +211,15 @@ class VectorStore:
         """Embed raw file bytes using Gemini multimodal. Returns None if unsupported."""
         import time as _time
         if self.embedding_config.provider != "gemini" or not self._google_api_key:
+            logger.error(
+                "multimodal embedding skipped: provider=%s, key=%s — "
+                "image-only files will rely on OCR text only",
+                self.embedding_config.provider,
+                "set" if self._google_api_key else "MISSING",
+            )
             return None
         if mime_type not in GEMINI_MULTIMODAL_MIMES:
+            logger.debug(f"multimodal not supported for mime={mime_type}")
             return None
         if len(file_bytes) > _MAX_MULTIMODAL_BYTES:
             logger.warning(f"File too large for multimodal embedding: {len(file_bytes)} bytes")
@@ -277,6 +284,13 @@ class VectorStore:
         # 1. Multimodal embedding (raw file bytes)
         if file_bytes and mime_type:
             mm_vector = self.embed_multimodal(file_bytes, mime_type)
+            if mm_vector is None and mime_type in GEMINI_MULTIMODAL_MIMES \
+                    and len(file_bytes) <= _MAX_MULTIMODAL_BYTES:
+                logger.error(
+                    f"multimodal embed returned None for supported mime "
+                    f"{mime_type} (file_id={file_id}) — image search will "
+                    f"fall back to OCR text only"
+                )
             if mm_vector:
                 point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_id}:mm"))
                 points.append(PointStruct(
@@ -293,7 +307,44 @@ class VectorStore:
                     },
                 ))
 
-        # 2. Text chunk embeddings
+        # 2. Header chunk — concatenation of original_name, summary, tags,
+        # category. Acts as a robust anchor when OCR-extracted body is
+        # garbled (image cards, low-quality scans). Indexed at chunk_index
+        # = -3 so it sorts before regular body chunks and never collides
+        # with the multimodal point (-1) or the legacy chunk_index 0.
+        header_parts: list[str] = []
+        if meta.get("original_name"):
+            header_parts.append(str(meta["original_name"]))
+        if meta.get("summary"):
+            header_parts.append(str(meta["summary"]))
+        if meta.get("category"):
+            header_parts.append(str(meta["category"]))
+        if meta.get("tags"):
+            tags_field = meta["tags"]
+            if isinstance(tags_field, str):
+                header_parts.append(tags_field)
+            elif isinstance(tags_field, (list, tuple)):
+                header_parts.append(" ".join(str(t) for t in tags_field))
+        header_text = "  ".join(p for p in header_parts if p).strip()
+        if header_text:
+            try:
+                header_vec = self.embed([header_text])[0]
+                point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{file_id}:header"))
+                points.append(PointStruct(
+                    id=point_id,
+                    vector=header_vec,
+                    payload={
+                        "file_id": file_id,
+                        "chunk_index": -3,
+                        "text": header_text[:1000],
+                        "embedding_type": "header",
+                        **meta,
+                    },
+                ))
+            except Exception as exc:
+                logger.warning(f"header embed failed for {file_id}: {exc}")
+
+        # 3. Text chunk embeddings
         chunks = self.chunk_text(text) if text.strip() else []
         if chunks:
             vectors = self.embed(chunks)

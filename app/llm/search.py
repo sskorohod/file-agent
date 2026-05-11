@@ -132,13 +132,32 @@ class LLMSearch:
                 logger.info(f"Cache hit for: {query[:50]}")
                 return {**cached, "cached": True}
 
-        # Step 0.5: Try cognee first when configured. Graceful fallback to
-        # the vector_store path if anything goes wrong, so search never
-        # silently breaks.
+        # Step 0.3: Pre-check tag short-circuit before cognee. If the user
+        # is clearly asking for a specific document type ("ssn", "паспорт",
+        # "виза"), we want to surface the FILE with clickable buttons,
+        # not a cognee dictionary definition without file_ids.
+        likely_doc_query = False
+        if self.db and 1 <= len(query.strip().split()) <= 3:
+            try:
+                _probe = await self.db.tag_search_files(query.strip().lower(), limit=1)
+                likely_doc_query = bool(_probe)
+            except Exception:
+                pass
+            # Also short-circuit known synonyms even if the literal tag isn't a match.
+            if not likely_doc_query:
+                known_doc_terms = {"ssn", "паспорт", "passport", "visa", "виза",
+                                   "ead", "w-9", "w9", "i-94", "tax", "налог",
+                                   "driver license", "права", "социальное страхование"}
+                likely_doc_query = query.strip().lower() in known_doc_terms
+
+        # Step 0.5: Try cognee first when configured AND the query isn't
+        # clearly a file lookup. Graceful fallback to vector_store path
+        # if anything goes wrong, so search never silently breaks.
         if (
             self.cognee is not None
             and getattr(self.cognee.config, "use_for_search", False)
             and self.cognee.healthy
+            and not likely_doc_query
         ):
             try:
                 cog_result = await self._answer_via_cognee(query, top_k=top_k)
@@ -149,11 +168,152 @@ class LLMSearch:
             except Exception as e:
                 logger.warning(f"cognee search failed, falling back to vector_store: {e}")
 
+        # Step 0.7: Tag short-circuit. When the user types a single-word
+        # query that's clearly a tag (ssn, passport, паспорт, w-9), pull
+        # those files via JSON LIKE on `files.tags`. Vector + FTS still
+        # run after, but starting with the exact-tag set means image-only
+        # documents (where OCR fails) can't drop off the result list.
+        tag_hits: list = []
+        q_clean = query.strip().lower()
+        if self.db and 1 <= len(q_clean.split()) <= 3 and len(q_clean) <= 40:
+            # Map common synonyms to the canonical English tags used by
+            # the classifier prompt.
+            tag_aliases = {
+                "паспорт": "passport",
+                "passport": "passport",
+                "ssn": "ssn",
+                "соц страх": "ssn",
+                "социальное страхование": "ssn",
+                "номер социального страхования": "ssn",
+                "виза": "visa",
+                "visa": "visa",
+                "налог": "tax",
+                "tax": "tax",
+                "налоги": "tax",
+                "tin": "tin",
+                "w-9": "w-9",
+                "w9": "w-9",
+                "ead": "employment-authorization",
+                "i-94": "i-94",
+                "i94": "i-94",
+                "uscis": "uscis",
+                "права": "driver-license",
+                "driver license": "driver-license",
+                "водительск": "driver-license",
+            }
+            target_tag = tag_aliases.get(q_clean, q_clean)
+            try:
+                tag_hits = await self.db.tag_search_files(target_tag, limit=top_k)
+            except Exception as exc:
+                logger.debug(f"tag short-circuit failed: {exc}")
+                tag_hits = []
+
         # Step 1: Semantic search (wider net). Pull a few extra hits because
         # we'll drop anything without a real source row — vector chunks
         # whose payload doesn't tie back to either a file or a note are
         # garbage from old ingest experiments and can dominate top-1.
         results = await self.vector_store.search(query, top_k=top_k * 2)
+
+        # Step 1.4: Splice tag short-circuit results in at a high score
+        # (0.85) so they always beat weak vector near-matches.
+        # For files already present in the vector results, BOOST their
+        # score instead of duplicating — otherwise the score-prune step
+        # would discard them in favour of unrelated high-score note hits
+        # (the classic "Паспорт"-titled note beating the actual passport
+        # PDF problem).
+        if tag_hits:
+            from app.storage.vectors import SearchResult
+            by_file: dict[str, "SearchResult"] = {
+                r.file_id: r for r in results
+                if getattr(r, "file_id", "")
+                and not (r.metadata or {}).get("type") == "note"
+            }
+            for row in tag_hits:
+                fid = row.get("id") or ""
+                if not fid:
+                    continue
+                if fid in by_file:
+                    existing = by_file[fid]
+                    if existing.score < 0.85:
+                        existing.score = 0.85
+                        existing.metadata = {
+                            **(existing.metadata or {}),
+                            "via": "tag",
+                        }
+                    continue
+                results.append(SearchResult(
+                    file_id=fid,
+                    chunk_index=-4,
+                    text=(row.get("summary") or row.get("original_name") or "")[:400],
+                    score=0.85,
+                    metadata={
+                        "type": "file",
+                        "original_name": row.get("original_name", ""),
+                        "via": "tag",
+                    },
+                ))
+            results.sort(key=lambda r: r.score, reverse=True)
+
+        # Step 1.5: Hybrid — add FTS5 keyword hits.
+        # Even with Gemini embeddings, image-only files (passports, SSN
+        # cards) often have garbled OCR and miss vector queries entirely.
+        # The keyword path catches them via tags / original_name / summary.
+        # We splice synthetic SearchResult rows in at scores tuned so a
+        # strong FTS hit on tags beats a weak vector near-match.
+        if self.db:
+            try:
+                fts_rows = await self.db.search_files(query, limit=top_k * 2)
+            except Exception as exc:
+                logger.debug(f"FTS search skipped: {exc}")
+                fts_rows = []
+            if fts_rows:
+                from app.storage.vectors import SearchResult
+                by_file: dict[str, "SearchResult"] = {
+                    r.file_id: r for r in results
+                    if getattr(r, "file_id", "")
+                    and not (r.metadata or {}).get("type") == "note"
+                }
+                # bm25 returns *negative* numbers (lower is better).
+                # Convert via 1/(1+|bm25|) → (0, 1]; first row is strongest.
+                for i, row in enumerate(fts_rows):
+                    fid = row.get("id") or ""
+                    if not fid:
+                        continue
+                    bm25 = abs(float(row.get("bm25_score") or i + 1))
+                    fts_score = 1.0 / (1.0 + bm25 * 0.5)
+                    # Tag-or-name hits get a bonus: the user typed a literal
+                    # word that's in the filename or tag JSON, that's a
+                    # strong signal regardless of vector distance.
+                    q_low = query.lower()
+                    name_l = (row.get("original_name") or "").lower()
+                    tags_l = (row.get("tags") or "").lower()
+                    if any(tok in name_l or tok in tags_l
+                           for tok in q_low.split() if len(tok) >= 2):
+                        fts_score = max(fts_score, 0.78)
+                    if fid in by_file:
+                        existing = by_file[fid]
+                        if existing.score < fts_score:
+                            existing.score = fts_score
+                            existing.metadata = {
+                                **(existing.metadata or {}),
+                                "via": "fts",
+                            }
+                        continue
+                    snippet = (row.get("summary") or
+                               row.get("extracted_text") or "")[:400]
+                    results.append(SearchResult(
+                        file_id=fid,
+                        chunk_index=-2,
+                        text=snippet,
+                        score=fts_score,
+                        metadata={
+                            "type": "file",
+                            "original_name": row.get("original_name", ""),
+                            "via": "fts",
+                        },
+                    ))
+                # Re-sort by score so the merged pool keeps the right order.
+                results.sort(key=lambda r: r.score, reverse=True)
 
         # Drop hits whose payload has no sane reference back to SQLite.
         # Two valid kinds:
@@ -226,10 +386,17 @@ class LLMSearch:
         # have the best per file — a vector "near match" (score ~0.5) on
         # something only loosely related (e.g. birth certificate to a
         # passport query) shouldn't take a button slot.
+        # Exception: keep any source whose match came via tag/FTS path
+        # (chunk_index < -1) even if the absolute score is a touch lower
+        # than the top vector hit — those carry the strongest signal that
+        # the user wants THIS particular document.
         if file_best:
             top_score = file_best[0][1].score
+            score_floor = max(MIN_SCORE, top_score - 0.10)
             file_best = [(fid, best) for (fid, best) in file_best
-                         if best.score >= max(MIN_SCORE, top_score - 0.10)]
+                         if best.score >= score_floor
+                            or best.chunk_index in (-3, -4)
+                            or best.metadata.get("via") in ("tag", "fts")]
 
         # Document-type-aware narrowing. When the user asks for a specific
         # document type ("найди паспорт", "pay stub", "W-9"), keep ONLY files
@@ -311,7 +478,11 @@ class LLMSearch:
                 title = best.metadata.get("title") or ""
                 seen_notes[str(sid)] = title or best.text[:50]
             else:
-                seen_files[sid] = best.metadata.get("filename", "file")
+                seen_files[sid] = (
+                    best.metadata.get("filename")
+                    or best.metadata.get("original_name")
+                    or "file"
+                )
 
         # Step 3: Build context, pulling full text from the right DB table
         context_parts = []
@@ -423,6 +594,35 @@ class LLMSearch:
             text = first.get("text") or first.get("raw", {}).get("value") or ""
         if not text:
             return None
+
+        # Cognee likes to return confident "I don't see X in the graph"
+        # answers even when the actual document is sitting in SQLite +
+        # Qdrant. That tanked /search ssn for months: cognee said "no SSN
+        # mentioned" → we returned that → user never saw the SSN card.
+        # If the answer reads like a denial, fall back to vector search.
+        low = text.lower()
+        denial_markers = (
+            "no ssn", "no mention", "is not mentioned", "no information",
+            "no documents", "not found", "could not find",
+            "не упомин", "не найден", "нет информации",
+            "no explicit", "не содержит", "отсутству",
+        )
+        if any(m in low for m in denial_markers):
+            logger.info(f"cognee returned denial for {query!r} — falling back to vector")
+            return None
+
+        # Cognee dictionary-style answers (a generic definition of the
+        # query term, no reference to actual user data) are also useless
+        # — the user wants their document, not Wikipedia. Heuristic:
+        # answer starts with the bolded query and lacks any FAG-specific
+        # signal like a file name, date, or person.
+        q_low = query.lower().strip()
+        if (text.lower().startswith(f"**{q_low}") or
+                text.lower().startswith(f"a **{q_low}") or
+                text.lower().startswith(f"the **{q_low}")):
+            if not any(s in low for s in (".pdf", ".jpg", "20", "номер", "card", "passport id")):
+                logger.info(f"cognee returned dictionary def for {query!r} — falling back")
+                return None
 
         # cognee owns its data ids — they don't map to FAG file UUIDs, so
         # the Telegram inline-button keyboard is empty for cognee answers.
