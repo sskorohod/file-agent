@@ -138,17 +138,40 @@ class LLMSearch:
         # not a cognee dictionary definition without file_ids.
         likely_doc_query = False
         if self.db and 1 <= len(query.strip().split()) <= 3:
+            ql = query.strip().lower()
+            # 1. Literal tag match.
             try:
-                _probe = await self.db.tag_search_files(query.strip().lower(), limit=1)
+                _probe = await self.db.tag_search_files(ql, limit=1)
                 likely_doc_query = bool(_probe)
             except Exception:
                 pass
-            # Also short-circuit known synonyms even if the literal tag isn't a match.
+            # 2. Hard-coded synonyms + plural variants.
             if not likely_doc_query:
                 known_doc_terms = {"ssn", "паспорт", "passport", "visa", "виза",
-                                   "ead", "w-9", "w9", "i-94", "tax", "налог",
+                                   "ead", "w-9", "w9", "i-94", "i94", "tax", "налог",
+                                   "biometric", "biometrics", "uscis", "invoice",
+                                   "счёт", "приём", "appointment",
                                    "driver license", "права", "социальное страхование"}
-                likely_doc_query = query.strip().lower() in known_doc_terms
+                likely_doc_query = ql in known_doc_terms
+            # 3. Last-resort: FTS hit on the name/tag/summary path. If the
+            # user typed a literal word from a file we own, this is a doc
+            # lookup, not a "what is X" question for cognee.
+            if not likely_doc_query:
+                try:
+                    _fts = await self.db.search_files(ql, limit=1)
+                    if _fts:
+                        # Confirm the hit is name/tag/summary, not just
+                        # extracted body text (the body matches almost
+                        # anything for English queries).
+                        row = _fts[0]
+                        name = (row.get("original_name") or "").lower()
+                        tags = (row.get("tags") or "").lower()
+                        summary = (row.get("summary") or "").lower()
+                        if any(tok in name or tok in tags or tok in summary
+                               for tok in ql.split() if len(tok) >= 3):
+                            likely_doc_query = True
+                except Exception:
+                    pass
 
         # Step 0.5: Try cognee first when configured AND the query isn't
         # clearly a file lookup. Graceful fallback to vector_store path
