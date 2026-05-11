@@ -230,6 +230,31 @@ async def lifespan(app: FastAPI):
         anomaly_task = asyncio.create_task(
             _anomaly_nudge_loop(db, tg_app, interval=1800)
         )
+        # Sprint P — re-register JobQueue.run_once for every open task
+        # with a future remind_at. Crash-safe: restarts don't lose pushes.
+        try:
+            from datetime import datetime as _dt
+            from app.bot.handlers import _fire_task_reminder, get_owner_chat_id
+            owner = get_owner_chat_id()
+            resumed = 0
+            for row in await db.open_tasks_with_remind():
+                try:
+                    when = _dt.strptime(row["remind_at"], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+                if when <= _dt.now():
+                    continue
+                tg_app.job_queue.run_once(
+                    _fire_task_reminder, when=when,
+                    data={"task_id": row["id"],
+                          "chat_id": owner or 0},
+                    name=f"task_{row['id']}",
+                )
+                resumed += 1
+            if resumed:
+                logger.info(f"resumed {resumed} task reminders")
+        except Exception as exc:
+            logger.warning(f"task reminder resume failed: {exc}")
 
     # Initialize MCP streamable HTTP session manager
     from app.mcp_server import mcp as _mcp_server
@@ -720,7 +745,7 @@ async def _on_this_day_loop(db, tg_app):
     """Sprint L — daily 09:00 trip down memory lane."""
     from datetime import datetime, timedelta
     from app.bot.handlers import get_owner_chat_id
-    from app.services.digests import build_on_this_day
+    from app.services.digests import build_on_this_day, build_morning_tasks_digest
 
     while True:
         try:
@@ -739,6 +764,11 @@ async def _on_this_day_loop(db, tg_app):
             if text:
                 await tg_app.bot.send_message(
                     chat_id=chat_id, text=text, parse_mode="HTML",
+                )
+            tasks_text = await build_morning_tasks_digest(db)
+            if tasks_text:
+                await tg_app.bot.send_message(
+                    chat_id=chat_id, text=tasks_text, parse_mode="HTML",
                 )
         except asyncio.CancelledError:
             break

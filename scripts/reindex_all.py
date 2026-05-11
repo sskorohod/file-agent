@@ -190,9 +190,11 @@ async def main(dry_run: bool, only_id: str | None):
                     mime_type=f.get("mime_type", "") or "",
                     metadata={
                         "filename": name,
+                        "original_name": name,
                         "category": cl.category,
                         "document_type": cl.document_type or "",
                         "tags": cl.tags,
+                        "summary": cl.summary or "",
                     },
                 )
             except Exception as e:

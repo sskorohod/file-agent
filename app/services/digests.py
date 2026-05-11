@@ -147,6 +147,45 @@ async def build_weekly_digest(db) -> str | None:
     return "\n".join(lines)
 
 
+# ── Morning tasks digest (Sprint P) ────────────────────────────────────────
+
+
+async def build_morning_tasks_digest(db, cap: int = 5) -> str | None:
+    """List the top open tasks at 09:00 — those without a per-task push,
+    or whose push is far enough away that the user benefits from a
+    scoreboard. Returns None if nothing pending."""
+    rows = await _fetch_all(
+        db,
+        "SELECT id, description, priority, due_text, remind_at "
+        "FROM note_tasks "
+        "WHERE status='open' "
+        "  AND (remind_at IS NULL OR remind_at > datetime('now','+24 hours')) "
+        "  AND (defer_date IS NULL OR defer_date <= date('now')) "
+        "ORDER BY "
+        "  CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
+        "  COALESCE(remind_at, created_at) "
+        "LIMIT ?",
+        (cap + 1,),
+    )
+    if not rows:
+        return None
+    prio_marker = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+    lines = ["<b>📋 Задачи на сегодня</b>", ""]
+    shown = rows[:cap]
+    for r in shown:
+        mark = prio_marker.get(r.get("priority", "medium"), "⚪")
+        desc = (r.get("description") or "")[:120]
+        suffix = ""
+        if r.get("due_text"):
+            suffix = f" <i>· {r['due_text']}</i>"
+        lines.append(f"{mark} {desc}{suffix}")
+    if len(rows) > cap:
+        lines.append(f"\n<i>+{len(rows) - cap} ещё в /todos</i>")
+    else:
+        lines.append("\n<i>/todos для управления</i>")
+    return "\n".join(lines)
+
+
 # ── On This Day ────────────────────────────────────────────────────────────
 
 

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 5
+logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -220,6 +223,29 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending
     ON outbox(status, target, attempts);
 CREATE INDEX IF NOT EXISTS idx_outbox_source
     ON outbox(source_kind, source_id);
+
+-- Sprint P: structured tasks extracted from notes (or added explicitly via
+-- /remind). Schema is union of legacy v1 columns + v6 additions; the
+-- v5→v6 migration ALTERs in the new columns for existing DBs.
+CREATE TABLE IF NOT EXISTS note_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id INTEGER REFERENCES notes(id) ON DELETE CASCADE,
+    description TEXT NOT NULL,
+    priority TEXT DEFAULT 'medium',
+    status TEXT DEFAULT 'open',         -- open|done|archived|pending_confirm
+    due_date TEXT DEFAULT '',
+    done_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    defer_date TEXT,
+    remind_at TEXT,
+    extraction_confidence TEXT DEFAULT 'implicit',  -- explicit|implicit
+    source_span TEXT DEFAULT '',
+    rationale TEXT DEFAULT '',
+    due_text TEXT DEFAULT '',
+    linked_file_id TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_note ON note_tasks(note_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON note_tasks(status);
 """
 
 
@@ -239,10 +265,193 @@ class Database:
         await self._db.executescript(SCHEMA_SQL)
         await self._migrate_v2_to_v3()
         await self._migrate_v3_to_v4()
+        await self._migrate_v5_to_v6()
+        await self._migrate_v6_to_v7()
         await self._db.execute(
             "INSERT OR IGNORE INTO schema_version(version) VALUES(?)", (SCHEMA_VERSION,)
         )
         await self._db.commit()
+
+    async def _migrate_v5_to_v6(self):
+        """Sprint P (tasks): note_tasks gains structured columns +
+        legacy rows get archived.
+
+        New columns:
+          - defer_date  TEXT  — Things-3 style "don't show until"
+          - remind_at   TEXT  — exact-time push (null = digest-only)
+          - extraction_confidence TEXT — 'explicit' | 'implicit'
+          - source_span TEXT  — JSON [start, end] char offsets
+          - rationale   TEXT  — one-line LLM explanation
+          - due_text    TEXT  — raw "завтра в 9" before parsing
+          - linked_file_id TEXT — task came from a document, not a note
+
+        Legacy 35 rows from the old pipeline are flipped to
+        ``status='archived'`` so /todos and /patterns don't mix them
+        with newly-extracted tasks.
+        """
+        for ddl in (
+            "ALTER TABLE note_tasks ADD COLUMN defer_date TEXT",
+            "ALTER TABLE note_tasks ADD COLUMN remind_at TEXT",
+            "ALTER TABLE note_tasks ADD COLUMN extraction_confidence TEXT DEFAULT 'implicit'",
+            "ALTER TABLE note_tasks ADD COLUMN source_span TEXT DEFAULT ''",
+            "ALTER TABLE note_tasks ADD COLUMN rationale TEXT DEFAULT ''",
+            "ALTER TABLE note_tasks ADD COLUMN due_text TEXT DEFAULT ''",
+            "ALTER TABLE note_tasks ADD COLUMN linked_file_id TEXT DEFAULT ''",
+        ):
+            try:
+                await self._db.execute(ddl)
+            except Exception as exc:
+                if "duplicate column name" in str(exc).lower():
+                    continue
+                raise
+
+        # One-shot legacy archival. We pin a date marker rather than
+        # ``WHERE created_at < datetime('now')`` so a re-run doesn't
+        # archive newly-extracted tasks. The cutoff is "before P1
+        # release" — anything created before this migration first ran.
+        try:
+            await self._db.execute(
+                "UPDATE note_tasks SET status='archived' "
+                "WHERE status NOT IN ('done','archived') "
+                "  AND (rationale IS NULL OR rationale = '') "
+                "  AND id <= COALESCE("
+                "    (SELECT MAX(id) FROM note_tasks "
+                "     WHERE created_at < '2026-05-10 04:00:00'), 0)"
+            )
+        except Exception as exc:
+            logger.warning(f"legacy note_tasks archival: {exc}")
+        # The legacy table has note_id NOT NULL — we now also accept
+        # standalone tasks (/remind without a reply). SQLite cannot drop
+        # the constraint in place, so rebuild the table once if needed.
+        try:
+            cur = await self._db.execute("PRAGMA table_info(note_tasks)")
+            cols = [dict(zip(("cid", "name", "type", "notnull",
+                              "dflt_value", "pk"), r))
+                    for r in await cur.fetchall()]
+            note_id_col = next((c for c in cols if c["name"] == "note_id"), None)
+            if note_id_col and note_id_col["notnull"]:
+                # Commit any pending implicit txn from the ALTER TABLE
+                # / archival statements above before starting the rebuild.
+                await self._db.commit()
+                await self._db.execute(
+                    "CREATE TABLE note_tasks_new (\n"
+                    "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+                    "  note_id INTEGER REFERENCES notes(id) ON DELETE CASCADE,\n"
+                    "  description TEXT NOT NULL,\n"
+                    "  priority TEXT DEFAULT 'medium',\n"
+                    "  status TEXT DEFAULT 'open',\n"
+                    "  due_date TEXT DEFAULT '',\n"
+                    "  done_at TEXT,\n"
+                    "  created_at TEXT NOT NULL DEFAULT (datetime('now')),\n"
+                    "  defer_date TEXT,\n"
+                    "  remind_at TEXT,\n"
+                    "  extraction_confidence TEXT DEFAULT 'implicit',\n"
+                    "  source_span TEXT DEFAULT '',\n"
+                    "  rationale TEXT DEFAULT '',\n"
+                    "  due_text TEXT DEFAULT '',\n"
+                    "  linked_file_id TEXT DEFAULT ''\n"
+                    ")"
+                )
+                await self._db.execute(
+                    "INSERT INTO note_tasks_new "
+                    "(id, note_id, description, priority, status, due_date, "
+                    " done_at, created_at, defer_date, remind_at, "
+                    " extraction_confidence, source_span, rationale, due_text, "
+                    " linked_file_id) "
+                    "SELECT id, note_id, description, priority, status, due_date, "
+                    "       done_at, created_at, defer_date, remind_at, "
+                    "       extraction_confidence, source_span, rationale, due_text, "
+                    "       linked_file_id FROM note_tasks"
+                )
+                await self._db.execute("DROP TABLE note_tasks")
+                await self._db.execute(
+                    "ALTER TABLE note_tasks_new RENAME TO note_tasks"
+                )
+                await self._db.commit()
+        except Exception as exc:
+            logger.warning(f"note_tasks rebuild skipped: {exc}")
+
+        # Add the remind index *after* the column exists.
+        try:
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_remind "
+                "ON note_tasks(status, remind_at)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_note ON note_tasks(note_id)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_status ON note_tasks(status)"
+            )
+        except Exception:
+            pass
+        await self._db.commit()
+
+    async def _migrate_v6_to_v7(self):
+        """Sprint Q (search): rebuild ``files_fts`` so it indexes
+        ``summary`` and ``extracted_text`` alongside name/category/tags.
+
+        The legacy virtual table was created with only three columns,
+        so the hybrid FTS+vector search couldn't see the body of any
+        document. Triggers `files_ai` / `files_au` already insert all
+        five columns — the table just needed widening + a one-shot
+        rebuild from current `files` content.
+        """
+        try:
+            cur = await self._db.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='files_fts'"
+            )
+            row = await cur.fetchone()
+            current_sql = (row[0] if row else "") or ""
+            needs_rebuild = (
+                "extracted_text" not in current_sql
+                or "summary" not in current_sql
+            )
+            if not needs_rebuild:
+                return
+
+            await self._db.commit()
+            # Drop old triggers + table, recreate, repopulate from files.
+            await self._db.execute("DROP TRIGGER IF EXISTS files_ai")
+            await self._db.execute("DROP TRIGGER IF EXISTS files_au")
+            await self._db.execute("DROP TRIGGER IF EXISTS files_ad")
+            await self._db.execute("DROP TABLE IF EXISTS files_fts")
+            await self._db.execute(
+                "CREATE VIRTUAL TABLE files_fts USING fts5("
+                "  original_name, category, tags, summary, extracted_text,"
+                "  content=files, content_rowid=rowid)"
+            )
+            await self._db.execute(
+                "CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN "
+                "  INSERT INTO files_fts(rowid, original_name, category, tags, summary, extracted_text) "
+                "  VALUES (new.rowid, new.original_name, new.category, new.tags, new.summary, new.extracted_text); "
+                "END"
+            )
+            await self._db.execute(
+                "CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN "
+                "  INSERT INTO files_fts(files_fts, rowid, original_name, category, tags, summary, extracted_text) "
+                "  VALUES ('delete', old.rowid, old.original_name, old.category, old.tags, old.summary, old.extracted_text); "
+                "  INSERT INTO files_fts(rowid, original_name, category, tags, summary, extracted_text) "
+                "  VALUES (new.rowid, new.original_name, new.category, new.tags, new.summary, new.extracted_text); "
+                "END"
+            )
+            await self._db.execute(
+                "CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN "
+                "  INSERT INTO files_fts(files_fts, rowid, original_name, category, tags, summary, extracted_text) "
+                "  VALUES ('delete', old.rowid, old.original_name, old.category, old.tags, old.summary, old.extracted_text); "
+                "END"
+            )
+            await self._db.execute(
+                "INSERT INTO files_fts(rowid, original_name, category, tags, summary, extracted_text) "
+                "SELECT rowid, original_name, category, tags, "
+                "       COALESCE(summary,''), COALESCE(extracted_text,'') "
+                "FROM files"
+            )
+            await self._db.commit()
+            logger.info("files_fts rebuilt with summary + extracted_text")
+        except Exception as exc:
+            logger.warning(f"files_fts rebuild skipped: {exc}")
 
     async def _migrate_v2_to_v3(self):
         """Phase 5b: dev_projects gains cognee_email + cognee_token.
@@ -388,16 +597,62 @@ class Database:
         return row[0] if row else 0
 
     async def search_files(self, query: str, limit: int = 20) -> list[dict]:
-        """Full-text search across file metadata."""
+        """Full-text search across file metadata + summary + body.
+
+        Wraps the user's input in a permissive FTS5 query — each token
+        becomes a prefix match, joined with implicit AND. Special FTS
+        characters are stripped so an accidental colon doesn't crash
+        the parse.
+        """
+        fts_query = self._build_fts_query(query)
+        if not fts_query:
+            return []
+        try:
+            cursor = await self.db.execute(
+                """SELECT f.*, bm25(files_fts) AS bm25_score FROM files f
+                   JOIN files_fts fts ON f.rowid = fts.rowid
+                   WHERE files_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (fts_query, limit),
+            )
+            return [dict(r) for r in await cursor.fetchall()]
+        except Exception as exc:
+            logger.debug(f"FTS search failed for {query!r}: {exc}")
+            return []
+
+    async def tag_search_files(self, tag: str, limit: int = 20) -> list[dict]:
+        """Exact tag match. Returns every file whose `tags` JSON array
+        literally contains the given tag string (case-insensitive)."""
+        if not tag:
+            return []
+        like = f'%"{tag.lower()}"%'
         cursor = await self.db.execute(
-            """SELECT f.* FROM files f
-               JOIN files_fts fts ON f.rowid = fts.rowid
-               WHERE files_fts MATCH ?
-               ORDER BY rank
-               LIMIT ?""",
-            (query, limit),
+            "SELECT * FROM files WHERE lower(tags) LIKE ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (like, limit),
         )
         return [dict(r) for r in await cursor.fetchall()]
+
+    @staticmethod
+    def _build_fts_query(raw: str) -> str:
+        """Turn user input into a safe FTS5 MATCH expression.
+
+        - strips characters that FTS5 treats as operators
+        - splits on whitespace; tokens shorter than 2 chars are dropped
+        - each token gets a `*` prefix-wildcard so "passp" matches "passport"
+        - tokens joined with AND (default for FTS5)
+        """
+        import re
+        cleaned = re.sub(r'[\"\(\)\:\^\*\-\+\~]', " ", raw or "").strip()
+        if not cleaned:
+            return ""
+        toks = [t for t in cleaned.split() if len(t) >= 2]
+        if not toks:
+            return ""
+        # Quote each token to disable special-char parsing inside it,
+        # then add a trailing `*` for prefix match.
+        return " ".join(f'"{t}"*' for t in toks)
 
     async def get_stats(self) -> dict:
         """Get aggregate stats."""
@@ -583,6 +838,97 @@ class Database:
                 "SELECT * FROM notes ORDER BY created_at DESC LIMIT ?", (limit,)
             )
         return [dict(r) for r in await cursor.fetchall()]
+
+    # ── Tasks (Sprint P) ──────────────────────────────────────────────
+
+    async def enqueue_task(
+        self,
+        description: str,
+        *,
+        note_id: int | None = None,
+        priority: str = "medium",
+        due_text: str = "",
+        remind_at: str | None = None,
+        defer_date: str | None = None,
+        extraction_confidence: str = "explicit",
+        source_span: str = "",
+        rationale: str = "",
+        linked_file_id: str = "",
+        status: str = "open",
+    ) -> int:
+        cur = await self.db.execute(
+            "INSERT INTO note_tasks (note_id, description, priority, status, "
+            "due_text, remind_at, defer_date, extraction_confidence, "
+            "source_span, rationale, linked_file_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (note_id, description, priority, status, due_text, remind_at,
+             defer_date, extraction_confidence, source_span, rationale,
+             linked_file_id),
+        )
+        await self.db.commit()
+        return cur.lastrowid
+
+    async def get_task(self, task_id: int) -> dict | None:
+        cur = await self.db.execute(
+            "SELECT * FROM note_tasks WHERE id=?", (task_id,)
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def set_task_remind_at(self, task_id: int, remind_at: str | None):
+        await self.db.execute(
+            "UPDATE note_tasks SET remind_at=? WHERE id=?",
+            (remind_at, task_id),
+        )
+        await self.db.commit()
+
+    async def mark_task_done(self, task_id: int):
+        await self.db.execute(
+            "UPDATE note_tasks SET status='done', done_at=datetime('now') "
+            "WHERE id=?",
+            (task_id,),
+        )
+        await self.db.commit()
+
+    async def archive_task(self, task_id: int):
+        await self.db.execute(
+            "UPDATE note_tasks SET status='archived' WHERE id=?", (task_id,)
+        )
+        await self.db.commit()
+
+    async def snooze_task(self, task_id: int, new_remind_at: str):
+        await self.db.execute(
+            "UPDATE note_tasks SET status='open', remind_at=? WHERE id=?",
+            (new_remind_at, task_id),
+        )
+        await self.db.commit()
+
+    async def open_tasks_with_remind(self) -> list[dict]:
+        """Open tasks that have a future `remind_at` — used at startup
+        to re-register JobQueue.run_once after a restart."""
+        cur = await self.db.execute(
+            "SELECT * FROM note_tasks "
+            "WHERE status='open' AND remind_at IS NOT NULL "
+            "  AND remind_at > datetime('now') "
+            "ORDER BY remind_at"
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def due_tasks_for_digest(self, cap: int = 5) -> list[dict]:
+        """Open tasks suitable for the morning digest:
+        no per-task push (remind_at NULL or already past) and not deferred."""
+        cur = await self.db.execute(
+            "SELECT * FROM note_tasks "
+            "WHERE status='open' "
+            "  AND (remind_at IS NULL OR remind_at <= datetime('now','+24 hours')) "
+            "  AND (defer_date IS NULL OR defer_date <= date('now')) "
+            "ORDER BY "
+            "  CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
+            "  COALESCE(remind_at, created_at) "
+            "LIMIT ?",
+            (cap + 1,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
 
     # ── Chat History (persistent dialog memory) ───────────────────────
 

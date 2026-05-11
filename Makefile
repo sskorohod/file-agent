@@ -1,7 +1,7 @@
 .PHONY: install dev test lint format clean \
 	cognee-install cognee-start cognee-stop cognee-logs cognee-status cognee-spike2 \
 	cognee-mcp-start cognee-mcp-stop cognee-mcp-logs \
-	reindex reindex-notes docs-wiki wiki-build wiki-clean notes-decrypt \
+	reindex reindex-notes reembed-images docs-wiki wiki-build wiki-clean notes-decrypt \
 	memory-doctor memory-doctor-fix notes-reenrich \
 	cognee-cognify cognee-cognify-foreground
 
@@ -87,6 +87,12 @@ docs-wiki:
 # decrypt or schema change.
 reindex-notes:
 	.venv/bin/python scripts/reindex_notes.py
+
+# Re-embed image-only files (SSN cards, passports, driver licences) via
+# Gemini multimodal + add a header chunk so search finds them even when
+# OCR text is garbled. Idempotent — safe to rerun.
+reembed-images:
+	.venv/bin/python scripts/reembed_images.py
 
 # Decrypt any FAGE-encrypted residue in notes-related tables. Idempotent.
 notes-decrypt:

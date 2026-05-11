@@ -316,6 +316,27 @@ class Pipeline:
             except Exception:
                 pass
 
+            # Step 9.4: Sprint P — extract document deadlines (USCIS,
+            # medical, bills) into `reminders`. Non-fatal — text might
+            # not contain any deadline.
+            try:
+                from app.services.doc_deadlines import extract_deadlines
+                for d in extract_deadlines(
+                    parse_result.text or "",
+                    classification.category if classification else "",
+                    classification.document_type if classification else "",
+                ):
+                    try:
+                        await self.db.create_reminder(
+                            file_id=file_record.id,
+                            remind_at=d["remind_at"],
+                            message=d["message"],
+                        )
+                    except Exception as e:
+                        logger.debug(f"deadline reminder skipped: {e}")
+            except Exception as exc:
+                logger.debug(f"doc deadline extractor failed: {exc}")
+
             # Step 9.5: Cognee ingest (non-fatal — never breaks the pipeline).
             # Skips when sidecar is down, text is too short, or category is junk.
             if self._should_cognee_ingest(parse_result, classification):
@@ -566,7 +587,10 @@ class Pipeline:
                 metadata={
                     "category": classification.category,
                     "filename": file_record.original_name,
+                    "original_name": file_record.original_name,
                     "document_type": classification.document_type,
+                    "summary": classification.summary or "",
+                    "tags": classification.tags or [],
                 },
                 file_bytes=file_data,
                 mime_type=file_record.mime_type,
